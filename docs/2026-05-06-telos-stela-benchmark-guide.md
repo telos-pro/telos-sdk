@@ -96,14 +96,15 @@ $PY -m stela.scripts.run_swebench_one \
 > 把 `PYTHONPATH=...` 内联进命令是最稳的写法；如果当前 shell 已经
 > `export PYTHONPATH=/Users/george/Code` 可以省略前缀。
 
-跑完后 `/tmp/stela-telos-runs/` 下生成 4 个文件：
+跑完后 `/tmp/stela-telos-runs/` 下生成 5 个文件：
 
 | 文件 | 内容 |
 |---|---|
-| `telos-<inst>.patch`           | `git diff HEAD`，喂给 evaluator |
-| `telos-<inst>.trajectory.json` | Hermes 风格 conversations |
-| `telos-<inst>.result.json`     | duration / api_calls / completed |
-| `telos-<inst>.usage.jsonl`     | 每次 LLM 调用一行：raw + 归一化 token 计数 |
+| `telos-<inst>.patch`             | `git diff HEAD`，嗂给 evaluator |
+| `telos-<inst>.trajectory.json`   | Hermes 风格 conversations |
+| `telos-<inst>.result.json`       | duration / api_calls / completed |
+| `telos-<inst>.usage.jsonl`       | 每次 LLM 调用一行：raw + 归一化 token 计数 |
+| `telos-<inst>.prompt_trace.jsonl`| **每次调用一行**：prompt 构建快照 + 前缀稳定性 + cache 命中 |
 
 ### 挑实例
 
@@ -117,6 +118,54 @@ ids = [json.loads(l)['instance_id']
        for l in open('$TEF/benchmark/datasets/swe-bench-verified.jsonl')]
 print('\n'.join(random.sample(ids, 5)))
 "
+```
+
+或者直接用批量 runner（见 §4），它内置了 `-n N --seed S` 采样。
+
+---
+
+## 1.5 看 prompt 构建 & cache 命中 trace
+
+每次跑完会多一份 `<tag>.prompt_trace.jsonl`，记录每次 LLM 调用的 6 个快照：
+
+| 字段 | 含义 |
+|---|---|
+| `input`                  | caller 传入的原始 messages / tools 统计 |
+| `ir_after_parse`         | telos harness 解析后的 IR（按 band 计 blocks/chars）|
+| `ir_after_canonicalize`  | Bridge canonicalize + band-reorder 后 |
+| `plan`                   | mark slot 名与 routing_key |
+| `wire`                   | 真正发出去的 chat-completions 结构 |
+| `prefix.prefix_stability`| 与上一调用 wire 的公共前缀 / 上一调用总长（0~1）|
+| `cache.{raw_input,cache_read,output,cache_share}` | 归一化后的 token 计数 |
+
+### 命令行阅读
+
+```bash
+$PY -m stela.scripts.show_prompt_trace \
+    /tmp/stela-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
+```
+
+输出例（1 行 = 1 次 LLM 调用）：
+
+```
+  #  role-counts          wire chars  prefix%   raw_in    cache    out  cache%  plan
+  1  s=1 u=1                     983      -        251      512     88   67.1%   -
+  5  s=1 u=1 a=4 t=4           5,747   84.4%       274    2,048    138   88.2%   -
+ 12  s=1 u=1 a=11 t=11         7,579   90.1%       795    2,816     87   78.0%   -
+TOTAL  raw_input=18,743  cache_read=9,728  output=1,603  cache_share=34.2%
+```
+
+看三个点：
+
+- **`prefix%` 单调上升** → STELA 把 system/tools/历史对话摆稳了（改动仅发生在尾部）。
+- **`cache%` 间歇峰值** → DeepSeek 的 512-token 块边界在跑；连续两三调用跳过同一个边界就会都命中。
+- **`TOTAL cache_share`** 是与 `result_5_2.md` 对齐的全局指标。
+
+### 拿 jsonl 自己 jq
+
+```bash
+jq -c '{i: .call_index, prefix: .prefix.prefix_stability, cache: .cache.cache_share}' \
+    /tmp/stela-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
 ```
 
 ---
@@ -194,59 +243,103 @@ print(f'calls={n}  raw_input={tot[\"raw_input\"]}  '
 
 ---
 
-## 4. 批量跑
+## 4. 批量跑：`run_swebench_batch`
 
-`run_swebench_one.py` 没内置并发，最简方式是 shell 并行（OpenRouter 会限速，
-**先 `-P4` 起步**，遇到 429 调小到 `-P2`）：
+内置随机采样、并发、自动评测、批次报告。**推荐入口，不用再手写
+`xargs`。**
 
 ```bash
-INSTANCES=(
-  pallets__flask-5014
-  django__django-14373
-  psf__requests-1142
-  sympy__sympy-13615
-)
+# \u5e72\u8dd1\uff1a\u770b\u4f1a\u91c7\u6837\u54ea\u4e9b
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+    -n 5 --seed 42 --dry-run
 
-mkdir -p /tmp/stela-telos-runs
-printf '%s\n' "${INSTANCES[@]}" | xargs -n1 -P4 -I{} \
-  $PY -m stela.scripts.run_swebench_one \
-    --instance {} \
+# 真跑：随机 5 个，4 路并发，跑完直接评测
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+    -n 5 --seed 42 --workers 4 \
     --model deepseek/deepseek-v4-flash \
-    --max-iterations 25 \
+    --results-dir /tmp/stela-telos-runs \
+    --evaluate
+
+# 只挑某些 repo
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+    -n 10 --repo pallets/flask --repo psf/requests \
+    --workers 2 --evaluate
+
+# 指定具体 instance（覆盖随机采样）
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+    --instances pallets__flask-5014 django__django-14373 \
+    --workers 2 --evaluate
+```
+
+### 关键参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-n N`             | 全集 | 随机采样数 |
+| `--seed`           | 42   | 决定可复现性 |
+| `--instances ...`  | —    | 显式列出，覆盖随机 |
+| `--repo`           | —    | 多次指定可累加（如 `--repo pallets/flask`）|
+| `--workers`        | 4    | 并发任务数（OpenRouter 429 时调到 2）|
+| `--task-timeout`   | 1800 | 单 instance 子进程硬超时（秒）|
+| `--evaluate`       | off  | 跑完批次再起 evaluator |
+| `--eval-workers`   | 2    | evaluator 并发 |
+| `--force-eval`     | off  | 重测已有 `.eval.json` |
+| `--dry-run`        | off  | 只打印采样列表 |
+
+### 输出
+
+- 每个 instance 仍是 §1 的 5 件套 + 评测后的 `.eval.json`
+- 每个 instance runner 子进程日志：`logs/telos-<inst>.runner.log`
+- **批次报告**写到 `<results-dir>/benchmark/`：
+  - `batch-<UTC时间戳>.json` — 带时间戳的归档
+  - `latest.json` — 始终指向最新
+
+控制台末尾会打印一张聚合表：resolved 率 + 4 个北极星指标（per-task 平均）+ cache_share。
+
+---
+
+## 4.5 看板：`build_dashboard`
+
+把 `<results-dir>/` 下所有 `prompt_trace.jsonl + result.json + eval.json`
+合成一个**单文件 HTML 看板**（零 JS 依赖，可离线打开 / 邮件发送）。
+
+```bash
+# 全部 instance
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.build_dashboard \
     --results-dir /tmp/stela-telos-runs
 
-# 一次性评测全部
-$PY $TEF/benchmark/scripts/evaluate-patches.py \
-    --results-dir /tmp/stela-telos-runs \
-    --dataset $TEF/benchmark/datasets/swe-bench-verified.jsonl \
-    --filter-agent telos --max-parallel 2 \
-    --python-bin $PY --force
+# 只看一个
+PYTHONPATH=/Users/george/Code $PY -m stela.scripts.build_dashboard \
+    --instance pallets__flask-5014 \
+    --out /tmp/dashboard-flask.html
+
+open /tmp/stela-telos-runs/benchmark/dashboard.html
 ```
 
-聚合所有 instance 的指标：
+### 页面结构
 
-```bash
-$PY -c "
-import json, glob
-agg = {'raw_input':0, 'cache_read':0, 'output':0, 'calls':0}
-resolved = total = 0
-for usage in glob.glob('/tmp/stela-telos-runs/telos-*.usage.jsonl'):
-    inst = usage.replace('.usage.jsonl','')
-    for l in open(usage):
-        d = json.loads(l)['normalized']; agg['calls'] += 1
-        for k in ('raw_input','cache_read','output'): agg[k] += d[k]
-    try:
-        ev = json.load(open(inst + '.eval.json'))
-        total += 1; resolved += int(ev.get('resolved', False))
-    except FileNotFoundError:
-        pass
-inp = agg['raw_input'] + agg['cache_read']
-print(f'tasks evaluated: {total}  resolved: {resolved} ({100*resolved/max(total,1):.1f}%)')
-print(f'calls: {agg[\"calls\"]}  raw_input: {agg[\"raw_input\"]}  '
-      f'cache_read: {agg[\"cache_read\"]}  output: {agg[\"output\"]}  '
-      f'cache_share: {100*agg[\"cache_read\"]/max(inp,1):.1f}%')
-"
-```
+- **顶部 KPI 栏**：instances · resolved 比 · total api calls · raw / cache /
+  output 求和 · **overall cache_share**（按 60% / 30% / 0 阈值染绿/黄/橙/灰）
+- **每个 instance 一个 card**：
+  - 标题：`instance_id` + resolved 徽章 + F2P 比 + completed
+  - 6 列指标：calls / raw_in / cache_read / output / cache_share /
+    prefix_avg
+  - **per-call trace 表**（核心可视化）：
+    - 每行 = 一次 API 调用
+    - **stacked bar**：红 raw + 绿 cache + 蓝 output；条带总宽按
+      instance 内最大输入归一化（一眼看哪次调用量最重）
+    - cache% 颜色编码加粗
+    - prefix% 数字 + 黄色横条（一眼看 prefix 单调收敛趋势）
+    - plan slots（mark 锚位 / routing_key）
+- 排序：未 resolved 在前，方便先排查问题
+
+### 参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--results-dir` | `/tmp/stela-telos-runs` | 扫描 `telos-*.prompt_trace.jsonl` |
+| `--instance`    | —   | 只包含指定 instance（可重复）|
+| `--out`         | `<results-dir>/benchmark/dashboard.html` | 输出 HTML 路径 |
 
 ---
 
@@ -317,8 +410,11 @@ $PY $TEF/benchmark/scripts/evaluate-patches.py \
 | 文件 | 作用 |
 |---|---|
 | [stela/harness/telos.py](../harness/telos.py) | telos harness 插件（OpenAI ChatCompletions → StelaIR） |
-| [stela/scripts/stela_transport.py](../scripts/stela_transport.py) | OpenAI 鸭子接口 client，内部走 STELA Bridge |
-| [stela/scripts/run_swebench_one.py](../scripts/run_swebench_one.py) | 单任务端到端 runner |
+| [stela/scripts/stela_transport.py](../scripts/stela_transport.py) | OpenAI 鸭子接口 client，内部走 STELA Bridge；写 `usage.jsonl` + `prompt_trace.jsonl` |
+| [stela/scripts/run_swebench_one.py](../scripts/run_swebench_one.py) | **单任务**端到端 runner |
+| [stela/scripts/run_swebench_batch.py](../scripts/run_swebench_batch.py) | **批量** runner（采样 + 并发 + 自动评测 + 批次报告） |
+| [stela/scripts/show_prompt_trace.py](../scripts/show_prompt_trace.py) | 命令行查看 `prompt_trace.jsonl` |
+| [stela/scripts/build_dashboard.py](../scripts/build_dashboard.py) | 生成单文件 HTML 看板 |
 | [stela/tests/test_telos_harness.py](../tests/test_telos_harness.py) | telos 插件 smoke 测试 |
 | [token-efficient-framework/benchmark/scripts/evaluate-patches.py][evp] | SWE-bench patch 评测器（无 docker，git worktree 隔离） |
 

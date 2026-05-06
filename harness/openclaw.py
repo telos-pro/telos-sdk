@@ -29,6 +29,41 @@ from stela.ir import (
 
 _REFPOOL_THRESHOLD = 2048  # 字节阈值；超过此长度的文本搬到 ref-pool
 
+# Anthropic 内置工具的 type 前缀（``computer_``/``bash_``/``text_editor_``/
+# ``web_search_``）。识别后打 ``source=builtin`` 标签，使其在 canonical sort
+# 中始终排在 MCP / user 工具前面，保护 PIN 段前缀稳定性（见 bridge.py
+# ``_tool_sort_key``）。
+_ANTHROPIC_BUILTIN_TYPE_PREFIXES = (
+    "computer_", "bash_", "text_editor_", "web_search_",
+)
+
+
+def _classify_anthropic_tool(t: Mapping[str, Any]) -> tuple[str, str | None]:
+    """返回 ``(source, mcp_server)`` —— 用于 ``StelaBlock.extra``。
+
+    优先级：
+    1. 上游 ``metadata.source`` 显式覆盖（``"builtin"|"mcp"|"user"``）
+    2. ``type`` 命中 Anthropic builtin 前缀 → ``builtin``
+    3. 含 ``server`` / ``mcp_server`` 字段 → ``mcp``
+    4. 否则 ``user``
+    """
+    meta = t.get("metadata") if isinstance(t, Mapping) else None
+    if isinstance(meta, Mapping):
+        explicit = meta.get("source")
+        if isinstance(explicit, str):
+            return explicit, meta.get("mcp_server") if isinstance(meta.get("mcp_server"), str) else None
+    explicit = t.get("source") if isinstance(t, Mapping) else None
+    if isinstance(explicit, str):
+        server = t.get("mcp_server") or t.get("server")
+        return explicit, server if isinstance(server, str) else None
+    typ = t.get("type") if isinstance(t, Mapping) else None
+    if isinstance(typ, str) and typ.startswith(_ANTHROPIC_BUILTIN_TYPE_PREFIXES):
+        return "builtin", None
+    server = t.get("server") or t.get("mcp_server")
+    if isinstance(server, str) and server:
+        return "mcp", server
+    return "user", None
+
 
 class OpenClawPlugin(HarnessPlugin):
     def parse(
@@ -43,14 +78,22 @@ class OpenClawPlugin(HarnessPlugin):
         ref_pool: dict[str, StelaBlock] = {}
 
         # ---- tools ----
-        tools = tuple(
-            StelaBlock(
+        def _build_tool(i: int, t: Mapping[str, Any]) -> StelaBlock:
+            source, mcp_server = _classify_anthropic_tool(t)
+            extra: dict[str, Any] = {"source": source}
+            if mcp_server:
+                extra["mcp_server"] = mcp_server
+            return StelaBlock(
                 id=f"tool:{t.get('name', i)}",
                 band=Band.PIN,
                 kind="tool_def",
                 payload=t,
                 source_tag="openclaw/tools",
+                extra=extra,
             )
+
+        tools = tuple(
+            _build_tool(i, t)
             for i, t in enumerate(raw_request.get("tools", []))
         )
 

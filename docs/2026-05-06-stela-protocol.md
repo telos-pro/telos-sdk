@@ -163,6 +163,21 @@ Layer 1 (harness plugin) is responsible for producing IR that satisfies the orde
 
 The user-message split rule from Janus §3.2 follows directly: a user message is multi-block, with `pin` for the actual user query, `fold` for prior tool-result echoes / `[ref:...]` references, `drop` for the harness envelope (`<system-reminder>`, cwd, git status, timestamp). This is *the same invariant*, applied inside one message.
 
+### 5.1 In-band byte stability (canonicalization)
+
+§5 fixes the *band* order; the bridge additionally fixes the *byte* layout within each band so a re-emit with the same logical IR produces the same wire bytes. Two rules, both applied at `emit` time inside `_canonicalize_ir` (see [`bridge.py`](../bridge.py)):
+
+1. **Tools-array stable order.** `ir.tools` is sorted by `(source_rank, mcp_server, name)` where `source_rank` is `builtin(0) → mcp(1) → user(2) → untagged(3)`. This neutralizes two common cache-prefix breakers:
+   - MCP discovery races that re-permute the tools list between sessions
+   - harnesses that splice "new" tools to the front of the list and silently invalidate every historical session's PIN prefix
+   Source is read from `StelaBlock.extra["source"]` (and optional `extra["mcp_server"]`); harnesses are expected to tag, untagged tools rank last (safe default — costs stability, never correctness).
+
+2. **Set-semantic schema arrays sorted.** Inside a `tool_def` block's schema subtree (Anthropic `input_schema`, OpenAI `function.parameters`), arrays whose key is in `_SCHEMA_SET_ARRAY_KEYS = {"required"}` are sorted as strings. Conservative on purpose — `enum` / `examples` / `anyOf` / `oneOf` / `allOf` are *not* sorted because some prompts rely on their order. The set is module-level on `bridge` so a harness with a special tool can monkey-patch.
+
+`tool_use` / `tool_result` payloads are still only key-sorted at the dict level — their array values are user data, not schema, so we never reorder them even if a key happens to be named `required`.
+
+The wire-side guarantee: shuffling input tool order or shuffling a `required` array yields a byte-equal `Bridge.emit()` result. Regression test: [`tests/test_canonical.py`](../tests/test_canonical.py) `test_emit_byte_stable_under_tool_shuffle`.
+
 ---
 
 ## 6. The Five Bridge Primitives

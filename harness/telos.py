@@ -50,6 +50,22 @@ _REFPOOL_THRESHOLD = 2048
 _FILE_BLOCK_RE = re.compile(r'<file path="([^"]+)">(.*?)</file>', re.DOTALL)
 
 
+def _classify_openai_tool(t: Mapping[str, Any]) -> tuple[str, str | None]:
+    """OpenAI function-tool 的分类：仅靠上游 metadata。
+
+    OpenAI 的 ``tools`` 数组没有原生的 builtin/mcp 划分；harness 如果要
+    进一步区分，需在上举的 ``raw_request`` 里为每个 tool 塑 ``metadata.source``
+    （可选加 ``metadata.mcp_server``）。否则默认 ``user``。
+    """
+    meta = t.get("metadata") if isinstance(t, Mapping) else None
+    if isinstance(meta, Mapping):
+        src = meta.get("source")
+        server = meta.get("mcp_server")
+        if isinstance(src, str):
+            return src, server if isinstance(server, str) else None
+    return "user", None
+
+
 def _slug_from_path(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", path).strip("-").lower() or "file"
 
@@ -87,14 +103,22 @@ class TelosPlugin(HarnessPlugin):
         ref_pool: dict[str, StelaBlock] = {}
 
         # ---- tools (OpenAI function-tool schema) ----
-        tools = tuple(
-            StelaBlock(
+        def _build_tool(i: int, t: Mapping[str, Any]) -> StelaBlock:
+            source, mcp_server = _classify_openai_tool(t)
+            extra: dict[str, Any] = {"source": source}
+            if mcp_server:
+                extra["mcp_server"] = mcp_server
+            return StelaBlock(
                 id=f"tool:{(t.get('function') or {}).get('name', i)}",
                 band=Band.PIN,
                 kind="tool_def",
                 payload=t,
                 source_tag="telos/tools",
+                extra=extra,
             )
+
+        tools = tuple(
+            _build_tool(i, t)
             for i, t in enumerate(raw_request.get("tools") or [])
         )
 

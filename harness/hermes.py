@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from stela.harness._user_split import split_user_text
 from stela.harness.base import HarnessPlugin
+from stela.harness.openclaw import _classify_anthropic_tool
 from stela.ir import (
     Band,
     StelaBlock,
@@ -42,14 +43,22 @@ class HermesPlugin(HarnessPlugin):
         ref_pool: dict[str, StelaBlock] = {}
 
         # ---- tools ----
-        tools = tuple(
-            StelaBlock(
+        def _build_tool(i: int, t: Mapping[str, Any]) -> StelaBlock:
+            source, mcp_server = _classify_anthropic_tool(t)
+            extra: dict[str, Any] = {"source": source}
+            if mcp_server:
+                extra["mcp_server"] = mcp_server
+            return StelaBlock(
                 id=f"tool:{t.get('name', i)}",
                 band=Band.PIN,
                 kind="tool_def",
                 payload=t,
                 source_tag="hermes/tools",
+                extra=extra,
             )
+
+        tools = tuple(
+            _build_tool(i, t)
             for i, t in enumerate(raw_request.get("tools", []))
         )
 

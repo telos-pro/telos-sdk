@@ -183,6 +183,26 @@ def _summarize_ir(ir) -> dict[str, Any]:
     }
 
 
+def _flatten_regions(ir_summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduce per-band/per-segment summary into flat numbers convenient for the
+    dashboard: total chars per segment, total chars per band, grand total.
+    """
+    bands = ir_summary.get("bands") or {}
+    regions: dict[str, Any] = {}
+    band_totals = {b.name: 0 for b in Band}
+    grand = 0
+    for seg in ("tools", "system", "messages"):
+        seg_buck = bands.get(seg) or {}
+        seg_entry = {b.name: int((seg_buck.get(b.name) or {}).get("chars", 0))
+                     for b in Band}
+        seg_entry["total"] = sum(seg_entry.values())
+        regions[seg] = seg_entry
+        for b in Band:
+            band_totals[b.name] += seg_entry[b.name]
+        grand += seg_entry["total"]
+    return {"by_segment": regions, "by_band": band_totals, "total": grand}
+
+
 def _summarize_plan(plan) -> dict[str, Any]:
     return {
         "routing_key": plan.routing_key,
@@ -254,6 +274,7 @@ class StelaOpenAITransport:
         self._trace_log = Path(prompt_trace_log) if prompt_trace_log else None
         self._call_count = 0
         self._prev_wire_text: str = ""
+        self._prev_regions: dict[str, Any] | None = None
 
         # 鸭子接口
         self.chat = _ChatNS(self)
@@ -287,6 +308,25 @@ class StelaOpenAITransport:
         # 3. 拿规范化后的 IR（snapshot），转回 chat-completions wire
         ir2 = bridge.snapshot_ir()
         ir_out_summary = _summarize_ir(ir2)
+        regions = _flatten_regions(ir_out_summary)
+        # 增长过程：相对上一次调用的 chars 变动（按 segment & band）
+        if self._prev_regions is None:
+            region_deltas: dict[str, Any] = {"first_call": True}
+        else:
+            prev = self._prev_regions
+            region_deltas = {
+                "first_call": False,
+                "by_segment": {
+                    seg: regions["by_segment"][seg]["total"]
+                         - prev["by_segment"][seg]["total"]
+                    for seg in ("tools", "system", "messages")
+                },
+                "by_band": {
+                    b.name: regions["by_band"][b.name] - prev["by_band"][b.name]
+                    for b in Band
+                },
+                "total": regions["total"] - prev["total"],
+            }
         wire = _ir_to_chat_completions(ir2, model=model)
         # 4. 透传一些非 stela 关心的字段
         for k in ("temperature", "top_p", "max_tokens", "stream",
@@ -337,7 +377,10 @@ class StelaOpenAITransport:
                     "input": input_summary,
                     "ir_after_parse": ir_in_summary,
                     "ir_after_canonicalize": ir_out_summary,
+                    "regions": regions,
+                    "region_deltas": region_deltas,
                     "plan": plan_summary,
+                    "breakpoints": plan_summary["slots"],
                     "wire": wire_summary,
                     "prefix": {
                         "prev_wire_chars": len(self._prev_wire_text),
@@ -358,6 +401,7 @@ class StelaOpenAITransport:
                 }, ensure_ascii=False) + "\n")
 
         self._prev_wire_text = wire_text
+        self._prev_regions = regions
         return response
 
 

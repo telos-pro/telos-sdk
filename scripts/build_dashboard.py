@@ -18,9 +18,16 @@ from __future__ import annotations
 import argparse
 import html
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from stela.scripts.show_prompt_trace import classify_status
+
+
+BANDS = ("PIN", "FOLD", "DROP")
+SEGMENTS = ("tools", "system", "messages")
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +79,35 @@ def load_instance(trace_path: Path) -> dict[str, Any]:
                    if c["prefix"].get("prefix_stability") is not None]
     prefix_avg = sum(prefix_vals) / len(prefix_vals) if prefix_vals else None
 
+    # ---- prompt-region totals (chars summed across all calls) ----
+    region_sum = {seg: {b: 0 for b in BANDS} for seg in SEGMENTS}
+    region_first: dict[str, dict[str, int]] | None = None
+    region_last: dict[str, dict[str, int]] | None = None
+    for c in trace:
+        regs = (c.get("regions") or {}).get("by_segment") or {}
+        snap = {seg: {b: int((regs.get(seg) or {}).get(b, 0)) for b in BANDS}
+                for seg in SEGMENTS}
+        if region_first is None:
+            region_first = snap
+        region_last = snap
+        for seg in SEGMENTS:
+            for b in BANDS:
+                region_sum[seg][b] += snap[seg][b]
+
+    status, reason = classify_status(result)
+
     return {
         "tag": tag,
         "instance_id": inst,
+        "repo": result.get("repo"),
         "model": result.get("model"),
         "duration_s": result.get("duration_s"),
         "patch_bytes": result.get("patch_bytes"),
         "completed": result.get("completed"),
+        "non_empty_patch": result.get("non_empty_patch"),
+        "error": result.get("error"),
+        "status": status,                     # "completed" | "anomalous"
+        "anomaly_reason": reason,             # None when completed
         "api_calls": result.get("api_calls") or len(trace),
         "resolved": evald.get("resolved"),
         "fail_to_pass": (
@@ -95,6 +124,9 @@ def load_instance(trace_path: Path) -> dict[str, Any]:
             "prefix_avg": prefix_avg,
             "calls": len(trace),
         },
+        "region_sum": region_sum,             # chars across all calls, seg×band
+        "region_first": region_first,         # seg×band at first call
+        "region_last": region_last,           # seg×band at last call
         "trace": trace,
     }
 
@@ -189,6 +221,53 @@ table.trace tr:hover td { background: #1c222a; }
   border-radius: 2px; vertical-align: middle; margin-right: 4px; }
 
 .plan { font-family: monospace; font-size: 10px; color: #7d8590; }
+
+/* --- prompt-region columns -------------------------------------------- */
+.region-cell { font-family: monospace; font-size: 10.5px; line-height: 1.35;
+  text-align: right; }
+.region-cell .pin   { color: #d29922; }
+.region-cell .fold  { color: #58a6ff; }
+.region-cell .drop  { color: #7d8590; }
+.region-cell .delta { color: #7d8590; font-size: 9.5px; margin-left: 6px; }
+.region-cell .delta.up   { color: #f85149; }
+.region-cell .delta.down { color: #3fb950; }
+
+.bp-cell { font-family: monospace; font-size: 10px; color: #bc8cff;
+  text-align: left; }
+.bp-cell .ttl-long  { color: #3fb950; }
+.bp-cell .ttl-short { color: #d29922; }
+.bp-cell .ttl-none  { color: #7d8590; }
+
+/* --- top-level sections ----------------------------------------------- */
+.section-title { font-size: 13px; color: #7d8590; text-transform: uppercase;
+  letter-spacing: 0.06em; margin: 28px 0 10px 0; }
+.section-title .count { color: #e6edf3; font-weight: 600; margin-left: 6px; }
+
+.taxonomy {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 12px; margin-bottom: 18px;
+}
+.tax-card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 14px 16px;
+}
+.tax-card h3 { margin: 0 0 8px 0; font-size: 13px; font-family: monospace;
+  color: #d2a8ff; }
+.tax-card .tax-meta { color: #7d8590; font-size: 11px; margin-bottom: 10px; }
+
+.stack-bar {
+  display: flex; height: 18px; border-radius: 3px; overflow: hidden;
+  background: #21262d; margin-bottom: 6px;
+}
+.stack-bar > span { display: block; height: 100%; }
+.stack-bar .pin   { background: #d29922; }
+.stack-bar .fold  { background: #58a6ff; }
+.stack-bar .drop  { background: #7d8590; }
+.stack-key { font-size: 11px; color: #7d8590; font-family: monospace; }
+.stack-key b { color: #e6edf3; font-weight: 500; }
+
+.anomaly-reason { color: #f85149; font-size: 11px; margin-top: 4px;
+  font-family: monospace; }
 """
 
 
@@ -239,6 +318,64 @@ def _resolved_badge(inst: dict[str, Any]) -> str:
     return '<span class="badge badge-mute">not evaluated</span>'
 
 
+def _status_badge(inst: dict[str, Any]) -> str:
+    if inst["status"] == "completed":
+        return '<span class="badge badge-good">completed</span>'
+    return '<span class="badge badge-bad">anomalous</span>'
+
+
+def _ttl_class(ttl: str) -> str:
+    return f"ttl-{ttl}" if ttl in ("long", "short", "none") else "ttl-none"
+
+
+def _bp_html(slots: list[dict[str, Any]], routing_key: str | None) -> str:
+    if not slots and not routing_key:
+        return '<span style="color:#7d8590">—</span>'
+    parts: list[str] = []
+    if routing_key:
+        parts.append(f'<span style="color:#79c0ff">key={html.escape(str(routing_key)[:10])}</span>')
+    for s in slots:
+        ttl = s.get("ttl_class", "none")
+        seg = (s.get("segment") or "?")[0]
+        parts.append(
+            f'<span class="{_ttl_class(ttl)}">'
+            f'{html.escape(s["name"])}<span style="color:#7d8590">/{seg}/{ttl[0]}</span>'
+            f'</span>'
+        )
+    return " ".join(parts)
+
+
+def _delta_span(d: int | None) -> str:
+    if d is None:
+        return ''
+    if d == 0:
+        return '<span class="delta">±0</span>'
+    cls = "up" if d > 0 else "down"
+    sign = "+" if d > 0 else "−"
+    return f'<span class="delta {cls}">{sign}{abs(int(d)):,}</span>'
+
+
+def _region_cell(regions: dict[str, dict[str, int]] | None,
+                 deltas_by_seg: dict[str, int] | None,
+                 seg: str) -> str:
+    if not regions:
+        return '<td class="region-cell">—</td>'
+    seg_vals = regions.get(seg) or {}
+    pin = int(seg_vals.get("PIN", 0))
+    fold = int(seg_vals.get("FOLD", 0))
+    drop = int(seg_vals.get("DROP", 0))
+    total = pin + fold + drop
+    d = (deltas_by_seg or {}).get(seg) if deltas_by_seg is not None else None
+    return (
+        f'<td class="region-cell">'
+        f'<div><b>{total:,}</b>{_delta_span(d)}</div>'
+        f'<div><span class="pin">P {pin:,}</span> '
+        f'<span class="fold">F {fold:,}</span> '
+        f'<span class="drop">D {drop:,}</span></div>'
+        f'</td>'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -258,9 +395,11 @@ def render_call_row(c: dict[str, Any], max_total: int) -> str:
     prefix_pct = _fmt_pct(prefix) if prefix is not None else "—"
 
     plan = c.get("plan", {}) or {}
-    slot_str = ",".join(s["name"] for s in plan.get("slots", [])) or "—"
-    if plan.get("routing_key"):
-        slot_str = f"key={str(plan['routing_key'])[:10]}+{slot_str}"
+    bp_html = _bp_html(plan.get("slots") or [], plan.get("routing_key"))
+
+    regions = (c.get("regions") or {}).get("by_segment")
+    deltas = c.get("region_deltas") or {}
+    d_seg = (deltas.get("by_segment") or {}) if not deltas.get("first_call", True) else None
 
     bar_html = (
         f'<div class="bar" style="width:{width_pct:.1f}%">'
@@ -279,14 +418,16 @@ def render_call_row(c: dict[str, Any], max_total: int) -> str:
         f'<td>{c.get("call_index", "?")}</td>'
         f'<td>{c.get("latency_s", 0):.2f}s</td>'
         f'<td class="left">{_role_summary(c["wire"]["by_role"])}</td>'
-        f'<td>{c["wire"]["total_chars"]:,}</td>'
         f'<td class="bar-cell left">{bar_html}</td>'
         f'<td>{_fmt_int(raw)}</td>'
         f'<td>{_fmt_int(cr)}</td>'
         f'<td>{_fmt_int(out)}</td>'
         f'<td><b style="color:{_cache_color(cache_share)}">{_fmt_pct(cache_share)}</b></td>'
         f'<td class="prefix-cell">{prefix_pct}{prefix_bar_html}</td>'
-        f'<td class="left plan">{html.escape(slot_str)}</td>'
+        f'{_region_cell(regions, d_seg, "tools")}'
+        f'{_region_cell(regions, d_seg, "system")}'
+        f'{_region_cell(regions, d_seg, "messages")}'
+        f'<td class="bp-cell left">{bp_html}</td>'
         '</tr>'
     )
 
@@ -300,15 +441,20 @@ def render_instance(inst: dict[str, Any]) -> str:
         default=1,
     )
     rows = "\n".join(render_call_row(c, max_total) for c in trace) or (
-        '<tr><td colspan="11" class="left" style="color:#7d8590">'
+        '<tr><td colspan="13" class="left" style="color:#7d8590">'
         '(no trace rows)</td></tr>'
     )
 
-    badges = _resolved_badge(inst)
+    badges = _status_badge(inst) + ' ' + _resolved_badge(inst)
     if inst["fail_to_pass"]:
         badges += f' <span class="badge badge-mute">F2P {inst["fail_to_pass"]}</span>'
-    if inst.get("completed"):
-        badges += ' <span class="badge badge-ok">completed</span>'
+    if inst.get("repo"):
+        badges += f' <span class="badge badge-mute">{html.escape(inst["repo"])}</span>'
+
+    anomaly_html = (
+        f'<div class="anomaly-reason">⚠  {html.escape(inst["anomaly_reason"] or "")}</div>'
+        if inst["status"] == "anomalous" and inst.get("anomaly_reason") else ""
+    )
 
     return f"""
 <div class="card">
@@ -320,6 +466,7 @@ def render_instance(inst: dict[str, Any]) -> str:
       &nbsp;·&nbsp; patch {_fmt_int(inst.get("patch_bytes"))}B
     </div>
   </div>
+  {anomaly_html}
 
   <div class="row">
     <div class="metric"><div class="label">api calls</div>
@@ -340,17 +487,22 @@ def render_instance(inst: dict[str, Any]) -> str:
     <span><span class="swatch" style="background:#f85149"></span>raw_input</span>
     <span><span class="swatch" style="background:#3fb950"></span>cache_read</span>
     <span><span class="swatch" style="background:#58a6ff"></span>output</span>
-    <span><span class="swatch" style="background:#d29922"></span>prefix stability</span>
+    <span><span class="swatch" style="background:#d29922"></span>PIN</span>
+    <span><span class="swatch" style="background:#58a6ff"></span>FOLD</span>
+    <span><span class="swatch" style="background:#7d8590"></span>DROP</span>
+    <span style="color:#bc8cff">BP name/segment/ttl</span>
   </div>
 
   <table class="trace">
     <thead><tr>
       <th>#</th><th>lat</th><th class="left">roles</th>
-      <th>wire chars</th>
-      <th class="left bar-cell">raw + cache + out (per-call total, normalized)</th>
+      <th class="left bar-cell">raw + cache + out (per-call)</th>
       <th>raw_in</th><th>cache</th><th>out</th><th>cache%</th>
       <th class="prefix-cell">prefix%</th>
-      <th class="left">plan</th>
+      <th>tools chars / Δ</th>
+      <th>system chars / Δ</th>
+      <th>messages chars / Δ</th>
+      <th class="left">breakpoints</th>
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
@@ -358,23 +510,126 @@ def render_instance(inst: dict[str, Any]) -> str:
 """
 
 
+def _render_stack(label: str, pin: int, fold: int, drop: int) -> str:
+    total = pin + fold + drop
+    if total <= 0:
+        return f'<div class="stack-key">{html.escape(label)} <b>0</b></div>'
+    p_pct = 100 * pin / total
+    f_pct = 100 * fold / total
+    d_pct = 100 * drop / total
+    return (
+        f'<div class="stack-key">{html.escape(label)} '
+        f'<b>{total:,}</b> chars '
+        f'(P {pin:,} · F {fold:,} · D {drop:,})</div>'
+        f'<div class="stack-bar">'
+        f'<span class="pin"  style="width:{p_pct:.1f}%" title="PIN {pin:,}"></span>'
+        f'<span class="fold" style="width:{f_pct:.1f}%" title="FOLD {fold:,}"></span>'
+        f'<span class="drop" style="width:{d_pct:.1f}%" title="DROP {drop:,}"></span>'
+        f'</div>'
+    )
+
+
+def render_taxonomy(instances: list[dict[str, Any]]) -> str:
+    """Group instances by repo ("task type") and emit a typical-prompt-construction
+    card per group: average chars per (segment×band) across all calls of all
+    completed instances in the group.
+    """
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for inst in instances:
+        if inst["status"] != "completed":
+            continue
+        key = inst.get("repo") or "(unknown repo)"
+        groups[key].append(inst)
+    if not groups:
+        return ''
+
+    cards: list[str] = []
+    for repo in sorted(groups):
+        members = groups[repo]
+        # average across calls (chars sent per call), per seg×band
+        agg = {seg: {b: 0 for b in BANDS} for seg in SEGMENTS}
+        n_calls = 0
+        for inst in members:
+            for seg in SEGMENTS:
+                for b in BANDS:
+                    agg[seg][b] += inst["region_sum"][seg][b]
+            n_calls += inst["totals"]["calls"]
+        if n_calls == 0:
+            continue
+        avg = {seg: {b: agg[seg][b] / n_calls for b in BANDS} for seg in SEGMENTS}
+
+        stacks = "\n".join(
+            _render_stack(seg, int(avg[seg]["PIN"]), int(avg[seg]["FOLD"]),
+                          int(avg[seg]["DROP"]))
+            for seg in SEGMENTS
+        )
+        # cache_share for this group (already only completed members)
+        gr_raw = sum(i["totals"]["raw_input"] for i in members)
+        gr_cache = sum(i["totals"]["cache_read"] for i in members)
+        gr_share = (gr_cache / (gr_raw + gr_cache)) if (gr_raw + gr_cache) else 0.0
+
+        cards.append(f"""
+  <div class="tax-card">
+    <h3>{html.escape(repo)}</h3>
+    <div class="tax-meta">
+      {len(members)} instance(s) · {n_calls} calls ·
+      cache_share <b style="color:{_cache_color(gr_share)}">{_fmt_pct(gr_share)}</b><br>
+      avg prompt construction per call (chars):
+    </div>
+    {stacks}
+  </div>
+""")
+    return f"""
+<div class="section-title">Prompt construction by task type<span class="count">({len(groups)} group(s))</span></div>
+<div class="taxonomy">
+{''.join(cards)}
+</div>
+"""
+
+
 def render_dashboard(instances: list[dict[str, Any]]) -> str:
     n = len(instances)
+    completed = [i for i in instances if i["status"] == "completed"]
+    anomalous = [i for i in instances if i["status"] == "anomalous"]
     n_eval = sum(1 for i in instances if i["resolved"] is not None)
     n_resolved = sum(1 for i in instances if i["resolved"] is True)
-    sum_raw = sum(i["totals"]["raw_input"] for i in instances)
-    sum_cache = sum(i["totals"]["cache_read"] for i in instances)
-    sum_out = sum(i["totals"]["output"] for i in instances)
-    sum_calls = sum(i["totals"]["calls"] for i in instances)
+
+    # ---- aggregates EXCLUDING anomalous (主指标) ----
+    sum_raw = sum(i["totals"]["raw_input"] for i in completed)
+    sum_cache = sum(i["totals"]["cache_read"] for i in completed)
+    sum_out = sum(i["totals"]["output"] for i in completed)
+    sum_calls = sum(i["totals"]["calls"] for i in completed)
     inp_total = sum_raw + sum_cache
     cache_share = (sum_cache / inp_total) if inp_total else 0.0
+
+    # ---- aggregates including anomalous (for context only) ----
+    all_raw = sum(i["totals"]["raw_input"] for i in instances)
+    all_cache = sum(i["totals"]["cache_read"] for i in instances)
+    all_share = (all_cache / (all_raw + all_cache)) if (all_raw + all_cache) else 0.0
 
     resolved_kpi = (
         f"{n_resolved}/{n_eval} ({_fmt_pct(n_resolved / n_eval if n_eval else 0)})"
         if n_eval else "—"
     )
-    cards = "\n".join(render_instance(i) for i in instances)
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    completed_cards = "\n".join(render_instance(i) for i in completed) or \
+        '<div class="sub">(none)</div>'
+    anomalous_cards = "\n".join(render_instance(i) for i in anomalous) or \
+        '<div class="sub">(none)</div>'
+    taxonomy_html = render_taxonomy(instances)
+
+    # 异常原因聚合
+    reason_counter: dict[str, int] = defaultdict(int)
+    for i in anomalous:
+        key = (i.get("anomaly_reason") or "unknown").split(":")[0]
+        reason_counter[key] += 1
+    reason_summary = (
+        "<br>".join(f'· {html.escape(k)}: <b>{v}</b>'
+                    for k, v in sorted(reason_counter.items(),
+                                       key=lambda kv: -kv[1]))
+        if reason_counter else '<span style="color:#7d8590">none</span>'
+    )
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -387,23 +642,32 @@ def render_dashboard(instances: list[dict[str, Any]]) -> str:
 <div class="kpis">
   <div class="kpi"><div class="label">instances</div>
     <div class="value">{n}</div>
-    <div class="delta">{n_eval} evaluated</div></div>
+    <div class="delta">{len(completed)} completed · {len(anomalous)} anomalous</div></div>
   <div class="kpi"><div class="label">resolved</div>
-    <div class="value">{resolved_kpi}</div></div>
-  <div class="kpi"><div class="label">total api calls</div>
+    <div class="value">{resolved_kpi}</div>
+    <div class="delta">{n_eval} evaluated</div></div>
+  <div class="kpi"><div class="label">api calls (completed only)</div>
     <div class="value">{sum_calls:,}</div></div>
-  <div class="kpi"><div class="label">raw_input</div>
+  <div class="kpi"><div class="label">raw_input (completed)</div>
     <div class="value">{sum_raw:,}</div></div>
-  <div class="kpi"><div class="label">cache_read</div>
+  <div class="kpi"><div class="label">cache_read (completed)</div>
     <div class="value">{sum_cache:,}</div></div>
-  <div class="kpi"><div class="label">output</div>
+  <div class="kpi"><div class="label">output (completed)</div>
     <div class="value">{sum_out:,}</div></div>
-  <div class="kpi"><div class="label">cache_share</div>
+  <div class="kpi"><div class="label">cache_share (completed only)</div>
     <div class="value" style="color:{_cache_color(cache_share)}">{_fmt_pct(cache_share)}</div>
-    <div class="delta">cache_read / (raw + cache)</div></div>
+    <div class="delta">excludes {len(anomalous)} anomalous · incl-all={_fmt_pct(all_share)}</div></div>
+  <div class="kpi"><div class="label">anomaly reasons</div>
+    <div class="value" style="font-size:13px;font-weight:400">{reason_summary}</div></div>
 </div>
 
-{cards}
+{taxonomy_html}
+
+<div class="section-title">Completed<span class="count">({len(completed)})</span></div>
+{completed_cards}
+
+<div class="section-title">Anomalous<span class="count">({len(anomalous)})</span></div>
+{anomalous_cards}
 
 </body></html>
 """
@@ -436,8 +700,12 @@ def main() -> None:
         raise SystemExit(f"no telos-*.prompt_trace.jsonl under {results_dir}")
 
     instances = [load_instance(t) for t in traces]
-    # 未 resolved 在前 → 字典序
-    instances.sort(key=lambda x: (x["resolved"] is True, x["instance_id"]))
+    # 异常在前 → 未 resolved 次 → 字典序
+    instances.sort(key=lambda x: (
+        x["status"] == "completed",   # anomalous first
+        x["resolved"] is True,
+        x["instance_id"],
+    ))
 
     out = Path(args.out) if args.out else results_dir / "benchmark" / "dashboard.html"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -14,13 +14,16 @@ if TYPE_CHECKING:
 
 
 def load_harness(name: str) -> "HarnessPlugin":
-    """按名加载 harness plugin。当前支持：``openclaw``, ``hermes``。"""
+    """按名加载 harness plugin。当前支持：``openclaw``, ``hermes``, ``telos``。"""
     if name == "openclaw":
         from stela.harness.openclaw import OpenClawPlugin
         return OpenClawPlugin()
     if name == "hermes":
         from stela.harness.hermes import HermesPlugin
         return HermesPlugin()
+    if name == "telos":
+        from stela.harness.telos import TelosPlugin
+        return TelosPlugin()
     raise ValueError(f"Unknown harness plugin: {name!r}")
 
 

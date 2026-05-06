@@ -1,0 +1,27 @@
+.assets
+.env
+
+# Next.js / Node
+.next/
+node_modules/
+*.pyc
+dist/
+build/
+*.egg-info/
+*.egg
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzz
+.venv/
+venv/
+__pycache__/
+poetry.lock
+.pytest_cache/
+botpy.log
+tests/
+.evermind/workspace/*
+!.evermind/workspace/skills

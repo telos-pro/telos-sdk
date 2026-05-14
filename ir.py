@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +144,20 @@ class UsageReport:
 
 class StelaInvariantError(ValueError):
     """§5 / canonical 化 / ref-pool 注册任一不变量被破坏时抛出。"""
+
+
+def enforce_band_order(blocks: Iterable[StelaBlock]) -> tuple[StelaBlock, ...]:
+    """把 blocks 按 ``pin* → fold* → drop*`` 稳定排序。
+
+    Harness 在拼装一条 message 时常常会按 ``content[]`` 源顺序遍历，每个
+    content item 自己 expand 出 (PIN, FOLD*, DROP*) 子序列；直接 ``extend``
+    会让带交错（PIN, DROP, PIN, DROP, ...）违反 §5。Harness 应该在 message
+    级别调用一次本函数兜底，再 freeze 成 ``StelaMessage.blocks``。
+
+    保证稳定：同一带内保留传入顺序——这关系到「问题 A 在问题 B 前」的
+    语义可读性，不能乱跳。
+    """
+    return tuple(sorted(blocks, key=lambda b: _BAND_RANK[b.band]))
 
 
 def assert_band_order(blocks: tuple[StelaBlock, ...], where: str) -> None:

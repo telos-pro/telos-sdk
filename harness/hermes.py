@@ -23,6 +23,7 @@ from stela.ir import (
     StelaHints,
     StelaIR,
     StelaMessage,
+    enforce_band_order,
 )
 
 
@@ -145,7 +146,8 @@ class HermesPlugin(HarnessPlugin):
                         payload=item,
                         source_tag="hermes/other",
                     ))
-            messages.append(StelaMessage(role=role, blocks=tuple(blocks)))
+            # 修复：多 content block 拼接会让 (PIN,DROP,PIN,DROP,...) 违反 §5。
+            messages.append(StelaMessage(role=role, blocks=enforce_band_order(blocks)))
 
         return StelaIR(
             session_id=session_id,

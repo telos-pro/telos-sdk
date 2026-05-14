@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from stela import Bridge, load_engine, load_harness
+from stela.bridge import BridgeSessionState
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +235,7 @@ class StelaAnthropicTransport:
         engine_name: str = "anthropic",
         usage_log: str | None = None,
         prompt_trace_log: str | None = None,
+        session_state: BridgeSessionState | None = None,
     ):
         import anthropic  # 延迟导入
 
@@ -253,11 +255,22 @@ class StelaAnthropicTransport:
         self._prev_wire_text: str = ""
         self._prev_regions: dict[str, Any] | None = None
 
+        # Bridge 跨 turn 状态：transport 一个实例 = 一个 session，state 自然
+        # 跟着这个实例的生命周期累积。caller 想自带 state 也行（多 transport
+        # 共享同一段 conversation 的场景）。
+        self._session_state = (
+            session_state if session_state is not None else BridgeSessionState()
+        )
+
         # harness 缓存（auto-detect 时每次可能不同；explicit 时只建一次）
         self._harness_cache: dict[str, Any] = {}
 
         # 鸭子接口
         self.messages = _MessagesNS(self)
+
+    @property
+    def session_state(self) -> BridgeSessionState:
+        return self._session_state
 
     def _get_harness(self, name: str):
         if name not in self._harness_cache:
@@ -291,12 +304,15 @@ class StelaAnthropicTransport:
         )
         ir_in_summary = _summarize_ir(ir)
 
-        # ---- 3. Bridge：canonicalize + plan ----
-        bridge = Bridge(ir, self._engine)
-        plan = bridge.mark()
+        # ---- 3. Bridge：canonicalize + plan + emit ----
+        # 关键：传 session_state 让 ref-pool / R8 计数器跨 turn 累积；
+        # 使用 emit_with_plan() 才能跑 _canonicalize_ir（tools 排序、payload
+        # key 排序）—— 直接 engine.emit(ir2, plan) 会漏掉这一步。
+        bridge = Bridge(ir, self._engine, session_state=self._session_state)
+        wire_dict, plan = bridge.emit_with_plan()
         plan_summary = _summarize_plan(plan)
 
-        # ---- 4. 规范化 IR → Anthropic wire（含 cache_control 标记）----
+        # ---- 4. 整 wire / 日志快照 ----
         ir2 = bridge.snapshot_ir()
         ir_out_summary = _summarize_ir(ir2)
         regions = _flatten_regions(ir_out_summary)
@@ -319,8 +335,7 @@ class StelaAnthropicTransport:
                 "total": regions["total"] - prev["total"],
             }
 
-        # engine.emit() 生成带 cache_control 的 Anthropic wire
-        wire: dict[str, Any] = dict(self._engine.emit(ir2, plan))
+        wire: dict[str, Any] = dict(wire_dict)
         wire["max_tokens"] = max_tokens
 
         # 透传调用方传入的非 stela 字段
@@ -340,12 +355,19 @@ class StelaAnthropicTransport:
         response = self._inner.messages.create(**wire)
         dt = time.time() - t0
 
-        # ---- 6. usage 归一化 + 记录 ----
+        # ---- 6. usage 归一化 + 跨 turn 累积 ----
         usage_obj = getattr(response, "usage", None)
         usage_dict = usage_obj.model_dump() if usage_obj is not None else {}
         normalized = _normalize_usage(usage_dict)
         inp_total = normalized["raw_input"] + normalized["cache_read"]
         cache_share = (normalized["cache_read"] / inp_total) if inp_total else 0.0
+
+        # bridge.absorb_usage：调 engine.parse_usage + state.cumulative_cache_creation += ...
+        # 包成 dict 喂给它（anthropic engine 期望 ``{"usage": {...}}``）。
+        try:
+            bridge.absorb_usage({"usage": usage_dict})
+        except Exception:  # noqa: BLE001
+            pass  # 累积失败不影响主路径
 
         if self._usage_log is not None:
             self._usage_log.parent.mkdir(parents=True, exist_ok=True)
@@ -393,6 +415,13 @@ class StelaAnthropicTransport:
                         "output": normalized["output"],
                         "input_total": inp_total,
                         "cache_share": round(cache_share, 4),
+                    },
+                    "cumulative": {
+                        "cache_creation":
+                            self._session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            self._session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(self._session_state.refpool.slugs),
                     },
                 }, ensure_ascii=False) + "\n")
 

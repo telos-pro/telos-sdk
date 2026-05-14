@@ -28,16 +28,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any
-from uuid import uuid4
+from typing import Any, Mapping
 
 import aiohttp
 from aiohttp import web
 
+from stela.bridge import BridgeSessionState
 from stela.proxy.pipeline import PipelineResult, process_anthropic_request
 
 
@@ -55,6 +57,83 @@ _FORWARD_HEADER_WHITELIST = (
 )
 
 _log = logging.getLogger("stela.proxy")
+
+
+# ---------------------------------------------------------------------------
+# 稳定 session-id 派生
+# ---------------------------------------------------------------------------
+
+def _client_identity(headers: Mapping[str, str]) -> str:
+    """从 headers 取一个能区分不同 caller 的稳定串。
+
+    优先 ``x-api-key``；其次 ``authorization``（去掉 ``Bearer`` 前缀）；
+    都没有就返回空串（多个匿名 client 会共享 session-id —— 单机开发够用）。
+    """
+    api_key = headers.get("x-api-key")
+    if api_key:
+        return api_key
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth.strip()
+
+
+def _derive_session_id(raw: Mapping[str, Any], headers: Mapping[str, str]) -> str:
+    """从「client 身份 + 对话 seed」派生稳定 session-id。
+
+    一个"对话"在 Anthropic /v1/messages 协议下，跨轮不变的部分是：
+    ``system`` / ``tools`` / ``messages[0]``（即 conversation 第一条 user
+    消息）。每轮请求只在 ``messages[]`` 尾部追加新内容。所以这四项的 hash
+    就唯一标识一段对话。
+
+    返回形如 ``"stela-<16字节hex>"``，方便 grep。
+    """
+    seed = {
+        "client": _client_identity(headers),
+        "system": raw.get("system") or [],
+        "tools": raw.get("tools") or [],
+        # messages[0] 通常是 conversation 的第一条 user message；
+        # 即使 list 为空也用 None placeholder 保证 hash 可计算。
+        "msg0": (raw.get("messages") or [None])[0],
+    }
+    body = json.dumps(seed, sort_keys=True, ensure_ascii=False,
+                       default=str).encode("utf-8")
+    digest = hashlib.blake2b(body, digest_size=8).hexdigest()
+    return f"stela-{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Session 注册表：keyed by session_id，LRU 上限避免长跑时内存爆炸
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MAX_SESSIONS = 10_000
+
+
+class _SessionRegistry:
+    """``dict[session_id, BridgeSessionState]`` 的有界 LRU 包装。
+
+    在 aiohttp 单事件循环下，所有访问发生在同一线程，无需加锁。同一
+    session 的并发请求会顺序看到累积——足够好。如果未来要支持真并发，
+    每 entry 加一个 ``asyncio.Lock`` 即可。
+    """
+
+    def __init__(self, max_size: int = _DEFAULT_MAX_SESSIONS) -> None:
+        self._max = max_size
+        self._sessions: OrderedDict[str, BridgeSessionState] = OrderedDict()
+
+    def get_or_create(self, session_id: str) -> BridgeSessionState:
+        if session_id in self._sessions:
+            self._sessions.move_to_end(session_id)
+            return self._sessions[session_id]
+        state = BridgeSessionState()
+        self._sessions[session_id] = state
+        if len(self._sessions) > self._max:
+            evicted, _ = self._sessions.popitem(last=False)
+            _log.info("session LRU evicted: %s (size=%d)", evicted, self._max)
+        return state
+
+    def __len__(self) -> int:
+        return len(self._sessions)
 
 
 # ---------------------------------------------------------------------------
@@ -89,17 +168,25 @@ class ProxyApp:
         usage_log: Path | None = None,
         harness_override: str | None = None,
         request_timeout: float = 600.0,
+        strict: bool = False,
+        max_sessions: int = _DEFAULT_MAX_SESSIONS,
     ):
         self.upstream = upstream.rstrip("/")
         self.usage_log = usage_log
         self.harness_override = harness_override
         self.request_timeout = request_timeout
+        # strict=False（默认）：STELA 失败时原样透传到 upstream，保证
+        # 优化层永远不会破坏正确性（RTK 同款"rewrite 失败 → 原命令"原则）。
+        # strict=True：测试 / 调试用，STELA 失败直接 500。
+        self.strict = strict
 
         if usage_log is not None:
             usage_log.parent.mkdir(parents=True, exist_ok=True)
 
         self._session: aiohttp.ClientSession | None = None
         self._call_count = 0
+        self._pipeline_failures = 0
+        self._registry = _SessionRegistry(max_size=max_sessions)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -144,21 +231,39 @@ class ProxyApp:
 
         session_id = (
             request.headers.get("x-stela-session")
-            or raw.get("metadata", {}).get("user_id")
-            or str(uuid4())
+            or (raw.get("metadata") or {}).get("user_id")
+            or _derive_session_id(raw, request.headers)
         )
+        session_state = self._registry.get_or_create(session_id)
 
         # ---- 1. STELA 管线 ----
         try:
             result = process_anthropic_request(
                 raw,
                 session_id=session_id,
+                session_state=session_state,
                 harness_name=self.harness_override,
             )
         except Exception as e:  # noqa: BLE001
-            _log.exception("STELA pipeline failed (call=%d)", call_index)
-            return _anthropic_error(500, "api_error",
-                                    f"STELA pipeline failed: {e}")
+            self._pipeline_failures += 1
+            # 第一次失败打完整 traceback；后续只打一行短消息减少日志噪音。
+            if self._pipeline_failures == 1:
+                _log.exception("STELA pipeline failed (call=%d) — falling back to "
+                               "passthrough. Further failures will log a single line.",
+                               call_index)
+            else:
+                _log.warning("STELA pipeline failed (call=%d, total=%d): %s",
+                             call_index, self._pipeline_failures, e)
+            if self.strict:
+                return _anthropic_error(500, "api_error",
+                                        f"STELA pipeline failed: {e}")
+            # 优雅降级：用原 raw 当 wire，造一个空 result 走透传路径。
+            result = PipelineResult(
+                wire=dict(raw),
+                harness="passthrough",
+                plan_slots=[],
+                routing_key=None,
+            )
 
         is_streaming = bool(raw.get("stream", False))
         url = f"{self.upstream}/v1/messages"
@@ -176,10 +281,11 @@ class ProxyApp:
 
         if is_streaming:
             return await self._stream_response(
-                request, upstream, session_id, result, call_index, t0,
+                request, upstream, session_id, result, session_state,
+                call_index, t0,
             )
         return await self._buffered_response(
-            upstream, session_id, result, call_index, t0,
+            upstream, session_id, result, session_state, call_index, t0,
         )
 
     # ------------------------------------------------------------------
@@ -191,6 +297,7 @@ class ProxyApp:
         upstream: aiohttp.ClientResponse,
         session_id: str,
         result: PipelineResult,
+        session_state: BridgeSessionState,
         call_index: int,
         t0: float,
     ) -> web.Response:
@@ -209,8 +316,9 @@ class ProxyApp:
             except Exception:  # noqa: BLE001
                 pass
 
+        self._accumulate_into_state(session_state, usage)
         self._log_usage(
-            session_id, result, usage,
+            session_id, result, usage, session_state,
             latency_s=time.time() - t0,
             streaming=False,
             status=status,
@@ -228,6 +336,7 @@ class ProxyApp:
         upstream: aiohttp.ClientResponse,
         session_id: str,
         result: PipelineResult,
+        session_state: BridgeSessionState,
         call_index: int,
         t0: float,
     ) -> web.StreamResponse:
@@ -241,7 +350,7 @@ class ProxyApp:
             finally:
                 upstream.release()
             self._log_usage(
-                session_id, result, {},
+                session_id, result, {}, session_state,
                 latency_s=time.time() - t0,
                 streaming=True,
                 status=status,
@@ -284,8 +393,9 @@ class ProxyApp:
         finally:
             upstream.release()
 
+        self._accumulate_into_state(session_state, usage_aggregate)
         self._log_usage(
-            session_id, result, usage_aggregate,
+            session_id, result, usage_aggregate, session_state,
             latency_s=time.time() - t0,
             streaming=True,
             status=200,
@@ -362,11 +472,25 @@ class ProxyApp:
     # 日志
     # ------------------------------------------------------------------
 
+    def _accumulate_into_state(
+        self, session_state: BridgeSessionState, usage: Mapping[str, Any],
+    ) -> None:
+        """把 upstream 响应的 cache_creation tokens 累加进 session_state。
+
+        这是 STELA 的 ``bridge.absorb_usage`` 在 proxy 路径下的等价物。
+        没有这一步，R8 触发条件永远凑不齐 ``cumulative_cache_creation``
+        阈值。
+        """
+        cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
+        if cache_write:
+            session_state.stats.cumulative_cache_creation += cache_write
+
     def _log_usage(
         self,
         session_id: str,
         result: PipelineResult,
         usage: dict[str, Any],
+        session_state: BridgeSessionState,
         *,
         latency_s: float,
         streaming: bool,
@@ -388,6 +512,12 @@ class ProxyApp:
                     "status": status,
                     "raw_usage": usage,
                     "normalized": _normalize_usage(usage),
+                    "cumulative": {
+                        "cache_creation": session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(session_state.refpool.slugs),
+                    },
                 }, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001
             _log.exception("usage log write failed")
@@ -402,12 +532,14 @@ def make_app(
     upstream: str = _DEFAULT_UPSTREAM,
     usage_log: Path | None = None,
     harness_override: str | None = None,
+    strict: bool = False,
 ) -> web.Application:
     """构造一个完整的 aiohttp 应用。可被测试 / ASGI 嵌入复用。"""
     proxy = ProxyApp(
         upstream=upstream,
         usage_log=usage_log,
         harness_override=harness_override,
+        strict=strict,
     )
     app = web.Application()
     app.router.add_post("/v1/messages", proxy.handle_messages)
@@ -424,6 +556,7 @@ def run(
     upstream: str = _DEFAULT_UPSTREAM,
     usage_log: Path | None = None,
     harness_override: str | None = None,
+    strict: bool = False,
 ) -> None:
     """阻塞式启动（CLI 入口用）。"""
     logging.basicConfig(
@@ -434,8 +567,11 @@ def run(
         upstream=upstream,
         usage_log=usage_log,
         harness_override=harness_override,
+        strict=strict,
     )
     _log.info("STELA proxy listening on http://%s:%d → %s", host, port, upstream)
     if usage_log:
         _log.info("usage log → %s", usage_log)
+    if strict:
+        _log.info("strict mode ON — STELA failure 返回 500（不降级到 passthrough）")
     web.run_app(app, host=host, port=port, print=None, access_log=None)

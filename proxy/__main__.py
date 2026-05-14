@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--harness", default=None,
                         choices=["openclaw", "hermes"],
                         help="强制使用某个 harness（默认自动检测）")
+    parser.add_argument("--strict", action="store_true",
+                        help="STELA 失败时返回 500（默认降级到 passthrough）")
     args = parser.parse_args(argv)
 
     run(
@@ -34,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         upstream=args.upstream,
         usage_log=args.usage_log,
         harness_override=args.harness,
+        strict=args.strict,
     )
     return 0
 

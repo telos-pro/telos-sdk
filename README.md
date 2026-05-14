@@ -1,7 +1,11 @@
 # STELA —— Stable prefix · Tiered bands · Ephemeral tail · Layered adapters · Anchored marks
 
 > 三层 cache-友好 prompt 协议的 Python 参考实现。
-> 设计文档：[`docs/2026-05-06-stela-protocol.md`](../docs/2026-05-06-stela-protocol.md)
+>
+> - **想直接用**：看 [`docs/User-guide.md`](docs/User-guide.md)（安装、接入路径、CLI、故障排查）
+> - **想看改动历史**：看 [`CHANGELOG.md`](CHANGELOG.md)
+> - **想理解协议**：看 [`docs/2026-05-06-stela-protocol.md`](docs/2026-05-06-stela-protocol.md)
+> - **本 README**：核心概念速览（协议简介、不变量、5 原语、capability 矩阵）
 
 **STELA**（"石碑"）取意：石碑底座的铭文（durable prefix）刻一次用一辈子；
 上方按时间累加的题字（每轮 user/assistant 内容）随时可擦改，但不会动到底座。

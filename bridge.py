@@ -52,7 +52,7 @@ from stela.refpool import RefPool
 
 
 # ---------------------------------------------------------------------------
-# Bridge 内部状态
+# Bridge 跨 turn 持久化的状态
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -62,6 +62,25 @@ class _SessionStats:
     real_requests_since_refresh: int = 0
     cumulative_cache_creation: int = 0
     last_refresh_at: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class BridgeSessionState:
+    """一个 conversation session 的全部跨 turn 状态。
+
+    设计意图：上游（proxy / SDK transport）可以按 session_id 持有一份
+    ``BridgeSessionState``，每轮请求构造新的 ``Bridge`` 时传进来。这样：
+
+    - ref-pool slug 一次注册、全 session 共享（fold 状态跨轮保持）
+    - R8 自适应 refresh 的请求计数能真累积
+    - cache_creation 累计计数能真累积，触发上游 fold 提示
+
+    缺省（``None``）时 Bridge 自己 new 一个，行为退化到"每轮独立"——与
+    之前完全等价，保证不破坏现有调用方。
+    """
+
+    refpool: RefPool = field(default_factory=RefPool)
+    stats: _SessionStats = field(default_factory=_SessionStats)
 
 
 REFRESH_THRESHOLD = 11  # Janus §6.3.1：每续期间至少 11 次真实请求才回本
@@ -239,18 +258,43 @@ def _canonicalize_ir(ir: StelaIR) -> StelaIR:
 # ---------------------------------------------------------------------------
 
 class Bridge:
-    """每个 session 一个实例。线程不安全（同一 session 通常顺序处理）。"""
+    """每个 session 一个实例。线程不安全（同一 session 通常顺序处理）。
 
-    def __init__(self, ir: StelaIR, engine: EngineAdapter):
+    跨 turn 状态外置：传入 ``session_state`` 让 ref-pool + R8 计数器跨调用
+    累积；不传则每个 Bridge 独立持有状态（与早期版本行为等价）。
+    """
+
+    def __init__(
+        self,
+        ir: StelaIR,
+        engine: EngineAdapter,
+        *,
+        session_state: BridgeSessionState | None = None,
+    ):
         self._ir = ir
         self._engine = engine
-        self._refpool = RefPool()
-        # 把初始 IR 里的 ref_pool 同步到内部 RefPool
+        self._state = session_state if session_state is not None else BridgeSessionState()
+        # 把当前 IR 里的 ref_pool 同步进 state.refpool。
+        # 用 register_or_skip：第二次起，已注册的 slug（可能已被 fold 改成
+        # 占位符）不会被新一轮的完整 payload 覆盖回去。
         for slug, blk in ir.ref_pool.items():
-            self._refpool.register(slug, blk)
-        self._stats = _SessionStats()
+            self._state.refpool.register_or_skip(slug, blk)
         # 初始 IR 也走一遍 §5 校验，避免 harness plugin 偷懒
         assert_ir_invariants(self._ir)
+
+    @property
+    def session_state(self) -> BridgeSessionState:
+        """暴露外置状态。上游可读 ``cumulative_cache_creation`` 等做诊断。"""
+        return self._state
+
+    # 后向兼容：旧代码可能直接读这些字段。保留 property 读路径。
+    @property
+    def _refpool(self) -> RefPool:  # type: ignore[override]
+        return self._state.refpool
+
+    @property
+    def _stats(self) -> _SessionStats:  # type: ignore[override]
+        return self._state.stats
 
     # ------------------------------------------------------------------
     # 五个原语
@@ -382,17 +426,26 @@ class Bridge:
 
     def emit(self) -> Mapping[str, Any]:
         """规范化 → 校验 → 委托 engine.emit() 出 wire 请求。"""
+        wire, _ = self.emit_with_plan()
+        return wire
+
+    def emit_with_plan(self) -> tuple[Mapping[str, Any], EmitPlan]:
+        """``emit()`` 的二元返回版：同时拿到 wire 和当次使用的 EmitPlan。
+
+        proxy / transport 想记 plan 诊断（slot 名、routing_key 等）的时候用
+        这个，避免它们自己重复跑 canonicalize + plan_marks。
+        """
         canon = _canonicalize_ir(self._ir)
         # 渲染前再做一次完整 §5 校验（修改 IR 的入口很多，最后一道防线）
         assert_ir_invariants(canon)
         # ref-pool lint：扫描所有文本 block 内的 [ref:...] 引用
-        self._refpool.lint_blocks(canon.system, "system")
+        self._state.refpool.lint_blocks(canon.system, "system")
         for i, m in enumerate(canon.messages):
-            self._refpool.lint_blocks(m.blocks, f"messages[{i}]")
+            self._state.refpool.lint_blocks(m.blocks, f"messages[{i}]")
         plan = self._engine.plan_marks(canon)
         wire = self._engine.emit(canon, plan)
-        self._stats.real_requests_since_refresh += 1
-        return wire
+        self._state.stats.real_requests_since_refresh += 1
+        return wire, plan
 
     def absorb_usage(self, raw_response: Mapping[str, Any]) -> UsageReport:
         """解析 engine response，更新 cache_creation 累计计数。"""

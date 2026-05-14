@@ -57,6 +57,22 @@ class RefPool:
             )
         self._entries[slug] = block
 
+    def register_or_skip(self, slug: str, block: StelaBlock) -> bool:
+        """Idempotent register —— 跨 turn 共享 RefPool 时用。
+
+        - slug 未注册 → 走标准 register
+        - slug 已注册 → 跳过（保留现有 entry，可能已被 fold 成占位符）
+
+        关键不变量：harness 每轮都生产完整 payload 的 ref_pool；本方法防止
+        第二轮把第一轮 fold 过的 entry 覆盖回完整内容。
+
+        返回 True 表示真的注册了，False 表示跳过。
+        """
+        if slug in self._entries:
+            return False
+        self.register(slug, block)
+        return True
+
     def fold(self, slug: str, *, summary: str | None = None) -> StelaBlock:
         """把 ref-pool 条目折叠成短占位符；返回新 block。
 

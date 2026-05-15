@@ -382,13 +382,22 @@ class StelaOpenAITransport:
             self._usage_log.parent.mkdir(parents=True, exist_ok=True)
             with self._usage_log.open("a") as f:
                 f.write(json.dumps({
+                    "ts": time.time(),
                     "session_id": self._session_id,
                     "call_index": self._call_count,
                     "model": model,
+                    "harness": self._harness.__class__.__name__.lower().replace("plugin", ""),
                     "latency_s": round(dt, 3),
                     "routing_key": plan.routing_key,
                     "raw_usage": usage_dict,
                     "normalized": normalized,
+                    "cumulative": {
+                        "cache_creation":
+                            self._session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            self._session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(self._session_state.refpool.slugs),
+                    },
                 }, ensure_ascii=False) + "\n")
 
         if self._trace_log is not None:

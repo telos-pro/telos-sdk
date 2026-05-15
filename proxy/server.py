@@ -263,6 +263,7 @@ class ProxyApp:
                 harness="passthrough",
                 plan_slots=[],
                 routing_key=None,
+                model=raw.get("model", ""),
             )
 
         is_streaming = bool(raw.get("stream", False))
@@ -502,8 +503,10 @@ class ProxyApp:
         try:
             with self.usage_log.open("a") as f:
                 f.write(json.dumps({
+                    "ts": time.time(),
                     "session_id": session_id,
                     "call_index": call_index,
+                    "model": result.model,
                     "harness": result.harness,
                     "n_slots": len(result.plan_slots),
                     "slots": result.plan_slots,

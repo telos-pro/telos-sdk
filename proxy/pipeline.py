@@ -30,6 +30,7 @@ class PipelineResult:
         harness:     实际使用的 harness 名（自动检测或显式传入）。
         plan_slots:  ``EmitPlan`` 的 slot 名列表（诊断用）。
         routing_key: 对 Anthropic 始终为 ``None``；保留字段以对齐通用 schema。
+        model:       请求里的 model 字段（透传，给 dashboard 算成本用）。
         cumulative_cache_creation: 跨 turn 累计的 cache_write tokens（来自
                                    session_state）。新 session 第一次为 0。
         real_requests_since_refresh: 距上次 refresh 的真实请求计数。
@@ -39,6 +40,7 @@ class PipelineResult:
     harness: str
     plan_slots: list[str]
     routing_key: str | None
+    model: str = ""
     cumulative_cache_creation: int = 0
     real_requests_since_refresh: int = 0
 
@@ -94,6 +96,7 @@ def process_anthropic_request(
         harness=name,
         plan_slots=[s.name for s in plan.slots],
         routing_key=plan.routing_key,
+        model=raw.get("model", ""),
         cumulative_cache_creation=state.stats.cumulative_cache_creation,
         real_requests_since_refresh=state.stats.real_requests_since_refresh,
     )

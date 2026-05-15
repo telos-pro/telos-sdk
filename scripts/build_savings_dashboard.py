@@ -523,7 +523,12 @@ def _render_timeline_svg(timeline: dict[str, dict[str, float]]) -> str:
 """
 
 
-def render_dashboard(summary: Summary, sources: list[Path]) -> str:
+def render_dashboard(
+    summary: Summary,
+    sources: list[Path],
+    *,
+    refresh_seconds: int | None = None,
+) -> str:
     total = summary.total
     inp = total.raw_input + total.cache_read
     hit_rate = total.cache_read / inp if inp else 0.0
@@ -569,9 +574,19 @@ def render_dashboard(summary: Summary, sources: list[Path]) -> str:
 
     timeline_svg = _render_timeline_svg(summary.timeline)
 
+    refresh_tag = (
+        f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+        if refresh_seconds and refresh_seconds > 0 else ""
+    )
+    refresh_note = (
+        f' · auto-refresh {int(refresh_seconds)}s'
+        if refresh_seconds and refresh_seconds > 0 else ""
+    )
+
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
+{refresh_tag}
 <title>STELA · Token Savings Dashboard</title>
 <style>{CSS}</style>
 </head><body>
@@ -581,7 +596,7 @@ def render_dashboard(summary: Summary, sources: list[Path]) -> str:
   <h1>STELA · Token Savings</h1>
   <div class="sub">
     {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
-    · generated {ts_now}
+    · generated {ts_now}{refresh_note}
   </div>
 </header>
 
@@ -651,6 +666,57 @@ def render_dashboard(summary: Summary, sources: list[Path]) -> str:
 
 </div>
 </body></html>
+"""
+
+
+def render_from_usage_log(
+    path: Path | None,
+    *,
+    refresh_seconds: int | None = None,
+) -> str:
+    """Live-server helper：从单个 usage_log 文件读 → 渲染。
+
+    专给 proxy 内嵌端点用：永远返回一个可显示的 HTML，即使日志缺失 / 为空。
+    缺失或空时也带上 ``refresh_tag``，浏览器自己会等下一波。
+    """
+    if path is None or not path.exists():
+        return _render_empty(
+            "No usage_log configured.",
+            "Restart the proxy with --usage-log <path> to enable.",
+            refresh_seconds=refresh_seconds,
+        )
+    records = list(_read_jsonl(path))
+    if not records:
+        return _render_empty(
+            "Waiting for first request…",
+            f"Watching <code>{html.escape(str(path))}</code>. "
+            "Send a request through the proxy and this page will populate.",
+            refresh_seconds=refresh_seconds,
+        )
+    summary = aggregate(records)
+    return render_dashboard(summary, [path], refresh_seconds=refresh_seconds)
+
+
+def _render_empty(title: str, body: str, *,
+                   refresh_seconds: int | None) -> str:
+    """空状态 HTML stub —— 保留 auto-refresh，等数据进来。"""
+    refresh_tag = (
+        f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+        if refresh_seconds and refresh_seconds > 0 else ""
+    )
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+{refresh_tag}
+<title>STELA · Token Savings</title>
+<style>{CSS}</style>
+</head><body><div class="wrap">
+<header><h1>STELA · Token Savings</h1></header>
+<div class="card">
+  <h2>{html.escape(title)}</h2>
+  <p class="muted">{body}</p>
+</div>
+</div></body></html>
 """
 
 

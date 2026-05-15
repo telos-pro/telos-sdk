@@ -28,6 +28,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="强制使用某个 harness（默认自动检测）")
     parser.add_argument("--strict", action="store_true",
                         help="STELA 失败时返回 500（默认降级到 passthrough）")
+    parser.add_argument("--dashboard-refresh", type=int, default=5,
+                        metavar="SECONDS",
+                        help="GET /__stela/dashboard 的 meta-refresh 间隔，"
+                             "0 = 关闭 auto-refresh（默认 5 秒）")
     args = parser.parse_args(argv)
 
     run(
@@ -37,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         usage_log=args.usage_log,
         harness_override=args.harness,
         strict=args.strict,
+        dashboard_refresh=args.dashboard_refresh,
     )
     return 0
 

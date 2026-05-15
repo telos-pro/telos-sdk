@@ -188,6 +188,31 @@ stela dashboard --usage-log '/tmp/runs/*.usage.jsonl' \
 
 未识别 model 走 Sonnet 价位做兜底估算；金额仅供"省了多少"参考，不是结账数。
 
+### 10.1 Live dashboard（proxy 内嵌，自动刷新）
+
+`stela proxy` 启动时会顺带挂一个只读 endpoint：
+
+```
+GET http://<host>:<port>/__stela/dashboard
+```
+
+每次请求都重新读 `--usage-log` 文件 → 重新聚合 → 返回带
+`<meta http-equiv="refresh">` 的 HTML，浏览器自己每 N 秒刷一次（零 JS）。
+
+```bash
+stela proxy --port 7171 --usage-log ~/.stela/usage.jsonl
+# 浏览器打开：
+open http://127.0.0.1:7171/__stela/dashboard
+
+# 默认 5 秒刷一次；改成 2 秒：
+stela proxy --usage-log ~/.stela/usage.jsonl --dashboard-refresh 2
+# 关掉 auto-refresh（手动 reload 才更新）：
+stela proxy --usage-log ~/.stela/usage.jsonl --dashboard-refresh 0
+```
+
+没设 `--usage-log` 也能访问，会显示一个空 stub（仍带 refresh 标签，等
+你重启 proxy 配上 log 后页面会自动接上）。
+
 ---
 
 ## 11. 不做什么

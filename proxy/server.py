@@ -170,6 +170,7 @@ class ProxyApp:
         request_timeout: float = 600.0,
         strict: bool = False,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
+        dashboard_refresh: int = 5,
     ):
         self.upstream = upstream.rstrip("/")
         self.usage_log = usage_log
@@ -179,6 +180,8 @@ class ProxyApp:
         # 优化层永远不会破坏正确性（RTK 同款"rewrite 失败 → 原命令"原则）。
         # strict=True：测试 / 调试用，STELA 失败直接 500。
         self.strict = strict
+        # /__stela/dashboard 的 meta-refresh 间隔（秒）；0 = 关闭 auto-refresh。
+        self.dashboard_refresh = dashboard_refresh
 
         if usage_log is not None:
             usage_log.parent.mkdir(parents=True, exist_ok=True)
@@ -444,6 +447,32 @@ class ProxyApp:
                 usage["output_tokens"] = int(u["output_tokens"])
 
     # ------------------------------------------------------------------
+    # GET /__stela/dashboard —— live savings dashboard
+    # ------------------------------------------------------------------
+
+    async def handle_dashboard(self, request: web.Request) -> web.Response:
+        """实时读 usage_log → aggregate → 渲染 HTML。
+
+        每次请求都重新读全文件 + 重渲染。usage_log 不会大（几十 K/天的
+        量级，每行 jsonl 一两百字节），所以不用搞缓存或 incremental。
+        """
+        # 延迟 import，避免 proxy 冷启动时强依赖 dashboard 模块。
+        from stela.scripts.build_savings_dashboard import render_from_usage_log
+
+        try:
+            body = render_from_usage_log(
+                self.usage_log,
+                refresh_seconds=self.dashboard_refresh,
+            )
+        except Exception as e:  # noqa: BLE001
+            _log.exception("dashboard render failed")
+            return web.Response(
+                text=f"<pre>dashboard render failed: {e}</pre>",
+                content_type="text/html", status=500,
+            )
+        return web.Response(text=body, content_type="text/html")
+
+    # ------------------------------------------------------------------
     # 透明 passthrough：非 /v1/messages 的所有路径
     # ------------------------------------------------------------------
 
@@ -536,6 +565,7 @@ def make_app(
     usage_log: Path | None = None,
     harness_override: str | None = None,
     strict: bool = False,
+    dashboard_refresh: int = 5,
 ) -> web.Application:
     """构造一个完整的 aiohttp 应用。可被测试 / ASGI 嵌入复用。"""
     proxy = ProxyApp(
@@ -543,9 +573,12 @@ def make_app(
         usage_log=usage_log,
         harness_override=harness_override,
         strict=strict,
+        dashboard_refresh=dashboard_refresh,
     )
     app = web.Application()
     app.router.add_post("/v1/messages", proxy.handle_messages)
+    # 必须在 catch-all passthrough 之前注册，否则会被吞掉。
+    app.router.add_get("/__stela/dashboard", proxy.handle_dashboard)
     app.router.add_route("*", "/{tail:.*}", proxy.handle_passthrough)
     app.on_shutdown.append(proxy.on_shutdown)
     app["proxy"] = proxy
@@ -560,6 +593,7 @@ def run(
     usage_log: Path | None = None,
     harness_override: str | None = None,
     strict: bool = False,
+    dashboard_refresh: int = 5,
 ) -> None:
     """阻塞式启动（CLI 入口用）。"""
     logging.basicConfig(
@@ -571,10 +605,16 @@ def run(
         usage_log=usage_log,
         harness_override=harness_override,
         strict=strict,
+        dashboard_refresh=dashboard_refresh,
     )
     _log.info("STELA proxy listening on http://%s:%d → %s", host, port, upstream)
     if usage_log:
-        _log.info("usage log → %s", usage_log)
+        _log.info("usage log    → %s", usage_log)
+        _log.info("dashboard    → http://%s:%d/__stela/dashboard"
+                  " (refresh=%ds)", host, port, dashboard_refresh)
+    else:
+        _log.info("dashboard    → http://%s:%d/__stela/dashboard"
+                  " (no usage_log; will show empty state)", host, port)
     if strict:
         _log.info("strict mode ON — STELA failure 返回 500（不降级到 passthrough）")
     web.run_app(app, host=host, port=port, print=None, access_log=None)

@@ -26,6 +26,8 @@ packages = [
     "stela.scripts",
     "stela.proxy",
     "stela.init",
+    "stela.output_filter",
+    "stela.replay",
 ]
 
 [tool.setuptools.package-dir]

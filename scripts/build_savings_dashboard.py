@@ -168,6 +168,10 @@ def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
 # 聚合
 # ---------------------------------------------------------------------------
 
+# tool_result 文本估算 token 用的字符/token 比（粗略，英文混代码约 3.5–4）。
+_CHARS_PER_TOKEN = 4
+
+
 @dataclass
 class _Agg:
     """累计 4 个 token bucket + 美元 + 计次。
@@ -175,6 +179,8 @@ class _Agg:
     新增字段：
     - ``cache_write_5m`` / ``cache_write_1h``：拆分后的 cache_write 量
     - ``counterfactual_usd``：反事实成本（关闭 STELA 时要付多少）
+    - ``tool_orig_chars`` / ``tool_filtered_chars``：RTK 过滤前/后的工具
+      输出字符数；``tool_saved_usd`` 是据此估算的省钱（input 价上界）。
     """
     raw_input: int = 0
     cache_read: int = 0
@@ -187,9 +193,24 @@ class _Agg:
     counterfactual_usd: float = 0.0
     calls: int = 0
     last_ts: float = 0.0
+    # RTK 工具输出过滤
+    tool_orig_chars: int = 0
+    tool_filtered_chars: int = 0
+    tool_blocks_filtered: int = 0
+    tool_saved_usd: float = 0.0
+
+    @property
+    def tool_saved_chars(self) -> int:
+        return max(0, self.tool_orig_chars - self.tool_filtered_chars)
+
+    @property
+    def tool_saved_tokens(self) -> int:
+        return self.tool_saved_chars // _CHARS_PER_TOKEN
 
     def add(self, n: dict[str, int], cost: dict[str, float], saved: float,
-            counterfactual: float, ts: float) -> None:
+            counterfactual: float, ts: float,
+            tool_reduction: Mapping[str, Any] | None = None,
+            tool_saved_usd: float = 0.0) -> None:
         self.raw_input += n["raw_input"]
         self.cache_read += n["cache_read"]
         self.cache_write += n["cache_write"]
@@ -201,8 +222,18 @@ class _Agg:
         self.saved_usd += saved
         self.counterfactual_usd += counterfactual
         self.calls += 1
+        if tool_reduction:
+            self.tool_orig_chars += int(tool_reduction.get("original_chars", 0) or 0)
+            self.tool_filtered_chars += int(tool_reduction.get("filtered_chars", 0) or 0)
+            self.tool_blocks_filtered += int(tool_reduction.get("blocks_filtered", 0) or 0)
+            self.tool_saved_usd += tool_saved_usd
         if ts > self.last_ts:
             self.last_ts = ts
+
+    @property
+    def combined_saved_usd(self) -> float:
+        """STELA 前缀缓存省钱 + RTK 工具输出过滤省钱。"""
+        return self.saved_usd + self.tool_saved_usd
 
 
 @dataclass
@@ -211,6 +242,15 @@ class Summary:
     by_harness: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_model: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_session: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
+    # 开关维度：mode ∈ {none, stela, rtk, both, passthrough, rtk-only}
+    by_mode: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
+    # 对比实验：compare_group → mode → _Agg。同一 group 下不同 mode 的
+    # session 会在 dashboard 上并排展示。
+    compare_groups: dict[str, dict[str, _Agg]] = field(
+        default_factory=lambda: defaultdict(lambda: defaultdict(_Agg))
+    )
+    # 哪些 compare_group 来自 `stela replay`（受控重放）而非真实双 session。
+    replay_groups: set[str] = field(default_factory=set)
     # 时间序列：以 hour bucket 累计 cache_read / saved_usd / counterfactual / cost / calls
     timeline: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {
@@ -267,16 +307,39 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         model = rec.get("model") or ""
         harness = rec.get("harness") or "?"
         session = rec.get("session_id") or "(no-session)"
+        mode = rec.get("mode") or "stela"
+        compare_group = rec.get("compare_group")
         ts = float(rec.get("ts") or 0.0)
 
         cost = _cost_usd(model, n_dict)
         saved = _saved_usd_for_call(model, n_dict)
         counterfactual = _counterfactual_cost_usd(model, n_dict)
 
-        s.total.add(n_dict, cost, saved, counterfactual, ts)
-        s.by_harness[harness].add(n_dict, cost, saved, counterfactual, ts)
-        s.by_model[model or "(unknown)"].add(n_dict, cost, saved, counterfactual, ts)
-        s.by_session[session].add(n_dict, cost, saved, counterfactual, ts)
+        # RTK 工具输出过滤：把省下的字符折成 token，按 input 价估算省钱
+        # （上界——这些 token 若不过滤，多数会以 cache_write/raw_input 入账）。
+        tool_reduction = rec.get("tool_output_reduction")
+        if not isinstance(tool_reduction, Mapping):
+            tool_reduction = None
+        tool_saved_usd = 0.0
+        if tool_reduction:
+            saved_chars = max(0, int(tool_reduction.get("original_chars", 0) or 0)
+                              - int(tool_reduction.get("filtered_chars", 0) or 0))
+            tool_saved_usd = (_price_for(model)["input"]
+                              * (saved_chars / _CHARS_PER_TOKEN) / 1_000_000)
+
+        def _add(agg: _Agg) -> None:
+            agg.add(n_dict, cost, saved, counterfactual, ts,
+                    tool_reduction=tool_reduction, tool_saved_usd=tool_saved_usd)
+
+        _add(s.total)
+        _add(s.by_harness[harness])
+        _add(s.by_model[model or "(unknown)"])
+        _add(s.by_session[session])
+        _add(s.by_mode[mode])
+        if compare_group:
+            _add(s.compare_groups[compare_group][mode])
+            if rec.get("replay"):
+                s.replay_groups.add(compare_group)
         s.sessions_seen.add(session)
 
         if ts > 0:
@@ -566,6 +629,146 @@ def _render_breakdown_table(label: str, data: dict[str, _Agg],
 """
 
 
+# mode label → 展示用颜色 / 说明
+_MODE_META: dict[str, tuple[str, str]] = {
+    "both":        ("#d2a8ff", "STELA 前缀缓存 + RTK 工具过滤"),
+    "stela":       ("#3fb950", "只 STELA 前缀缓存"),
+    "rtk":         ("#f0883e", "只 RTK 工具过滤"),
+    "rtk-only":    ("#f0883e", "只 RTK 工具过滤"),
+    "none":        ("#7d8590", "纯透传，无优化"),
+    "passthrough": ("#7d8590", "纯透传 / 管线降级"),
+}
+
+
+def _mode_color(mode: str) -> str:
+    return _MODE_META.get(mode, ("#79c0ff", ""))[0]
+
+
+def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
+    """开关维度 breakdown：每种 mode 一行，展示 STELA / RTK 两路省钱。"""
+    if not by_mode:
+        return ""
+    order = {"both": 0, "stela": 1, "rtk": 2, "rtk-only": 2, "none": 3,
+             "passthrough": 4}
+    rows_sorted = sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9))
+    max_combined = max((a.combined_saved_usd for _, a in rows_sorted), default=0.0)
+
+    rows = []
+    for mode, a in rows_sorted:
+        color = _mode_color(mode)
+        desc = _MODE_META.get(mode, ("", ""))[1]
+        bar_pct = (100 * a.combined_saved_usd / max_combined) if max_combined > 0 else 0.0
+        rows.append(
+            f"<tr>"
+            f'<td class="left"><b style="color:{color}">{html.escape(mode)}</b>'
+            f'<br><span class="muted" style="font-size:10px">{html.escape(desc)}</span></td>'
+            f"<td>{_fmt_int(a.calls)}</td>"
+            f'<td class="green">{_fmt_usd(a.saved_usd)}</td>'
+            f'<td class="gold">{_fmt_tokens(a.tool_saved_tokens)}</td>'
+            f'<td class="gold">{_fmt_usd(a.tool_saved_usd)}</td>'
+            f'<td class="bar-cell">'
+            f'<span class="fill" style="width:{bar_pct:.1f}%"></span>'
+            f'<span class="label-overlay">{_fmt_usd(a.combined_saved_usd)}</span>'
+            f"</td>"
+            f"</tr>"
+        )
+    return f"""
+<div class="card">
+  <h2>Breakdown by mode（开关对照）</h2>
+  <table>
+    <thead><tr>
+      <th class="left">mode</th>
+      <th>calls</th>
+      <th>STELA saved $</th>
+      <th>RTK tokens removed</th>
+      <th>RTK saved $ (est)</th>
+      <th class="left">combined saved $</th>
+    </tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <p class="muted" style="font-size:11px;margin-top:8px">
+    STELA saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
+    RTK saved $ = 工具输出过滤省下的字符折算 token × input 价（上界估算）。
+    两路相加 = combined。
+  </p>
+</div>
+"""
+
+
+def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
+                             replay_groups: set[str] | None = None) -> str:
+    """对比实验：同一 compare_group 下、不同 mode 的 session 并排展示。
+
+    每个 group 一张卡，卡里每个 mode 一个 cell；自动高亮 combined saved $
+    最高的 mode。用于「同任务、相同用户输入、不同开关」的 A/B 对照。
+
+    ``replay_groups`` 里的 group 来自 `stela replay`（受控重放），卡标题
+    标 ``replay`` 徽章；其余来自真实双 session，标 ``live A/B``。
+    """
+    if not compare_groups:
+        return ""
+    replay_groups = replay_groups or set()
+    cards = []
+    for group, by_mode in sorted(compare_groups.items()):
+        if not by_mode:
+            continue
+        is_replay = group in replay_groups
+        _badge_base = ("display:inline-block;margin-left:8px;padding:2px 9px;"
+                       "border-radius:999px;font-size:10px;vertical-align:middle;"
+                       "font-family:sans-serif;letter-spacing:0")
+        src_badge = (
+            f'<span style="{_badge_base};background:#2d2150;color:#d2a8ff">replay</span>'
+            if is_replay else
+            f'<span style="{_badge_base};background:#1f3a4d;color:#79c0ff">live A/B</span>'
+        )
+        best_mode = max(by_mode.items(),
+                        key=lambda kv: kv[1].combined_saved_usd)[0]
+        # 最贵基线：成本最高的 mode，用来算各 mode 省了多少
+        max_cost = max((a.cost_usd for a in by_mode.values()), default=0.0)
+        cells = []
+        order = {"both": 0, "stela": 1, "rtk": 2, "rtk-only": 2, "none": 3,
+                 "passthrough": 4}
+        for mode, a in sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9)):
+            color = _mode_color(mode)
+            is_best = mode == best_mode
+            delta = max_cost - a.cost_usd
+            delta_html = (
+                f'<div class="row"><span>vs 最贵 mode</span>'
+                f'<b class="green">−{_fmt_usd(delta)}</b></div>'
+                if delta > 0 else
+                '<div class="row"><span>vs 最贵 mode</span><b class="muted">基线</b></div>'
+            )
+            prompt_tokens = a.raw_input + a.cache_read + a.cache_write
+            hit = (a.cache_read / prompt_tokens) if prompt_tokens else 0.0
+            badge = ('<span class="pill" style="background:#1a4d2e;color:#56d364">'
+                     'best</span>') if is_best else ""
+            cells.append(f"""
+    <div class="compare-cell" style="border-color:{color}55">
+      <h3><b style="color:{color}">{html.escape(mode)}</b> {badge}</h3>
+      <div class="big" style="color:{color}">{_fmt_usd(a.cost_usd)}</div>
+      <div class="row"><span>calls</span><b>{_fmt_int(a.calls)}</b></div>
+      <div class="row"><span>cache hit%</span><b>{_fmt_pct(hit)}</b></div>
+      <div class="row"><span>STELA saved $</span><b class="green">{_fmt_usd(a.saved_usd)}</b></div>
+      <div class="row"><span>RTK tokens removed</span><b class="gold">{_fmt_tokens(a.tool_saved_tokens)}</b></div>
+      <div class="row"><span>combined saved $</span><b class="lilac">{_fmt_usd(a.combined_saved_usd)}</b></div>
+      {delta_html}
+    </div>""")
+        n_cols = min(len(cells), 4)
+        cards.append(f"""
+<div class="card">
+  <h2>Compare group · {html.escape(group)} {src_badge}</h2>
+  <div class="compare-grid" style="grid-template-columns:repeat({n_cols},1fr)">
+    {''.join(cells)}
+  </div>
+</div>""")
+    if not cards:
+        return ""
+    return ("""
+<div class="card" style="background:transparent;border:none;padding:0;margin-bottom:6px">
+  <h2 style="color:#d2a8ff">A/B 对比 · 同任务不同开关</h2>
+</div>""" + "".join(cards))
+
+
 def _render_timeline_svg(timeline: dict[str, dict[str, float]]) -> str:
     if not timeline:
         return '<p class="muted">no timestamped data</p>'
@@ -710,6 +913,9 @@ def render_dashboard(
         "Top sessions by saved $", summary.by_session,
         key_label="session_id", max_rows=15
     )
+    by_mode = _render_mode_table(summary.by_mode)
+    compare_section = _render_compare_section(summary.compare_groups,
+                                              summary.replay_groups)
 
     timeline_svg = _render_timeline_svg(summary.timeline)
 
@@ -880,6 +1086,9 @@ def render_dashboard(
   <div class="kpi"><div class="label">output</div>
     <div class="value blue">{_fmt_tokens(total.output)}</div>
     <div class="sub">{_fmt_int(total.output)}</div></div>
+  <div class="kpi"><div class="label">RTK tool output removed</div>
+    <div class="value gold">{_fmt_tokens(total.tool_saved_tokens)}</div>
+    <div class="sub">{_fmt_int(total.tool_blocks_filtered)} blocks · ~{_fmt_usd(total.tool_saved_usd)}</div></div>
 </div>
 
 <div class="card with-only">
@@ -911,6 +1120,8 @@ def render_dashboard(
   {timeline_svg}
 </div>
 
+{compare_section}
+{by_mode}
 {by_harness}
 {by_model}
 {by_session}

@@ -41,6 +41,8 @@ import aiohttp
 from aiohttp import web
 
 from stela.bridge import BridgeSessionState
+from stela.corpus import record_call
+from stela.output_filter import StelaMode, apply_filter, build_filter
 from stela.proxy.inspector import (
     SessionInspector as _SessionInspector,
     SessionInspectorEntry as _SessionInspectorEntry,
@@ -180,11 +182,24 @@ class ProxyApp:
         strict: bool = False,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
         dashboard_refresh: int = 5,
+        mode: StelaMode | None = None,
+        corpus_dir: Path | None = None,
+        record: bool = True,
     ):
         self.upstream = upstream.rstrip("/")
         self.usage_log = usage_log
         self.harness_override = harness_override
         self.request_timeout = request_timeout
+        # 进程级默认开关；可被单条请求的 X-Stela-Mode header 覆盖（且首个
+        # 请求的取值会被 sticky 到该 session）。
+        self.mode = mode or StelaMode()
+        # 工具结果过滤器：rtk 二进制可用就走 rtk，否则纯 Python fallback。
+        # 构造一次、全 session 复用（无状态）。
+        self._filter = build_filter()
+        # 会话录制：默认开启，把每次调用的原始请求录进 corpus_dir，供
+        # `stela replay` 重放。仅录请求、不录响应。--no-record 可关。
+        self._record = record
+        self._corpus_dir = corpus_dir if record else None
         # strict=False（默认）：STELA 失败时原样透传到 upstream，保证
         # 优化层永远不会破坏正确性（RTK 同款"rewrite 失败 → 原命令"原则）。
         # strict=True：测试 / 调试用，STELA 失败直接 500。
@@ -229,6 +244,36 @@ class ProxyApp:
             out["accept"] = accept
         return out
 
+    def _resolve_mode(
+        self, request: web.Request, session_state: BridgeSessionState,
+    ) -> StelaMode:
+        """决定本次请求的 mode。
+
+        优先级：``X-Stela-Mode`` header > session 已锁定的 sticky_mode >
+        proxy 进程默认。首个带 header 的请求会把取值 sticky 到该 session，
+        保证对比实验里同一 session 全程不换挡。
+        """
+        header = request.headers.get("x-stela-mode")
+        if header:
+            mode = StelaMode.from_label(header)
+            if session_state.sticky_mode is None:
+                session_state.sticky_mode = mode.label
+            return mode
+        if session_state.sticky_mode is not None:
+            return StelaMode.from_label(session_state.sticky_mode)
+        return self.mode
+
+    def _resolve_compare_group(
+        self, request: web.Request, session_state: BridgeSessionState,
+    ) -> str | None:
+        """对比实验分组标签（``X-Stela-Compare-Group`` header），sticky。"""
+        header = request.headers.get("x-stela-compare-group")
+        if header:
+            if session_state.compare_group is None:
+                session_state.compare_group = header
+            return header
+        return session_state.compare_group
+
     # ------------------------------------------------------------------
     # POST /v1/messages —— 主 handler
     # ------------------------------------------------------------------
@@ -249,35 +294,73 @@ class ProxyApp:
         )
         session_state = self._registry.get_or_create(session_id)
 
-        # ---- 1. STELA 管线 ----
-        try:
-            result = process_anthropic_request(
-                raw,
-                session_id=session_id,
-                session_state=session_state,
-                harness_name=self.harness_override,
-            )
-        except Exception as e:  # noqa: BLE001
-            self._pipeline_failures += 1
-            # 第一次失败打完整 traceback；后续只打一行短消息减少日志噪音。
-            if self._pipeline_failures == 1:
-                _log.exception("STELA pipeline failed (call=%d) — falling back to "
-                               "passthrough. Further failures will log a single line.",
+        # ---- 0a. 录会话语料（原始请求，RTK / STELA 改写之前）----
+        if self._corpus_dir is not None:
+            try:
+                record_call(self._corpus_dir, session_id, call_index, raw)
+            except Exception:  # noqa: BLE001 — 录制失败绝不影响代理
+                _log.exception("corpus record failed (call=%d)", call_index)
+
+        # ---- 0. 解析本次请求的 mode / compare_group（sticky per session）----
+        mode = self._resolve_mode(request, session_state)
+        compare_group = self._resolve_compare_group(request, session_state)
+
+        # ---- 0b. RTK 工具结果过滤（仅 mode.rtk）----
+        effective_raw: Mapping[str, Any] = raw
+        filter_reduction: dict[str, Any] = {}
+        if mode.rtk:
+            try:
+                effective_raw, fstats = apply_filter(raw, self._filter)
+                filter_reduction = fstats.as_dict()
+            except Exception:  # noqa: BLE001 — 过滤层永不破坏请求
+                _log.exception("RTK filter failed (call=%d) — using raw request",
                                call_index)
-            else:
-                _log.warning("STELA pipeline failed (call=%d, total=%d): %s",
-                             call_index, self._pipeline_failures, e)
-            if self.strict:
-                return _anthropic_error(500, "api_error",
-                                        f"STELA pipeline failed: {e}")
-            # 优雅降级：用原 raw 当 wire，造一个空 result 走透传路径。
+                effective_raw = raw
+
+        # ---- 1. STELA 管线（仅 mode.stela）----
+        if mode.stela:
+            try:
+                result = process_anthropic_request(
+                    effective_raw,
+                    session_id=session_id,
+                    session_state=session_state,
+                    harness_name=self.harness_override,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._pipeline_failures += 1
+                # 第一次失败打完整 traceback；后续只打一行短消息减少日志噪音。
+                if self._pipeline_failures == 1:
+                    _log.exception("STELA pipeline failed (call=%d) — falling back to "
+                                   "passthrough. Further failures will log a single line.",
+                                   call_index)
+                else:
+                    _log.warning("STELA pipeline failed (call=%d, total=%d): %s",
+                                 call_index, self._pipeline_failures, e)
+                if self.strict:
+                    return _anthropic_error(500, "api_error",
+                                            f"STELA pipeline failed: {e}")
+                # 优雅降级：用（过滤后的）raw 当 wire，造空 result 走透传。
+                result = PipelineResult(
+                    wire=dict(effective_raw),
+                    harness="passthrough",
+                    plan_slots=[],
+                    routing_key=None,
+                    model=raw.get("model", ""),
+                )
+        else:
+            # STELA 关：不打 cache 标记，(过滤后的) raw 直接当 wire。
             result = PipelineResult(
-                wire=dict(raw),
-                harness="passthrough",
+                wire=dict(effective_raw),
+                harness="rtk-only" if mode.rtk else "passthrough",
                 plan_slots=[],
                 routing_key=None,
                 model=raw.get("model", ""),
             )
+
+        # proxy 层把开关元数据回填进 result，供 _log_usage 落盘。
+        result.mode = mode.label
+        result.compare_group = compare_group
+        result.tool_output_reduction = filter_reduction
 
         is_streaming = bool(raw.get("stream", False))
         url = f"{self.upstream}/v1/messages"
@@ -651,6 +734,9 @@ class ProxyApp:
                     "call_index": call_index,
                     "model": result.model,
                     "harness": result.harness,
+                    "mode": result.mode,
+                    "compare_group": result.compare_group,
+                    "tool_output_reduction": result.tool_output_reduction,
                     "n_slots": len(result.plan_slots),
                     "slots": result.plan_slots,
                     "latency_s": round(latency_s, 3),
@@ -680,6 +766,9 @@ def make_app(
     harness_override: str | None = None,
     strict: bool = False,
     dashboard_refresh: int = 5,
+    mode: StelaMode | None = None,
+    corpus_dir: Path | None = None,
+    record: bool = True,
 ) -> web.Application:
     """构造一个完整的 aiohttp 应用。可被测试 / ASGI 嵌入复用。"""
     proxy = ProxyApp(
@@ -688,6 +777,9 @@ def make_app(
         harness_override=harness_override,
         strict=strict,
         dashboard_refresh=dashboard_refresh,
+        mode=mode,
+        corpus_dir=corpus_dir,
+        record=record,
     )
     app = web.Application()
     app.router.add_post("/v1/messages", proxy.handle_messages)
@@ -710,20 +802,32 @@ def run(
     harness_override: str | None = None,
     strict: bool = False,
     dashboard_refresh: int = 5,
+    mode: StelaMode | None = None,
+    corpus_dir: Path | None = None,
+    record: bool = True,
 ) -> None:
     """阻塞式启动（CLI 入口用）。"""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    mode = mode or StelaMode()
     app = make_app(
         upstream=upstream,
         usage_log=usage_log,
         harness_override=harness_override,
         strict=strict,
         dashboard_refresh=dashboard_refresh,
+        mode=mode,
+        corpus_dir=corpus_dir,
+        record=record,
     )
     _log.info("STELA proxy listening on http://%s:%d → %s", host, port, upstream)
+    _log.info("default mode  → %s (stela=%s rtk=%s); 单请求可用 X-Stela-Mode 覆盖",
+              mode.label, mode.stela, mode.rtk)
+    if record and corpus_dir is not None:
+        _log.info("session corpus → %s（录原始请求供 stela replay；--no-record 可关）",
+                  corpus_dir)
     if usage_log:
         _log.info("usage log    → %s", usage_log)
         _log.info("dashboard    → http://%s:%d/__stela/dashboard"

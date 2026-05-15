@@ -86,6 +86,13 @@ class BridgeSessionState:
     # hermes 翻转 → source_tag 前缀不一致 → ref-pool slug 失配"。显式
     # 传入 ``harness_name`` 始终覆盖这个字段。
     sticky_harness: str | None = None
+    # 同理：一个 session 第一次见到的 mode（none/stela/rtk/both）被锁定，
+    # 后续同 session 的请求复用，避免对比实验里某个 session 中途换挡。
+    # proxy 配置默认值仍可被首个请求的 X-Stela-Mode header 覆盖一次。
+    sticky_mode: str | None = None
+    # 对比实验分组标签（X-Stela-Compare-Group header）。同一 compare_group
+    # 下、mode 不同的多个 session 会在 dashboard 上并排展示。
+    compare_group: str | None = None
 
 
 REFRESH_THRESHOLD = 11  # Janus §6.3.1：每续期间至少 11 次真实请求才回本

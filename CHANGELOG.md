@@ -14,6 +14,23 @@
 
 ### Added
 
+- **`stela.output_filter`** —— RTK 风格的工具结果过滤层（吸收 rtk-ai/rtk 思路）。
+  - `StelaMode` 四态开关：`none` / `stela` / `rtk` / `both`，两个独立布尔（stela 前缀缓存 + rtk 工具过滤）。
+  - `RtkFilter`：shell-out 到 `rtk` 二进制；`FallbackFilter`：无依赖的纯 Python 过滤器（连续重复行折叠、头尾截断、pytest 摘要），rtk 没装时保证开关仍生效。
+  - `apply_filter(raw, flt) -> (new_raw, FilterStats)`：把 `messages[].tool_result` 里的大段 bash 输出在进 STELA 管线前缩短。失败永远退化为原样透传。
+  - proxy 新增 `--mode {none,stela,rtk,both}` CLI 开关；单条请求可用 `X-Stela-Mode` header 覆盖（首个请求的取值 sticky 到该 session）。
+  - proxy 新增 `X-Stela-Compare-Group` header：对比实验分组标签。
+- **savings dashboard 对比能力**：usage_log 新增 `mode` / `compare_group` / `tool_output_reduction` / `replay` 字段。
+  - 新「Breakdown by mode」表：每种开关组合的 STELA 省钱 + RTK token 削减并列。
+  - 新「A/B 对比」面板：同一 `compare_group` 下、不同 mode 的 session 并排展示，自动高亮 combined-saved 最高的 mode。卡片标 `replay`（受控重放）或 `live A/B`（真实双 session）徽章。
+  - 新 KPI「RTK tool output removed」。
+- **`stela.corpus`** —— 会话语料库。proxy 默认把每次调用的**原始请求**录到 `~/.stela/corpus/<session>.jsonl`（只录请求、不录响应），供 replay 重放。
+  - proxy 新增 `--corpus-dir` / `--no-record` 开关。
+- **`stela.replay` + `stela replay` 子命令** —— 录制 → 重放对照引擎。
+  - 把语料库里某个真实会话按多种 mode 各重放一遍：逐字节相同的轮次序列、`max_tokens=1` 只测 prefill/缓存计费、给每个 mode 注入唯一 system 前缀做缓存隔离。
+  - 结果 append 到 usage_log，dashboard 的「A/B 对比」面板自动并排（标 `replay` 徽章）。
+  - 受控实验，避免双 session 的 trajectory 分叉混杂；原理与边界见 [docs/replay-comparison.md](docs/replay-comparison.md)。
+  - CLI：`stela replay --list` / `stela replay --session <id> --modes none,stela,rtk,both`。
 - **`stela.proxy`** —— aiohttp SSE-aware Anthropic 反向代理（路径 B）。
   - 监听 `POST /v1/messages`，自动检测 harness（openclaw / hermes），跑 STELA 管线后转发到 Anthropic
   - 非 `/v1/messages` 路径透明 passthrough

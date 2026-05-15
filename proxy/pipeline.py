@@ -54,6 +54,12 @@ class PipelineResult:
     ir_layout: dict[str, Any] = field(default_factory=dict)
     tool_uses: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
+    # ↓ proxy 层在管线跑完后回填的字段（见 proxy/server.py）。
+    # 对比实验需要按 (mode, compare_group) 切片 usage_log，故放进 result
+    # 一并落盘。pipeline 本身不设置它们。
+    mode: str = "stela"
+    compare_group: str | None = None
+    tool_output_reduction: dict[str, Any] = field(default_factory=dict)
 
 
 def process_anthropic_request(

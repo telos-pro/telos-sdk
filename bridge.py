@@ -81,6 +81,11 @@ class BridgeSessionState:
 
     refpool: RefPool = field(default_factory=RefPool)
     stats: _SessionStats = field(default_factory=_SessionStats)
+    # 一旦某个 session 的 harness 被识别出来（hermes / openclaw），后续
+    # 同 session 的请求直接复用，避免每条 call 重新探测带来的"openclaw ↔
+    # hermes 翻转 → source_tag 前缀不一致 → ref-pool slug 失配"。显式
+    # 传入 ``harness_name`` 始终覆盖这个字段。
+    sticky_harness: str | None = None
 
 
 REFRESH_THRESHOLD = 11  # Janus §6.3.1：每续期间至少 11 次真实请求才回本

@@ -79,7 +79,14 @@ def process_anthropic_request(
         ``PipelineResult``。注意 ``wire`` 已经过 ``_canonicalize_ir``
         （tools 排序、payload key 排序），可直接转发。
     """
-    name = harness_name or _detect_harness(raw)
+    if harness_name:
+        name = harness_name
+    elif session_state is not None and session_state.sticky_harness:
+        name = session_state.sticky_harness
+    else:
+        name = _detect_harness(raw)
+        if session_state is not None:
+            session_state.sticky_harness = name
     harness = load_harness(name)
     engine = load_engine(engine_name)
 

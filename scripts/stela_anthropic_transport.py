@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from os.path import commonprefix
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from stela import Bridge, load_engine, load_harness
 from stela.bridge import BridgeSessionState
@@ -38,34 +39,110 @@ from stela.bridge import BridgeSessionState
 # ---------------------------------------------------------------------------
 # Harness 自动检测
 # ---------------------------------------------------------------------------
+#
+# Claude Code (Hermes) 把 envelope 标签注入的位置不止一处：
+#   - `system` 段：少数客户端配置下出现
+#   - `user message` 的 text 块：**绝大多数 turn 在这里**——每轮新一份
+#                                  `<system-reminder>` / `<command-message>`
+# 旧实现只扫 `system`，导致绝大多数 Claude Code 流量被误判成 openclaw
+# （dashboard 上看到 ``openclaw/*`` source_tag 的真正原因）。
+#
+# 修复思路：
+#   1) 用 (open + close) 配对的正则，避免用户在 prompt 里讨论标签时误中
+#   2) 扫 system 段 **以及** 所有 user message 的 text 内容
+#   3) 增加 `<command-name>`（slash 命令面板会单独注入此标签）
+#   4) 兜底：assistant 已有 `thinking` 块
+#   5) 兜底：tools 列表命中 Claude Code 固有工具集合 ≥ 3 个
 
-_HERMES_MARKERS = ("<system-reminder>", "<command-message>")
+_HERMES_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(rf"<{tag}>.*?</{tag}>", re.DOTALL)
+    for tag in ("system-reminder", "command-message", "command-name")
+)
+
+# Claude Code 总是带这一组工具中的若干个；命中 ≥ 3 即认为是 Claude Code。
+_HERMES_TOOL_FINGERPRINT: frozenset[str] = frozenset({
+    "Bash", "Edit", "Read", "Write", "Grep", "Glob",
+    "TodoWrite", "Task", "WebFetch", "WebSearch", "NotebookEdit",
+})
+_HERMES_TOOL_HITS_REQUIRED = 3
 
 
-def _detect_harness(raw_request: Mapping[str, Any]) -> str:
+def _flatten_system_text(raw_request: Mapping[str, Any]) -> str:
     system = raw_request.get("system", [])
     if isinstance(system, str):
-        system_text = system
-    elif isinstance(system, list):
-        parts = []
+        return system
+    if isinstance(system, list):
+        parts: list[str] = []
         for item in system:
             if isinstance(item, dict):
-                parts.append(item.get("text", ""))
+                t = item.get("text", "")
+                if isinstance(t, str):
+                    parts.append(t)
             else:
                 parts.append(str(item))
-        system_text = " ".join(parts)
-    else:
-        system_text = str(system)
+        return " ".join(parts)
+    return ""
 
-    if any(m in system_text for m in _HERMES_MARKERS):
-        return "hermes"
 
-    for msg in raw_request.get("messages", []):
+def _iter_user_text(raw_request: Mapping[str, Any]) -> Iterable[str]:
+    """逐条 yield user message 里 text 块的纯字符串。"""
+    for msg in raw_request.get("messages", []) or []:
+        if not isinstance(msg, Mapping) or msg.get("role") != "user":
+            continue
+        content = msg.get("content", [])
+        if isinstance(content, str):
+            yield content
+            continue
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            if isinstance(blk, Mapping) and blk.get("type") == "text":
+                text = blk.get("text")
+                if isinstance(text, str):
+                    yield text
+
+
+def _has_thinking_block(raw_request: Mapping[str, Any]) -> bool:
+    for msg in raw_request.get("messages", []) or []:
+        if not isinstance(msg, Mapping):
+            continue
         content = msg.get("content", [])
         if isinstance(content, list):
             for blk in content:
-                if isinstance(blk, dict) and blk.get("type") == "thinking":
-                    return "hermes"
+                if isinstance(blk, Mapping) and blk.get("type") == "thinking":
+                    return True
+    return False
+
+
+def _has_hermes_marker(text: str) -> bool:
+    return any(p.search(text) for p in _HERMES_MARKER_PATTERNS)
+
+
+def _tool_fingerprint_matches_hermes(raw_request: Mapping[str, Any]) -> bool:
+    names: set[str] = set()
+    for t in raw_request.get("tools", []) or []:
+        if isinstance(t, Mapping):
+            n = t.get("name")
+            if isinstance(n, str):
+                names.add(n)
+    return len(names & _HERMES_TOOL_FINGERPRINT) >= _HERMES_TOOL_HITS_REQUIRED
+
+
+def _detect_harness(raw_request: Mapping[str, Any]) -> str:
+    # 1) envelope 标签（system 段 + 所有 user message text）
+    if _has_hermes_marker(_flatten_system_text(raw_request)):
+        return "hermes"
+    for ut in _iter_user_text(raw_request):
+        if _has_hermes_marker(ut):
+            return "hermes"
+
+    # 2) assistant thinking 块
+    if _has_thinking_block(raw_request):
+        return "hermes"
+
+    # 3) tool 集合指纹（首轮 turn 没注入 reminder 时也能识别）
+    if _tool_fingerprint_matches_hermes(raw_request):
+        return "hermes"
 
     return "openclaw"
 
@@ -291,8 +368,14 @@ class StelaAnthropicTransport:
         # ---- 0. caller 原始输入快照 ----
         input_summary = _summarize_messages(kwargs)
 
-        # ---- 1. 选 harness（explicit 或 auto-detect）----
-        harness_name = self._explicit_harness or _detect_harness(kwargs)
+        # ---- 1. 选 harness（explicit > sticky > auto-detect）----
+        if self._explicit_harness:
+            harness_name = self._explicit_harness
+        elif self._session_state.sticky_harness:
+            harness_name = self._session_state.sticky_harness
+        else:
+            harness_name = _detect_harness(kwargs)
+            self._session_state.sticky_harness = harness_name
         harness = self._get_harness(harness_name)
 
         # ---- 2. parse → IR ----

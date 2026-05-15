@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="5">
+<title>STELA · developer · session · client-key-abc</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  margin: 0; padding: 0;
+  background: radial-gradient(ellipse at top left, #1a2030 0%, #0a0d12 60%);
+  color: #e6edf3; min-height: 100vh;
+}
+.wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+header { margin-bottom: 22px; }
+header h1 { margin: 0 0 4px 0; font-size: 22px; font-weight: 700;
+  background: linear-gradient(120deg, #79c0ff 0%, #d2a8ff 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+header .sub { color: #7d8590; font-size: 12px; }
+a { color: #79c0ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.card {
+  background: #0f141c; border: 1px solid #21262d; border-radius: 10px;
+  padding: 16px 20px; margin-bottom: 14px;
+}
+.card h2 { margin: 0 0 12px 0; font-size: 13px; color: #7d8590;
+  text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500;
+  font-family: monospace; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px; margin-bottom: 18px; }
+.kpi { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 10px 14px; }
+.kpi .label { color: #7d8590; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 3px; }
+.kpi .value { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi .sub { color: #7d8590; font-size: 11px; margin-top: 1px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12px;
+  font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 8px; border-bottom: 1px solid #21262d; text-align: right;
+  vertical-align: middle; }
+th { font-weight: 500; color: #7d8590; text-transform: uppercase;
+  font-size: 10px; letter-spacing: 0.05em; }
+th.left, td.left { text-align: left; }
+td.left { font-family: monospace; }
+tr:hover td { background: #131822; }
+
+.pin   { color: #d29922; }
+.fold  { color: #58a6ff; }
+.drop  { color: #7d8590; }
+.green { color: #56d364; }
+.purple { color: #d2a8ff; }
+.muted { color: #7d8590; }
+
+.tabs { display: flex; gap: 0; background: #161b22; border-radius: 999px;
+  padding: 4px; margin-bottom: 14px; border: 1px solid #30363d;
+  width: fit-content; }
+.tabs a { display: inline-block; padding: 6px 16px; border-radius: 999px;
+  font-size: 12px; font-weight: 500; color: #8b949e; text-decoration: none; }
+.tabs a.active { background: linear-gradient(120deg, #d2a8ff 0%, #79c0ff 100%);
+  color: #0a0d12; }
+
+.stack-bar { display: flex; height: 14px; border-radius: 3px; overflow: hidden;
+  background: #161b22; margin: 4px 0 4px 0; }
+.stack-bar > span { display: block; height: 100%; }
+.stack-bar .pin   { background: #d29922; }
+.stack-bar .fold  { background: #58a6ff; }
+.stack-bar .drop  { background: #7d8590; }
+
+.delta { font-family: monospace; font-size: 10.5px; }
+.delta.up   { color: #f85149; }
+.delta.down { color: #56d364; }
+
+.msg-row { display: grid; grid-template-columns: 60px 70px 1fr; gap: 8px;
+  padding: 4px 0; border-bottom: 1px dashed #21262d; font-size: 11.5px; }
+.msg-row .role { font-family: monospace; color: #d2a8ff; }
+.msg-row .idx { color: #7d8590; font-family: monospace; }
+.msg-row .blocks { font-family: monospace; }
+.blk-pill { display: inline-block; padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; margin-right: 4px; }
+
+pre.raw { background: #0a0d12; border: 1px solid #21262d; border-radius: 6px;
+  padding: 10px 12px; overflow-x: auto; font-size: 11px; color: #c9d1d9;
+  margin: 0; max-height: 240px; }
+.refresh-bar { color: #7d8590; font-size: 11px; margin-top: 4px; }
+</style>
+</head><body>
+<div class="wrap">
+<header>
+  <h1>STELA · developer inspector</h1>
+  <div class="sub">
+    1 session(s) tracked · 2 bridge state(s) ·
+    session · client-key-abc · generated 2026-05-15 03:32:24 UTC · auto-refresh 5s
+  </div>
+</header>
+<div class="refresh-bar"><a href="?">← back to overview</a></div>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">model</div>
+    <div class="value" style="font-size:13px">claude-opus-4-7</div></div>
+  <div class="kpi"><div class="label">harness</div>
+    <div class="value" style="font-size:13px">telos</div></div>
+  <div class="kpi"><div class="label">calls seen</div>
+    <div class="value">2</div></div>
+  <div class="kpi"><div class="label">plan slots</div>
+    <div class="value" style="font-size:13px">BP-T / BP-S / BP-R / BP-X</div></div>
+  <div class="kpi"><div class="label">last raw_input</div>
+    <div class="value gold">80</div></div>
+  <div class="kpi"><div class="label">last cache_read</div>
+    <div class="value green">5,600</div></div>
+  <div class="kpi"><div class="label">last cache_write</div>
+    <div class="value gold">300</div></div>
+  <div class="kpi"><div class="label">last output</div>
+    <div class="value purple">95</div></div>
+</div>
+<div class="card"><h2>Prompt regions · pin·fold·drop chars per segment</h2><div style="margin-bottom:8px"><div style="font-size:11px;color:#7d8590;font-family:monospace;margin-bottom:2px">tools <b style="color:#e6edf3">1,200</b> chars · <span class="pin">P 1,200 (4b)</span> · <span class="fold">F 0 (0b)</span> · <span class="drop">D 0 (0b)</span></div><div class="stack-bar"><span class="pin"  style="width:100.0%" title="PIN 1,200"></span><span class="fold" style="width:0.0%" title="FOLD 0"></span><span class="drop" style="width:0.0%" title="DROP 0"></span></div></div><div style="margin-bottom:8px"><div style="font-size:11px;color:#7d8590;font-family:monospace;margin-bottom:2px">system <b style="color:#e6edf3">4,050</b> chars · <span class="pin">P 800 (2b)</span> · <span class="fold">F 3,200 (1b)</span> · <span class="drop">D 50 (1b)</span></div><div class="stack-bar"><span class="pin"  style="width:19.8%" title="PIN 800"></span><span class="fold" style="width:79.0%" title="FOLD 3,200"></span><span class="drop" style="width:1.2%" title="DROP 50"></span></div></div><div style="margin-bottom:8px"><div style="font-size:11px;color:#7d8590;font-family:monospace;margin-bottom:2px">messages <b style="color:#e6edf3">3,490</b> chars · <span class="pin">P 60 (1b)</span> · <span class="fold">F 3,400 (4b)</span> · <span class="drop">D 30 (1b)</span></div><div class="stack-bar"><span class="pin"  style="width:1.7%" title="PIN 60"></span><span class="fold" style="width:97.4%" title="FOLD 3,400"></span><span class="drop" style="width:0.9%" title="DROP 30"></span></div></div></div>
+<div class="card">
+  <h2>Recent calls (latest first · max 2)</h2>
+  <table>
+    <thead><tr>
+      <th>#</th><th>lat</th>
+      <th>raw_in</th><th>cache_read</th><th>cache_write</th><th>output</th>
+      <th>tools chars · Δ</th><th>system chars · Δ</th><th>messages chars · Δ</th>
+      <th class="left">plan slots</th>
+      <th>uses</th><th>results</th>
+    </tr></thead>
+    <tbody><tr><td>#2</td><td>2.60s</td><td>80</td><td class="green">5,600</td><td class="gold">300</td><td class="purple">95</td><td>1.20K <span class="delta">±0</span></td><td>4.05K <span class="delta">±0</span></td><td>3.49K <span class="delta up">+1,600</span></td><td class="left">BP-T / BP-S / BP-R / BP-X</td><td>1</td><td>1</td></tr><tr><td>#1</td><td>2.10s</td><td>400</td><td class="green">4,200</td><td class="gold">1,100</td><td class="purple">80</td><td>1.20K <span class="delta">±0</span></td><td>4.05K <span class="delta">±0</span></td><td>1.89K <span class="delta">±0</span></td><td class="left">BP-T / BP-S / BP-R / BP-X</td><td>1</td><td>0</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Latest IR · per-message blocks (band · kind · chars)</h2>
+  <div class="muted">no messages</div>
+</div>
+
+<div class="card">
+  <h2>Tool calls in this session</h2>
+  <table>
+    <thead><tr>
+      <th class="left">tool name</th>
+      <th>invocations</th>
+      <th>args chars total</th>
+      <th>args avg</th>
+      <th>args last</th>
+      <th>result chars total</th>
+      <th>result avg</th>
+      <th>result max</th>
+      <th>result last</th>
+    </tr></thead>
+    <tbody><tr><td class="left">Bash</td><td>1</td><td>40</td><td>40</td><td>40</td><td class="green">1,760</td><td>1,760</td><td>1,760</td><td>1,760</td></tr><tr><td class="left">Read</td><td>1</td><td>25</td><td>25</td><td>25</td><td class="green">0</td><td>0</td><td>0</td><td>0</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Last API usage · cache-related fields (raw)</h2>
+  <pre class="raw">{
+  &quot;input_tokens&quot;: 80,
+  &quot;cache_read_input_tokens&quot;: 5600,
+  &quot;cache_creation_input_tokens&quot;: 300,
+  &quot;output_tokens&quot;: 95
+}</pre>
+</div>
+
+</div></body></html>

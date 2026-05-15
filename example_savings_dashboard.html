@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+
+<title>STELA · Token Savings Dashboard</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  margin: 0;
+  padding: 0;
+  background: radial-gradient(ellipse at top left, #1a2030 0%, #0a0d12 60%);
+  color: #e6edf3;
+  min-height: 100vh;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; }
+
+header { margin-bottom: 32px; }
+header h1 { margin: 0 0 6px 0; font-size: 28px; font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(120deg, #79c0ff 0%, #d2a8ff 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+header .sub { color: #7d8590; font-size: 13px; }
+
+/* ---- hero stats ---- */
+.hero {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 24px;
+}
+.hero-card {
+  background: linear-gradient(140deg, #1a2436 0%, #131822 100%);
+  border: 1px solid #2a3346; border-radius: 14px;
+  padding: 24px 28px; position: relative; overflow: hidden;
+}
+.hero-card.green::before, .hero-card.purple::before {
+  content: ''; position: absolute; right: -40px; top: -40px;
+  width: 200px; height: 200px; border-radius: 50%;
+  filter: blur(60px); opacity: 0.3;
+}
+.hero-card.green::before  { background: #3fb950; }
+.hero-card.purple::before { background: #d2a8ff; }
+
+.hero-card .label {
+  color: #8b949e; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.08em; font-weight: 500; position: relative;
+}
+.hero-card .value {
+  font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums;
+  margin: 6px 0 4px 0; position: relative; letter-spacing: -0.02em;
+}
+.hero-card .sub {
+  color: #8b949e; font-size: 13px; position: relative;
+}
+.hero-card.green .value  { color: #56d364; }
+.hero-card.purple .value { color: #d2a8ff; }
+
+/* ---- KPI strip ---- */
+.kpis {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px; margin-bottom: 32px;
+}
+.kpi {
+  background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+  padding: 14px 16px;
+}
+.kpi .label { color: #7d8590; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; margin-bottom: 4px; }
+.kpi .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em; }
+.kpi .sub { font-size: 11px; color: #7d8590; margin-top: 2px; }
+
+/* ---- card ---- */
+.card {
+  background: #0f141c; border: 1px solid #21262d; border-radius: 12px;
+  padding: 22px 24px; margin-bottom: 18px;
+}
+.card h2 {
+  margin: 0 0 14px 0; font-size: 14px; font-family: monospace;
+  color: #7d8590; text-transform: uppercase; letter-spacing: 0.06em;
+  font-weight: 500;
+}
+
+/* ---- segmented bar ---- */
+.seg-bar {
+  display: flex; height: 28px; border-radius: 6px; overflow: hidden;
+  background: #161b22; margin: 8px 0 14px 0;
+}
+.seg-bar > span {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600; color: #0a0d12;
+  font-variant-numeric: tabular-nums;
+}
+.seg-bar .raw_input   { background: #f0883e; }
+.seg-bar .cache_read  { background: #3fb950; }
+.seg-bar .cache_write { background: #d29922; }
+.seg-bar .output      { background: #79c0ff; }
+.seg-bar > span:empty { color: transparent; }
+
+.seg-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; }
+.seg-legend > span { color: #8b949e; }
+.seg-legend .sw { display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+
+/* ---- table ---- */
+table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+th, td { padding: 8px 10px; border-bottom: 1px solid #21262d; text-align: right;
+  vertical-align: middle; }
+th { font-weight: 500; color: #7d8590; text-transform: uppercase;
+  font-size: 10.5px; letter-spacing: 0.05em; }
+th.left, td.left { text-align: left; }
+td.left { font-family: monospace; }
+tr:hover td { background: #131822; }
+
+.bar-cell {
+  position: relative; width: 220px;
+  background: #161b22; border-radius: 3px; overflow: hidden;
+}
+.bar-cell .fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, #3fb950 0%, #56d364 100%);
+  border-radius: 3px;
+}
+.bar-cell .label-overlay {
+  position: relative; padding: 2px 8px; color: #e6edf3;
+  font-size: 11px; font-weight: 500;
+}
+
+/* ---- timeline ---- */
+.timeline { margin-top: 4px; }
+.timeline svg { display: block; }
+
+.muted { color: #7d8590; }
+.gold  { color: #d29922; }
+.green { color: #56d364; }
+.blue  { color: #79c0ff; }
+.lilac { color: #d2a8ff; }
+
+.footer { margin-top: 40px; color: #4f5862; font-size: 11px; text-align: center; }
+</style>
+<style>
+.toggle-wrap { display: inline-flex; gap: 0; background: #161b22; border-radius: 999px;
+  padding: 4px; margin: 0 0 14px 0; border: 1px solid #30363d; }
+.toggle-wrap button { all: unset; cursor: pointer; padding: 7px 18px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: #8b949e; transition: all .15s ease; }
+.toggle-wrap button.active { background: linear-gradient(120deg, #d2a8ff 0%, #79c0ff 100%);
+  color: #0a0d12; }
+.toggle-wrap button:hover:not(.active) { color: #e6edf3; }
+[data-mode='without'] .with-only { display: none; }
+[data-mode='with'] .without-only { display: none; }
+[data-mode='_compare'] .with-only,
+[data-mode='_compare'] .without-only { display: none; }
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
+.compare-cell { background: #0f141c; border: 1px solid #21262d; border-radius: 10px;
+  padding: 18px 20px; }
+.compare-cell h3 { margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: #7d8590; font-weight: 600; }
+.compare-cell h3 .pill { display: inline-block; margin-left: 8px; padding: 2px 8px;
+  border-radius: 999px; font-size: 10px; vertical-align: middle; }
+.compare-cell.actual h3 .pill   { background: #1a4d2e; color: #56d364; }
+.compare-cell.counter h3 .pill  { background: #4d2a1a; color: #f0883e; }
+.compare-cell .row { font-size: 13px; color: #c9d1d9; margin: 4px 0; display: flex;
+  justify-content: space-between; }
+.compare-cell .row b { font-variant-numeric: tabular-nums; }
+.compare-cell .big { font-size: 24px; font-weight: 700; margin: 4px 0 8px 0;
+  letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.compare-cell.actual .big   { color: #56d364; }
+.compare-cell.counter .big  { color: #f0883e; }
+.compare-cell .small { font-size: 11px; color: #7d8590; margin-top: 6px; }
+.savings-arrow { font-size: 13px; color: #d2a8ff; margin: 10px 0 0 0; text-align: center; }
+.savings-arrow b { font-size: 18px; }
+</style>
+</head><body data-mode="with">
+<div class="wrap">
+
+<header>
+  <h1>STELA · Token Savings</h1>
+  <div class="sub">
+    2 calls · 2 sessions · span 1.0 小时
+    · generated 2026-05-15 03:32 UTC
+  </div>
+</header>
+
+<!-- ===== 视角切换：with STELA vs. without STELA ===== -->
+<div class="toggle-wrap" role="tablist">
+  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 STELA）</button>
+  <button id="btn-without" onclick="setMode('without')">反事实（不开 STELA）</button>
+  <button id="btn-compare" onclick="setMode('compare')">并排对比</button>
+</div>
+
+<!-- compare 视角下的并排面板 -->
+<section id="compare-view" style="display:none; margin-bottom: 18px;">
+  <div class="compare-grid">
+    <div class="compare-cell counter">
+      <h3>without STELA <span class="pill">counterfactual</span></h3>
+      <div class="big">$0.197</div>
+      <div class="row"><span>prompt tokens (input 价)</span><b>42.50K</b></div>
+      <div class="row"><span>output tokens</span><b>650</b></div>
+      <div class="small">所有 prompt token 按基础 input 价计费；无 cache_read 折扣、无 cache_write 溢价。</div>
+    </div>
+    <div class="compare-cell actual">
+      <h3>with STELA <span class="pill">actual</span></h3>
+      <div class="big">$0.078</div>
+      <div class="row"><span>raw_input · @input</span><b>2.30K</b></div>
+      <div class="row"><span>cache_read · @0.1×input</span><b class="green">34.00K</b></div>
+      <div class="row"><span>cache_write · @1.25–2×input</span><b class="gold">6.20K</b></div>
+      <div class="row"><span>output · @output</span><b>650</b></div>
+      <div class="small">cache_write 拆分：5m <b class='gold'>4.70K</b> · 1h <b class='gold'>1.50K</b></div>
+    </div>
+  </div>
+  <div class="savings-arrow">
+    净节省：<b>$0.119</b> &nbsp;·&nbsp; <b>60.3%</b> off counterfactual
+  </div>
+</section>
+
+<section class="hero with-only">
+  <div class="hero-card green">
+    <div class="label">tokens saved (cache hits)</div>
+    <div class="value">34.00K</div>
+    <div class="sub">
+      cache hits 占总 prompt tokens 的 <b class="green">80.0%</b>
+      ·  绝对量 <code>34,000</code> tokens
+    </div>
+  </div>
+  <div class="hero-card purple">
+    <div class="label">cost saved (estimated)</div>
+    <div class="value">$0.119</div>
+    <div class="sub">
+      若关 STELA 预计要付 <b class="lilac">$0.197</b>
+      · 实付 <b>$0.078</b>
+      · 节省 <b class="lilac">60.3%</b>
+    </div>
+  </div>
+</section>
+
+<section class="hero without-only">
+  <div class="hero-card green" style="opacity:.65">
+    <div class="label">prompt tokens (no cache)</div>
+    <div class="value">42.50K</div>
+    <div class="sub">
+      反事实视角：所有 raw_input + cache_read + cache_write 都以
+      base input 价计费 ·
+      output <code>650</code>
+    </div>
+  </div>
+  <div class="hero-card purple" style="opacity:.85">
+    <div class="label">cost (no STELA)</div>
+    <div class="value">$0.197</div>
+    <div class="sub">
+      启用 STELA 后实际只付 <b>$0.078</b>
+      · 节省 <b class="lilac">$0.119</b>（<b class="lilac">60.3%</b>）
+    </div>
+  </div>
+</section>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">total calls</div>
+    <div class="value">2</div></div>
+  <div class="kpi"><div class="label">unique sessions</div>
+    <div class="value">2</div></div>
+  <div class="kpi"><div class="label">raw input</div>
+    <div class="value gold">2.30K</div>
+    <div class="sub">2,300</div></div>
+  <div class="kpi"><div class="label">cache read</div>
+    <div class="value green">34.00K</div>
+    <div class="sub">34,000</div></div>
+  <div class="kpi"><div class="label">cache write</div>
+    <div class="value gold">6.20K</div>
+    <div class="sub">5m 4.70K · 1h 1.50K</div></div>
+  <div class="kpi"><div class="label">output</div>
+    <div class="value blue">650</div>
+    <div class="sub">650</div></div>
+</div>
+
+<div class="card with-only">
+  <h2>Token mix（with STELA · 实际）</h2>
+  <div class="seg-bar"><span class="raw_input" style="width:5.33%" title="raw_input: 2,300">2.30K</span><span class="cache_read" style="width:78.79%" title="cache_read: 34,000">34.00K</span><span class="cache_write" style="width:14.37%" title="cache_write: 6,200">6.20K</span><span class="output" style="width:1.51%" title="output: 650"></span></div>
+  <div class="seg-legend">
+    <span><span class="sw" style="background:#f0883e"></span>raw_input · 2.30K</span>
+    <span><span class="sw" style="background:#3fb950"></span>cache_read · 34.00K</span>
+    <span><span class="sw" style="background:#d29922"></span>cache_write · 6.20K</span>
+    <span><span class="sw" style="background:#79c0ff"></span>output · 650</span>
+  </div>
+</div>
+
+<div class="card without-only">
+  <h2>Token mix（without STELA · 反事实）</h2>
+  <div class="seg-bar"><span class="raw_input" style="width:98.49%" title="raw_input (counterfactual): 42,500">42.50K</span><span class="output" style="width:1.51%" title="output: 650"></span></div>
+  <div class="seg-legend">
+    <span><span class="sw" style="background:#f0883e"></span>raw_input · 42.50K</span>
+    <span><span class="sw" style="background:#79c0ff"></span>output · 650</span>
+  </div>
+  <p class="muted" style="font-size:11px;margin-top:8px">
+    反事实假设：保持 prompt 内容不变，但移除 ``cache_control``，全量 prompt token
+    按 base input 价计费 → 计费视角下所有 cache_read 与 cache_write 都"塌"成 raw_input。
+  </p>
+</div>
+
+<div class="card timeline">
+  <h2>Activity over time（按小时聚合）</h2>
+  
+<svg viewBox="0 0 1100 180" width="100%" preserveAspectRatio="xMidYMid meet">
+  <text x="44.0" y="15.0" text-anchor="end" font-size="9" fill="#7d8590">22.00K</text><line x1="50.0" y1="12.0" x2="1086.0" y2="12.0" stroke="#21262d" stroke-width="1"/><text x="44.0" y="87.0" text-anchor="end" font-size="9" fill="#7d8590">11.00K</text><line x1="50.0" y1="84.0" x2="1086.0" y2="84.0" stroke="#21262d" stroke-width="1"/><text x="44.0" y="159.0" text-anchor="end" font-size="9" fill="#7d8590">0</text><line x1="50.0" y1="156.0" x2="1086.0" y2="156.0" stroke="#21262d" stroke-width="1"/>
+  <rect x="127.70" y="12.00" width="362.60" height="144.00" fill="#3fb950" opacity="0.55" rx="2"><title>2023-11-14 22:00
+cache_read: 22,000</title></rect><rect x="645.70" y="77.45" width="362.60" height="78.55" fill="#3fb950" opacity="0.55" rx="2"><title>2023-11-14 23:00
+cache_read: 12,000</title></rect>
+  <path d="M 309.00,12.00 L 827.00,103.94" stroke="#d2a8ff" stroke-width="1.8" fill="none"/>
+  <circle cx="309.00" cy="12.00" r="2.5" fill="#d2a8ff"><title>2023-11-14 22:00
+saved: $0.087</title></circle><circle cx="827.00" cy="103.94" r="2.5" fill="#d2a8ff"><title>2023-11-14 23:00
+saved: $0.032</title></circle>
+  <text x="309.0" y="174.0" text-anchor="middle" font-size="9" fill="#7d8590">3-11-14 22:00</text><text x="827.0" y="174.0" text-anchor="middle" font-size="9" fill="#7d8590">3-11-14 23:00</text>
+  <text x="50" y="10" font-size="9" fill="#3fb950" font-family="monospace">
+    cache_read (bars)
+  </text>
+  <text x="180" y="10" font-size="9" fill="#d2a8ff" font-family="monospace">
+    saved $ (line)
+  </text>
+</svg>
+
+</div>
+
+
+<div class="card">
+  <h2>Breakdown by harness</h2>
+  <table>
+    <thead><tr>
+      <th class="left">harness</th>
+      <th>calls</th>
+      <th>raw_input</th>
+      <th>cache_read</th>
+      <th>cache_write</th>
+      <th>hit%</th>
+      <th class="left">saved $</th>
+    </tr></thead>
+    <tbody><tr><td class="left">telos</td><td>2</td><td>2.30K</td><td class="green">34.00K</td><td>6.20K</td><td>80.0%</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$0.119</span></td></tr></tbody>
+  </table>
+</div>
+
+
+<div class="card">
+  <h2>Breakdown by model</h2>
+  <table>
+    <thead><tr>
+      <th class="left">model</th>
+      <th>calls</th>
+      <th>raw_input</th>
+      <th>cache_read</th>
+      <th>cache_write</th>
+      <th>hit%</th>
+      <th class="left">saved $</th>
+    </tr></thead>
+    <tbody><tr><td class="left">claude-opus-4-7</td><td>1</td><td>800</td><td class="green">22.00K</td><td>5.00K</td><td>79.1%</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$0.087</span></td></tr><tr><td class="left">claude-sonnet-4-6</td><td>1</td><td>1.50K</td><td class="green">12.00K</td><td>1.20K</td><td>81.6%</td><td class="bar-cell"><span class="fill" style="width:36.2%"></span><span class="label-overlay">$0.032</span></td></tr></tbody>
+  </table>
+</div>
+
+
+<div class="card">
+  <h2>Top sessions by saved $</h2>
+  <table>
+    <thead><tr>
+      <th class="left">session_id</th>
+      <th>calls</th>
+      <th>raw_input</th>
+      <th>cache_read</th>
+      <th>cache_write</th>
+      <th>hit%</th>
+      <th class="left">saved $</th>
+    </tr></thead>
+    <tbody><tr><td class="left">s-alpha</td><td>1</td><td>800</td><td class="green">22.00K</td><td>5.00K</td><td>79.1%</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$0.087</span></td></tr><tr><td class="left">s-beta</td><td>1</td><td>1.50K</td><td class="green">12.00K</td><td>1.20K</td><td>81.6%</td><td class="bar-cell"><span class="fill" style="width:36.2%"></span><span class="label-overlay">$0.032</span></td></tr></tbody>
+  </table>
+</div>
+
+
+<div class="footer">
+  数据源 · <code>/tmp/example.jsonl</code><br>
+  价格表 = Anthropic / OpenAI / DeepSeek 2026 公开报价（USD / 1M tokens）；未识别 model 走 Sonnet 价位估算。
+  <br>cache_write 拆分按 raw_usage.cache_creation.ephemeral_{5m,1h}_input_tokens；缺失则全计 5m 价（保守）。
+</div>
+
+</div>
+
+<script>
+function setMode(m) {
+  var body = document.body;
+  var compareView = document.getElementById('compare-view');
+  ['with','without','compare'].forEach(function(k){
+    var b = document.getElementById('btn-' + k);
+    if (b) b.classList.toggle('active', k === m);
+  });
+  if (m === 'compare') {
+    // compare 模式：隐藏 with/without 专属面板，只显示并排
+    body.setAttribute('data-mode', '_compare');
+    compareView.style.display = 'block';
+  } else {
+    body.setAttribute('data-mode', m);
+    compareView.style.display = 'none';
+  }
+  try { localStorage.setItem('stela.dashboard.mode', m); } catch(e) {}
+}
+// 恢复上次选择
+try {
+  var saved = localStorage.getItem('stela.dashboard.mode');
+  if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);
+} catch(e) {}
+</script>
+</body></html>

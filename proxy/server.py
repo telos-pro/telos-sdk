@@ -32,7 +32,8 @@ import hashlib
 import json
 import logging
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -40,6 +41,12 @@ import aiohttp
 from aiohttp import web
 
 from stela.bridge import BridgeSessionState
+from stela.proxy.inspector import (
+    SessionInspector as _SessionInspector,
+    SessionInspectorEntry as _SessionInspectorEntry,
+    ToolStat as _ToolStat,
+    entry_to_json as _inspector_entry_to_json,
+)
 from stela.proxy.pipeline import PipelineResult, process_anthropic_request
 
 
@@ -141,6 +148,8 @@ class _SessionRegistry:
 # ---------------------------------------------------------------------------
 
 def _normalize_usage(u: dict[str, Any]) -> dict[str, int]:
+    """4 个 bucket 的归一化；保留 ``cache_creation.ephemeral_{5m,1h}_input_tokens``
+    在 raw_usage 里，dashboard 端会读取拆分以正确按 5m / 1h 价计费。"""
     return {
         "raw_input": int(u.get("input_tokens", 0) or 0),
         "cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
@@ -190,6 +199,7 @@ class ProxyApp:
         self._call_count = 0
         self._pipeline_failures = 0
         self._registry = _SessionRegistry(max_size=max_sessions)
+        self._inspector = _SessionInspector(max_size=max_sessions)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -321,13 +331,15 @@ class ProxyApp:
                 pass
 
         self._accumulate_into_state(session_state, usage)
+        latency_s = time.time() - t0
         self._log_usage(
             session_id, result, usage, session_state,
-            latency_s=time.time() - t0,
+            latency_s=latency_s,
             streaming=False,
             status=status,
             call_index=call_index,
         )
+        self._update_inspector(session_id, result, usage, call_index, latency_s)
         return web.Response(body=body, status=status, headers={"Content-Type": ct})
 
     # ------------------------------------------------------------------
@@ -392,19 +404,26 @@ class ProxyApp:
                 while b"\n\n" in sse_buf:
                     block, sse_buf = sse_buf.split(b"\n\n", 1)
                     self._peek_sse_block(block, usage_aggregate)
+        except aiohttp.ClientPayloadError:
+            _log.warning("upstream closed connection mid-stream (call=%d)", call_index)
 
+        try:
             await downstream.write_eof()
+        except Exception:
+            pass
         finally:
             upstream.release()
 
         self._accumulate_into_state(session_state, usage_aggregate)
+        latency_s = time.time() - t0
         self._log_usage(
             session_id, result, usage_aggregate, session_state,
-            latency_s=time.time() - t0,
+            latency_s=latency_s,
             streaming=True,
             status=200,
             call_index=call_index,
         )
+        self._update_inspector(session_id, result, usage_aggregate, call_index, latency_s)
         return downstream
 
     # ------------------------------------------------------------------
@@ -441,6 +460,15 @@ class ProxyApp:
             ):
                 if k in u:
                     usage[k] = int(u[k])
+            # 关键：把 5m / 1h 拆分原样带过来，dashboard 端做精确计费用
+            cc = u.get("cache_creation")
+            if isinstance(cc, dict):
+                usage["cache_creation"] = {
+                    "ephemeral_5m_input_tokens":
+                        int(cc.get("ephemeral_5m_input_tokens", 0) or 0),
+                    "ephemeral_1h_input_tokens":
+                        int(cc.get("ephemeral_1h_input_tokens", 0) or 0),
+                }
         elif event == "message_delta":
             u = data.get("usage") or {}
             if "output_tokens" in u:
@@ -471,6 +499,92 @@ class ProxyApp:
                 content_type="text/html", status=500,
             )
         return web.Response(text=body, content_type="text/html")
+
+    # ------------------------------------------------------------------
+    # GET /__stela/developer —— 面向开发者的实时 session 结构 / 工具调用统计
+    # ------------------------------------------------------------------
+
+    async def handle_developer(self, request: web.Request) -> web.Response:
+        """实时渲染当前内存里所有 session 的 IR 结构、bp 区域、工具调用。
+
+        如果 query 里带 ``?session=<id>``，仅渲染那一个 session 的详情；
+        否则渲染概览（session 列表）+ 最近一次 call 的 session 详情。
+        """
+        from stela.scripts.build_developer_page import render_developer
+
+        try:
+            body = render_developer(
+                self._inspector,
+                self._registry,
+                focus_session=request.query.get("session"),
+                refresh_seconds=self.dashboard_refresh,
+                tab=request.query.get("tab", "overview"),
+            )
+        except Exception as e:  # noqa: BLE001
+            _log.exception("developer page render failed")
+            return web.Response(
+                text=f"<pre>developer page render failed: {e}</pre>",
+                content_type="text/html", status=500,
+            )
+        return web.Response(text=body, content_type="text/html")
+
+    # ------------------------------------------------------------------
+    # GET /__stela/developer.json —— 同样的数据，机器可读
+    # ------------------------------------------------------------------
+
+    async def handle_developer_json(self, request: web.Request) -> web.Response:
+        """JSON 视图：scripts / 第三方工具读取 session 状态用。"""
+        sid = request.query.get("session")
+        if sid:
+            entry = self._inspector.get(sid)
+            if entry is None:
+                return web.json_response(
+                    {"error": "unknown session", "session_id": sid}, status=404)
+            return web.json_response(_inspector_entry_to_json(entry))
+
+        return web.json_response({
+            "session_count": len(self._inspector),
+            "sessions": [
+                {
+                    "session_id": sid,
+                    "last_seen": e.last_seen,
+                    "calls": len(e.calls),
+                    "model": e.last_model,
+                    "harness": e.last_harness,
+                    "tools_seen": sorted(e.tools_stat.keys()),
+                }
+                for sid, e in self._inspector.items()
+            ],
+        })
+
+    # ------------------------------------------------------------------
+    # 内部：每收一次响应都把状态推给 inspector
+    # ------------------------------------------------------------------
+
+    def _update_inspector(
+        self,
+        session_id: str,
+        result: "PipelineResult",  # noqa: F821 — 跨模块前向引用
+        usage: Mapping[str, Any],
+        call_index: int,
+        latency_s: float,
+    ) -> None:
+        try:
+            entry = self._inspector.touch(session_id)
+            entry.record(
+                call_index=call_index,
+                layout=dict(result.ir_layout),
+                plan_slots=list(result.plan_slots),
+                tool_uses=list(result.tool_uses),
+                tool_results=list(result.tool_results),
+                usage_norm=_normalize_usage(dict(usage)),
+                usage_raw=dict(usage),
+                latency_s=latency_s,
+                model=result.model,
+                harness=result.harness,
+            )
+        except Exception:  # noqa: BLE001
+            _log.exception("inspector record failed (call=%d)", call_index)
 
     # ------------------------------------------------------------------
     # 透明 passthrough：非 /v1/messages 的所有路径
@@ -579,6 +693,8 @@ def make_app(
     app.router.add_post("/v1/messages", proxy.handle_messages)
     # 必须在 catch-all passthrough 之前注册，否则会被吞掉。
     app.router.add_get("/__stela/dashboard", proxy.handle_dashboard)
+    app.router.add_get("/__stela/developer", proxy.handle_developer)
+    app.router.add_get("/__stela/developer.json", proxy.handle_developer_json)
     app.router.add_route("*", "/{tail:.*}", proxy.handle_passthrough)
     app.on_shutdown.append(proxy.on_shutdown)
     app["proxy"] = proxy
@@ -615,6 +731,9 @@ def run(
     else:
         _log.info("dashboard    → http://%s:%d/__stela/dashboard"
                   " (no usage_log; will show empty state)", host, port)
+    _log.info("developer    → http://%s:%d/__stela/developer"
+              " (live session inspector; JSON at /__stela/developer.json)",
+              host, port)
     if strict:
         _log.info("strict mode ON — STELA failure 返回 500（不降级到 passthrough）")
     web.run_app(app, host=host, port=port, print=None, access_log=None)

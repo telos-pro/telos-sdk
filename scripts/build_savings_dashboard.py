@@ -24,66 +24,144 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 # ---------------------------------------------------------------------------
-# 价格表（USD / 1M tokens，2026 年 Anthropic / DeepSeek 公开价）
+# 价格表（USD / 1M tokens，2026 年 Anthropic / OpenAI / DeepSeek 公开价）
 # ---------------------------------------------------------------------------
+#
+# Anthropic prompt-caching 计费规则（2026 年公开价，见
+# https://platform.claude.com/docs/en/about-claude/pricing 与
+# https://platform.claude.com/docs/en/build-with-claude/prompt-caching）：
+#
+#   cache_read 价      = 0.10 × input 价     （命中缓存 90% off）
+#   cache_write (5m)   = 1.25 × input 价     （短 TTL 写入溢价 25%）
+#   cache_write (1h)   = 2.00 × input 价     （长 TTL 写入溢价 100%）
+#
+# 因此每个 model 表里同时记 ``cache_write_5m`` 和 ``cache_write_1h``。
+# 旧字段 ``cache_write`` 保留为 5m 价的别名，仅当 raw_usage 没有
+# ``cache_creation.ephemeral_*_input_tokens`` 拆分时使用。
+#
+# 2026 年 Claude 公开价：
+#   Opus 4.7 / 4.6  : $5  / $25   per 1M tok (input / output)
+#   Sonnet 4.6 / 4.5: $3  / $15
+#   Haiku 4.5       : $1  / $5
+#
+# **修复**：早期版本沿用了 Opus 4 系列 $15 / $75 的旧报价，2026 年定价
+# 已下调到 $5 / $25。Haiku 同样从 $0.80 / $4 调整为 $1 / $5。
+# 历史 sonnet-4 / opus-4 报价保留旧值（按当时定价 USD / 1M），仅为
+# 重放历史日志时不重新换算；新调用走 4.6 / 4.7 走新价。
 
 _PRICING: dict[str, dict[str, float]] = {
-    # Anthropic
-    "claude-opus-4-7":   {"input": 15.00, "cache_read": 1.50, "cache_write": 18.75, "output": 75.00},
-    "claude-opus-4-6":   {"input": 15.00, "cache_read": 1.50, "cache_write": 18.75, "output": 75.00},
-    "claude-opus-4-5":   {"input": 15.00, "cache_read": 1.50, "cache_write": 18.75, "output": 75.00},
-    "claude-opus-4":     {"input": 15.00, "cache_read": 1.50, "cache_write": 18.75, "output": 75.00},
-    "claude-sonnet-4-6": {"input":  3.00, "cache_read": 0.30, "cache_write":  3.75, "output": 15.00},
-    "claude-sonnet-4-5": {"input":  3.00, "cache_read": 0.30, "cache_write":  3.75, "output": 15.00},
-    "claude-sonnet-4":   {"input":  3.00, "cache_read": 0.30, "cache_write":  3.75, "output": 15.00},
-    "claude-haiku-4-5":  {"input":  0.80, "cache_read": 0.08, "cache_write":  1.00, "output":  4.00},
-    "claude-haiku-4":    {"input":  0.80, "cache_read": 0.08, "cache_write":  1.00, "output":  4.00},
-    # OpenAI / DeepSeek（供参考；cache 字段在某些 model 上 == input）
-    "gpt-5":             {"input":  5.00, "cache_read": 1.25, "cache_write": 0.00, "output": 15.00},
-    "gpt-5.1":           {"input":  5.00, "cache_read": 1.25, "cache_write": 0.00, "output": 15.00},
-    "deepseek-chat":     {"input":  0.27, "cache_read": 0.07, "cache_write": 0.00, "output":  1.10},
-    "deepseek-v3":       {"input":  0.27, "cache_read": 0.07, "cache_write": 0.00, "output":  1.10},
+    # Anthropic — 2026 新报价
+    "claude-opus-4-7":   {"input":  5.00, "cache_read": 0.50, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "output": 25.00},
+    "claude-opus-4-6":   {"input":  5.00, "cache_read": 0.50, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "output": 25.00},
+    # Opus 4 / 4.5：保留 2024-2025 历史价，便于重放旧日志
+    "claude-opus-4-5":   {"input": 15.00, "cache_read": 1.50, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "output": 75.00},
+    "claude-opus-4":     {"input": 15.00, "cache_read": 1.50, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "output": 75.00},
+    "claude-sonnet-4-6": {"input":  3.00, "cache_read": 0.30, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "output": 15.00},
+    "claude-sonnet-4-5": {"input":  3.00, "cache_read": 0.30, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "output": 15.00},
+    "claude-sonnet-4":   {"input":  3.00, "cache_read": 0.30, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "output": 15.00},
+    "claude-haiku-4-5":  {"input":  1.00, "cache_read": 0.10, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "output":  5.00},
+    "claude-haiku-4":    {"input":  1.00, "cache_read": 0.10, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "output":  5.00},
+    # OpenAI：prompt cache 是 0.25× input，无 cache_write（写入 0 价）
+    "gpt-5":             {"input":  5.00, "cache_read": 1.25, "cache_write_5m":  0.00, "cache_write_1h":  0.00, "output": 15.00},
+    "gpt-5.1":           {"input":  5.00, "cache_read": 1.25, "cache_write_5m":  0.00, "cache_write_1h":  0.00, "output": 15.00},
+    # DeepSeek：cache hit 与 miss 分别计费；不区分 5m/1h
+    "deepseek-chat":     {"input":  0.27, "cache_read": 0.07, "cache_write_5m":  0.00, "cache_write_1h":  0.00, "output":  1.10},
+    "deepseek-v3":       {"input":  0.27, "cache_read": 0.07, "cache_write_5m":  0.00, "cache_write_1h":  0.00, "output":  1.10},
     # 兜底：按 Sonnet 价当作"中等价位"估
-    "_default":          {"input":  3.00, "cache_read": 0.30, "cache_write":  3.75, "output": 15.00},
+    "_default":          {"input":  3.00, "cache_read": 0.30, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "output": 15.00},
 }
 
 
 def _price_for(model: str) -> dict[str, float]:
-    """模糊匹配 ``model`` 字段到价格表。仅匹配前缀，长 prefix 优先。"""
+    """模糊匹配 ``model`` 字段到价格表。仅匹配前缀，长 prefix 优先。
+
+    返回的 dict 里 ``cache_write`` 是 5m TTL 价的别名（旧调用 site 不传
+    breakdown 时退化用），同时保留 ``cache_write_5m`` / ``cache_write_1h``
+    分别字段。
+    """
     if not model:
-        return _PRICING["_default"]
-    candidates = sorted(
-        (k for k in _PRICING if k != "_default" and model.startswith(k)),
-        key=len, reverse=True,
-    )
-    return _PRICING[candidates[0]] if candidates else _PRICING["_default"]
+        base = _PRICING["_default"]
+    else:
+        candidates = sorted(
+            (k for k in _PRICING if k != "_default" and model.startswith(k)),
+            key=len, reverse=True,
+        )
+        base = _PRICING[candidates[0]] if candidates else _PRICING["_default"]
+    # 暴露 cache_write 别名（== 5m 价）方便老调用；不污染原 dict
+    out = dict(base)
+    out.setdefault("cache_write", base["cache_write_5m"])
+    return out
+
+
+def _split_cache_write(n: dict[str, int]) -> tuple[int, int]:
+    """从 normalized usage 里拆出 (cache_write_5m, cache_write_1h)。
+
+    优先用 raw_usage.cache_creation.ephemeral_{5m,1h}_input_tokens 拆分
+    （Anthropic 在 SSE / JSON 里都会返回）；缺失时按 5m 计（与历史等价）。
+    调用方应把 raw_usage 也放进 dict 里（key ``_breakdown``）。
+    """
+    bd = n.get("_breakdown") if isinstance(n, dict) else None
+    if isinstance(bd, Mapping):
+        w5 = int(bd.get("ephemeral_5m_input_tokens", 0) or 0)
+        w1 = int(bd.get("ephemeral_1h_input_tokens", 0) or 0)
+        if w5 + w1 > 0:
+            return w5, w1
+    return int(n.get("cache_write", 0) or 0), 0
 
 
 def _cost_usd(model: str, n: dict[str, int]) -> dict[str, float]:
-    """单条 call 在该 model 价表下的成本拆解（USD）。"""
+    """单条 call 在该 model 价表下的成本拆解（USD）。
+
+    ``cache_write`` 总额 = 5m 部分 × cache_write_5m 价 + 1h 部分 ×
+    cache_write_1h 价；缺 breakdown 时按 5m 计（保守低估 1h 部分）。
+    """
     p = _price_for(model)
+    w5, w1 = _split_cache_write(n)
     return {
-        "raw_input":   p["input"]       * n["raw_input"]   / 1_000_000,
-        "cache_read":  p["cache_read"]  * n["cache_read"]  / 1_000_000,
-        "cache_write": p["cache_write"] * n["cache_write"] / 1_000_000,
-        "output":      p["output"]      * n["output"]      / 1_000_000,
+        "raw_input":   p["input"]          * n["raw_input"]   / 1_000_000,
+        "cache_read":  p["cache_read"]     * n["cache_read"]  / 1_000_000,
+        "cache_write": (p["cache_write_5m"] * w5 + p["cache_write_1h"] * w1) / 1_000_000,
+        "output":      p["output"]         * n["output"]      / 1_000_000,
     }
 
 
-def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
-    """这一 call 因为命中 cache 而省下的钱：
-    cache_read 量 × (input_price − cache_read_price) / 1M。
+def _counterfactual_cost_usd(model: str, n: dict[str, int]) -> float:
+    """"如果完全不开 STELA / cache_control" 的对照价。
 
-    解释：cache_read 这些 token 如果不命中 cache，本来要按 input_price 计费；
-    现在按 cache_read_price 计费，差价就是节省。
+    在这个反事实里，所有 prompt tokens（raw_input + cache_read +
+    cache_write）都会按基础 input 价计费——没有 cache_read 折扣，也没有
+    cache_write 溢价。output 价不变。
     """
     p = _price_for(model)
-    saving_per_token = max(p["input"] - p["cache_read"], 0.0)
-    return saving_per_token * n["cache_read"] / 1_000_000
+    w5, w1 = _split_cache_write(n)
+    cache_write_total = w5 + w1
+    prompt_tokens = int(n.get("raw_input", 0)) + int(n.get("cache_read", 0)) + cache_write_total
+    return (p["input"] * prompt_tokens + p["output"] * int(n.get("output", 0))) / 1_000_000
+
+
+def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
+    """这一 call 因为接入 STELA / cache_control 实际省下（或多花）的钱。
+
+    与"完全不开 cache_control"对照：
+      saved = counterfactual_cost − actual_cost
+            = cache_read × (input − cache_read_price)              # 命中省钱
+              + cache_write_5m × (input − cache_write_5m_price)    # 短写溢价 -25%
+              + cache_write_1h × (input − cache_write_1h_price)    # 长写溢价 -100%
+
+    对 Anthropic 来说 cache_write 项是 *负* 贡献（写入比基础价贵），但
+    只要 cache_read 量足够大，总和仍然正。这是相对早期实现的重要修正：
+    旧版本仅算 cache_read 折扣，会高估"省下的钱"。
+    """
+    p = _price_for(model)
+    w5, w1 = _split_cache_write(n)
+    saved_read  = (p["input"] - p["cache_read"])      * int(n.get("cache_read", 0))
+    saved_w5    = (p["input"] - p["cache_write_5m"])  * w5
+    saved_w1    = (p["input"] - p["cache_write_1h"])  * w1
+    return (saved_read + saved_w5 + saved_w1) / 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -92,24 +170,36 @@ def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
 
 @dataclass
 class _Agg:
-    """累计 4 个 token bucket + 美元 + 计次。"""
+    """累计 4 个 token bucket + 美元 + 计次。
+
+    新增字段：
+    - ``cache_write_5m`` / ``cache_write_1h``：拆分后的 cache_write 量
+    - ``counterfactual_usd``：反事实成本（关闭 STELA 时要付多少）
+    """
     raw_input: int = 0
     cache_read: int = 0
     cache_write: int = 0
+    cache_write_5m: int = 0
+    cache_write_1h: int = 0
     output: int = 0
     cost_usd: float = 0.0
     saved_usd: float = 0.0
+    counterfactual_usd: float = 0.0
     calls: int = 0
     last_ts: float = 0.0
 
     def add(self, n: dict[str, int], cost: dict[str, float], saved: float,
-            ts: float) -> None:
+            counterfactual: float, ts: float) -> None:
         self.raw_input += n["raw_input"]
         self.cache_read += n["cache_read"]
         self.cache_write += n["cache_write"]
+        # n["_w5"] / n["_w1"] 是 aggregate() 拆好的 breakdown
+        self.cache_write_5m += int(n.get("_w5", 0))
+        self.cache_write_1h += int(n.get("_w1", 0))
         self.output += n["output"]
         self.cost_usd += sum(cost.values())
         self.saved_usd += saved
+        self.counterfactual_usd += counterfactual
         self.calls += 1
         if ts > self.last_ts:
             self.last_ts = ts
@@ -121,15 +211,38 @@ class Summary:
     by_harness: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_model: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_session: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
-    # 时间序列：以 hour bucket 累计 cache_read / saved_usd / calls
+    # 时间序列：以 hour bucket 累计 cache_read / saved_usd / counterfactual / cost / calls
     timeline: dict[str, dict[str, float]] = field(
-        default_factory=lambda: defaultdict(lambda: {"cache_read": 0.0,
-                                                       "saved_usd": 0.0,
-                                                       "calls": 0.0})
+        default_factory=lambda: defaultdict(lambda: {
+            "cache_read": 0.0,
+            "saved_usd": 0.0,
+            "counterfactual_usd": 0.0,
+            "cost_usd": 0.0,
+            "calls": 0.0,
+        })
     )
     first_ts: float | None = None
     last_ts: float | None = None
     sessions_seen: set[str] = field(default_factory=set)
+
+
+def _extract_breakdown(rec: Mapping[str, Any]) -> dict[str, int] | None:
+    """从 record 里挖出 cache_creation 的 5m/1h 拆分。
+
+    Proxy / SDK transport 都把原始 ``usage`` 字段塞进 ``raw_usage``；
+    Anthropic 在那里返回 ``cache_creation.ephemeral_{5m,1h}_input_tokens``。
+    缺失或非 dict 时返回 None（调用方按 5m 退化处理）。
+    """
+    raw = rec.get("raw_usage")
+    if not isinstance(raw, Mapping):
+        return None
+    cc = raw.get("cache_creation")
+    if not isinstance(cc, Mapping):
+        return None
+    return {
+        "ephemeral_5m_input_tokens": int(cc.get("ephemeral_5m_input_tokens", 0) or 0),
+        "ephemeral_1h_input_tokens": int(cc.get("ephemeral_1h_input_tokens", 0) or 0),
+    }
 
 
 def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
@@ -138,12 +251,19 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         n = rec.get("normalized") or {}
         if not n:
             continue
-        n_dict = {
+        breakdown = _extract_breakdown(rec)
+        n_dict: dict[str, Any] = {
             "raw_input": int(n.get("raw_input", 0) or 0),
             "cache_read": int(n.get("cache_read", 0) or 0),
             "cache_write": int(n.get("cache_write", 0) or 0),
             "output": int(n.get("output", 0) or 0),
         }
+        if breakdown is not None:
+            n_dict["_breakdown"] = breakdown
+        # 把 5m/1h 拆分放进 dict，供 _Agg.add 累加（方便后面分类做条形图）
+        w5, w1 = _split_cache_write(n_dict)
+        n_dict["_w5"] = w5
+        n_dict["_w1"] = w1
         model = rec.get("model") or ""
         harness = rec.get("harness") or "?"
         session = rec.get("session_id") or "(no-session)"
@@ -151,11 +271,12 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
 
         cost = _cost_usd(model, n_dict)
         saved = _saved_usd_for_call(model, n_dict)
+        counterfactual = _counterfactual_cost_usd(model, n_dict)
 
-        s.total.add(n_dict, cost, saved, ts)
-        s.by_harness[harness].add(n_dict, cost, saved, ts)
-        s.by_model[model or "(unknown)"].add(n_dict, cost, saved, ts)
-        s.by_session[session].add(n_dict, cost, saved, ts)
+        s.total.add(n_dict, cost, saved, counterfactual, ts)
+        s.by_harness[harness].add(n_dict, cost, saved, counterfactual, ts)
+        s.by_model[model or "(unknown)"].add(n_dict, cost, saved, counterfactual, ts)
+        s.by_session[session].add(n_dict, cost, saved, counterfactual, ts)
         s.sessions_seen.add(session)
 
         if ts > 0:
@@ -163,6 +284,8 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
             tb = s.timeline[bucket]
             tb["cache_read"] += n_dict["cache_read"]
             tb["saved_usd"] += saved
+            tb["counterfactual_usd"] += counterfactual
+            tb["cost_usd"] += sum(cost.values())
             tb["calls"] += 1
             if s.first_ts is None or ts < s.first_ts:
                 s.first_ts = ts
@@ -405,7 +528,10 @@ def _render_breakdown_table(label: str, data: dict[str, _Agg],
 
     rows = []
     for key, a in rows_sorted:
-        share = (a.cache_read / (a.cache_read + a.raw_input)) if (a.cache_read + a.raw_input) else 0.0
+        # 修正：hit% 的分母应包含 cache_write（Anthropic 的 input_tokens
+        # 仅指未命中且未写缓存的部分，"总 prompt tokens" = raw + read + write）
+        prompt_tokens = a.cache_read + a.raw_input + a.cache_write
+        share = (a.cache_read / prompt_tokens) if prompt_tokens else 0.0
         bar_pct = (100 * a.saved_usd / max_saved) if max_saved > 0 else 0.0
         rows.append(
             f"<tr>"
@@ -413,6 +539,7 @@ def _render_breakdown_table(label: str, data: dict[str, _Agg],
             f"<td>{_fmt_int(a.calls)}</td>"
             f"<td>{_fmt_tokens(a.raw_input)}</td>"
             f'<td class="green">{_fmt_tokens(a.cache_read)}</td>'
+            f"<td>{_fmt_tokens(a.cache_write)}</td>"
             f"<td>{_fmt_pct(share)}</td>"
             f'<td class="bar-cell">'
             f'<span class="fill" style="width:{bar_pct:.1f}%"></span>'
@@ -429,6 +556,7 @@ def _render_breakdown_table(label: str, data: dict[str, _Agg],
       <th>calls</th>
       <th>raw_input</th>
       <th>cache_read</th>
+      <th>cache_write</th>
       <th>hit%</th>
       <th class="left">saved $</th>
     </tr></thead>
@@ -530,9 +658,14 @@ def render_dashboard(
     refresh_seconds: int | None = None,
 ) -> str:
     total = summary.total
-    inp = total.raw_input + total.cache_read
-    hit_rate = total.cache_read / inp if inp else 0.0
-    counterfactual_cost = total.cost_usd + total.saved_usd  # 没有 STELA 估计要花多少
+    # 修正：hit_rate 分母应包含 cache_write（Anthropic 的 input_tokens 字段
+    # 不含 cached_creation / cached_read，所以"总 prompt tokens" = 三者之和）
+    prompt_tokens_total = total.raw_input + total.cache_read + total.cache_write
+    hit_rate = total.cache_read / prompt_tokens_total if prompt_tokens_total else 0.0
+    # 反事实成本：直接累加每条 call 的（关掉 cache_control 后）的预估总价。
+    # 旧实现用 ``cost + saved``，在 cache_write 溢价场景下会少算；改成累计
+    # 来自 _counterfactual_cost_usd 的逐条值。
+    counterfactual_cost = total.counterfactual_usd or (total.cost_usd + total.saved_usd)
     saved_share = total.saved_usd / counterfactual_cost if counterfactual_cost else 0.0
 
     if summary.first_ts and summary.last_ts:
@@ -554,11 +687,17 @@ def render_dashboard(
     ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sources_html = "<br>".join(f"<code>{html.escape(str(s))}</code>" for s in sources)
 
-    seg_bar = _render_seg_bar([
+    # —— "with STELA" 视角的 token mix（实际值） ——
+    seg_bar_with = _render_seg_bar([
         ("raw_input",   total.raw_input,   "raw_input"),
         ("cache_read",  total.cache_read,  "cache_read"),
         ("cache_write", total.cache_write, "cache_write"),
         ("output",      total.output,      "output"),
+    ])
+    # —— "without STELA" 视角：所有 prompt token 都落 raw_input 桶 ——
+    seg_bar_without = _render_seg_bar([
+        ("raw_input",   prompt_tokens_total, "raw_input (counterfactual)"),
+        ("output",      total.output,        "output"),
     ])
 
     by_harness = _render_breakdown_table(
@@ -574,6 +713,17 @@ def render_dashboard(
 
     timeline_svg = _render_timeline_svg(summary.timeline)
 
+    # 5m / 1h cache_write 拆分（仅在 raw_usage.cache_creation.* 拆分可用时
+    # 非零；否则全部计入 5m 兜底）
+    w5_total = total.cache_write_5m
+    w1_total = total.cache_write_1h
+    write_breakdown_note = (
+        f"cache_write 拆分：5m <b class='gold'>{_fmt_tokens(w5_total)}</b>"
+        f" · 1h <b class='gold'>{_fmt_tokens(w1_total)}</b>"
+    ) if (w5_total + w1_total) else (
+        "cache_write 缺 5m/1h 拆分 → 按 5m 价兜底估算"
+    )
+
     refresh_tag = (
         f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
         if refresh_seconds and refresh_seconds > 0 else ""
@@ -583,13 +733,54 @@ def render_dashboard(
         if refresh_seconds and refresh_seconds > 0 else ""
     )
 
+    # 对照模式下需要的数字（关 STELA 时，所有 token 走 input 价）
+    without_input_value = _fmt_tokens(prompt_tokens_total)
+    without_cost = _fmt_usd(counterfactual_cost)
+    with_cost = _fmt_usd(total.cost_usd)
+    delta_cost = _fmt_usd(total.saved_usd)
+    delta_share = _fmt_pct(saved_share)
+
+    toggle_css = """
+.toggle-wrap { display: inline-flex; gap: 0; background: #161b22; border-radius: 999px;
+  padding: 4px; margin: 0 0 14px 0; border: 1px solid #30363d; }
+.toggle-wrap button { all: unset; cursor: pointer; padding: 7px 18px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: #8b949e; transition: all .15s ease; }
+.toggle-wrap button.active { background: linear-gradient(120deg, #d2a8ff 0%, #79c0ff 100%);
+  color: #0a0d12; }
+.toggle-wrap button:hover:not(.active) { color: #e6edf3; }
+[data-mode='without'] .with-only { display: none; }
+[data-mode='with'] .without-only { display: none; }
+[data-mode='_compare'] .with-only,
+[data-mode='_compare'] .without-only { display: none; }
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
+.compare-cell { background: #0f141c; border: 1px solid #21262d; border-radius: 10px;
+  padding: 18px 20px; }
+.compare-cell h3 { margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: #7d8590; font-weight: 600; }
+.compare-cell h3 .pill { display: inline-block; margin-left: 8px; padding: 2px 8px;
+  border-radius: 999px; font-size: 10px; vertical-align: middle; }
+.compare-cell.actual h3 .pill   { background: #1a4d2e; color: #56d364; }
+.compare-cell.counter h3 .pill  { background: #4d2a1a; color: #f0883e; }
+.compare-cell .row { font-size: 13px; color: #c9d1d9; margin: 4px 0; display: flex;
+  justify-content: space-between; }
+.compare-cell .row b { font-variant-numeric: tabular-nums; }
+.compare-cell .big { font-size: 24px; font-weight: 700; margin: 4px 0 8px 0;
+  letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.compare-cell.actual .big   { color: #56d364; }
+.compare-cell.counter .big  { color: #f0883e; }
+.compare-cell .small { font-size: 11px; color: #7d8590; margin-top: 6px; }
+.savings-arrow { font-size: 13px; color: #d2a8ff; margin: 10px 0 0 0; text-align: center; }
+.savings-arrow b { font-size: 18px; }
+"""
+
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 {refresh_tag}
 <title>STELA · Token Savings Dashboard</title>
 <style>{CSS}</style>
-</head><body>
+<style>{toggle_css}</style>
+</head><body data-mode="with">
 <div class="wrap">
 
 <header>
@@ -600,12 +791,44 @@ def render_dashboard(
   </div>
 </header>
 
-<section class="hero">
+<!-- ===== 视角切换：with STELA vs. without STELA ===== -->
+<div class="toggle-wrap" role="tablist">
+  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 STELA）</button>
+  <button id="btn-without" onclick="setMode('without')">反事实（不开 STELA）</button>
+  <button id="btn-compare" onclick="setMode('compare')">并排对比</button>
+</div>
+
+<!-- compare 视角下的并排面板 -->
+<section id="compare-view" style="display:none; margin-bottom: 18px;">
+  <div class="compare-grid">
+    <div class="compare-cell counter">
+      <h3>without STELA <span class="pill">counterfactual</span></h3>
+      <div class="big">{without_cost}</div>
+      <div class="row"><span>prompt tokens (input 价)</span><b>{without_input_value}</b></div>
+      <div class="row"><span>output tokens</span><b>{_fmt_tokens(total.output)}</b></div>
+      <div class="small">所有 prompt token 按基础 input 价计费；无 cache_read 折扣、无 cache_write 溢价。</div>
+    </div>
+    <div class="compare-cell actual">
+      <h3>with STELA <span class="pill">actual</span></h3>
+      <div class="big">{with_cost}</div>
+      <div class="row"><span>raw_input · @input</span><b>{_fmt_tokens(total.raw_input)}</b></div>
+      <div class="row"><span>cache_read · @0.1×input</span><b class="green">{_fmt_tokens(total.cache_read)}</b></div>
+      <div class="row"><span>cache_write · @1.25–2×input</span><b class="gold">{_fmt_tokens(total.cache_write)}</b></div>
+      <div class="row"><span>output · @output</span><b>{_fmt_tokens(total.output)}</b></div>
+      <div class="small">{write_breakdown_note}</div>
+    </div>
+  </div>
+  <div class="savings-arrow">
+    净节省：<b>{delta_cost}</b> &nbsp;·&nbsp; <b>{delta_share}</b> off counterfactual
+  </div>
+</section>
+
+<section class="hero with-only">
   <div class="hero-card green">
-    <div class="label">tokens saved</div>
+    <div class="label">tokens saved (cache hits)</div>
     <div class="value">{_fmt_tokens(total.cache_read)}</div>
     <div class="sub">
-      cache hits 占总 input 的 <b class="green">{_fmt_pct(hit_rate)}</b>
+      cache hits 占总 prompt tokens 的 <b class="green">{_fmt_pct(hit_rate)}</b>
       ·  绝对量 <code>{_fmt_int(total.cache_read)}</code> tokens
     </div>
   </div>
@@ -613,9 +836,29 @@ def render_dashboard(
     <div class="label">cost saved (estimated)</div>
     <div class="value">{_fmt_usd(total.saved_usd)}</div>
     <div class="sub">
-      若无 STELA，预计要付 <b class="lilac">{_fmt_usd(counterfactual_cost)}</b>
+      若关 STELA 预计要付 <b class="lilac">{_fmt_usd(counterfactual_cost)}</b>
       · 实付 <b>{_fmt_usd(total.cost_usd)}</b>
       · 节省 <b class="lilac">{_fmt_pct(saved_share)}</b>
+    </div>
+  </div>
+</section>
+
+<section class="hero without-only">
+  <div class="hero-card green" style="opacity:.65">
+    <div class="label">prompt tokens (no cache)</div>
+    <div class="value">{without_input_value}</div>
+    <div class="sub">
+      反事实视角：所有 raw_input + cache_read + cache_write 都以
+      base input 价计费 ·
+      output <code>{_fmt_int(total.output)}</code>
+    </div>
+  </div>
+  <div class="hero-card purple" style="opacity:.85">
+    <div class="label">cost (no STELA)</div>
+    <div class="value">{without_cost}</div>
+    <div class="sub">
+      启用 STELA 后实际只付 <b>{with_cost}</b>
+      · 节省 <b class="lilac">{delta_cost}</b>（<b class="lilac">{delta_share}</b>）
     </div>
   </div>
 </section>
@@ -633,21 +876,34 @@ def render_dashboard(
     <div class="sub">{_fmt_int(total.cache_read)}</div></div>
   <div class="kpi"><div class="label">cache write</div>
     <div class="value gold">{_fmt_tokens(total.cache_write)}</div>
-    <div class="sub">{_fmt_int(total.cache_write)}</div></div>
+    <div class="sub">5m {_fmt_tokens(w5_total)} · 1h {_fmt_tokens(w1_total)}</div></div>
   <div class="kpi"><div class="label">output</div>
     <div class="value blue">{_fmt_tokens(total.output)}</div>
     <div class="sub">{_fmt_int(total.output)}</div></div>
 </div>
 
-<div class="card">
-  <h2>Token mix（全局）</h2>
-  {seg_bar}
+<div class="card with-only">
+  <h2>Token mix（with STELA · 实际）</h2>
+  {seg_bar_with}
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · {_fmt_tokens(total.raw_input)}</span>
     <span><span class="sw" style="background:#3fb950"></span>cache_read · {_fmt_tokens(total.cache_read)}</span>
     <span><span class="sw" style="background:#d29922"></span>cache_write · {_fmt_tokens(total.cache_write)}</span>
     <span><span class="sw" style="background:#79c0ff"></span>output · {_fmt_tokens(total.output)}</span>
   </div>
+</div>
+
+<div class="card without-only">
+  <h2>Token mix（without STELA · 反事实）</h2>
+  {seg_bar_without}
+  <div class="seg-legend">
+    <span><span class="sw" style="background:#f0883e"></span>raw_input · {without_input_value}</span>
+    <span><span class="sw" style="background:#79c0ff"></span>output · {_fmt_tokens(total.output)}</span>
+  </div>
+  <p class="muted" style="font-size:11px;margin-top:8px">
+    反事实假设：保持 prompt 内容不变，但移除 ``cache_control``，全量 prompt token
+    按 base input 价计费 → 计费视角下所有 cache_read 与 cache_write 都"塌"成 raw_input。
+  </p>
 </div>
 
 <div class="card timeline">
@@ -661,10 +917,36 @@ def render_dashboard(
 
 <div class="footer">
   数据源 · {sources_html}<br>
-  价格表 = Anthropic / DeepSeek 公开定价（USD per 1M tokens）；未识别 model 走 Sonnet 价位估算。
+  价格表 = Anthropic / OpenAI / DeepSeek 2026 公开报价（USD / 1M tokens）；未识别 model 走 Sonnet 价位估算。
+  <br>cache_write 拆分按 raw_usage.cache_creation.ephemeral_{{5m,1h}}_input_tokens；缺失则全计 5m 价（保守）。
 </div>
 
 </div>
+
+<script>
+function setMode(m) {{
+  var body = document.body;
+  var compareView = document.getElementById('compare-view');
+  ['with','without','compare'].forEach(function(k){{
+    var b = document.getElementById('btn-' + k);
+    if (b) b.classList.toggle('active', k === m);
+  }});
+  if (m === 'compare') {{
+    // compare 模式：隐藏 with/without 专属面板，只显示并排
+    body.setAttribute('data-mode', '_compare');
+    compareView.style.display = 'block';
+  }} else {{
+    body.setAttribute('data-mode', m);
+    compareView.style.display = 'none';
+  }}
+  try {{ localStorage.setItem('stela.dashboard.mode', m); }} catch(e) {{}}
+}}
+// 恢复上次选择
+try {{
+  var saved = localStorage.getItem('stela.dashboard.mode');
+  if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);
+}} catch(e) {{}}
+</script>
 </body></html>
 """
 

@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from stela import Bridge, load_engine, load_harness
 from stela.bridge import BridgeSessionState
+from stela.ir import Band, StelaIR
 from stela.scripts.stela_anthropic_transport import _detect_harness
 
 
@@ -34,6 +35,13 @@ class PipelineResult:
         cumulative_cache_creation: 跨 turn 累计的 cache_write tokens（来自
                                    session_state）。新 session 第一次为 0。
         real_requests_since_refresh: 距上次 refresh 的真实请求计数。
+        ir_layout:   开发者面板用的 IR 结构快照（segment × band 字符数 /
+                     block 数，加上每条 message 的 role/kind/band 列表）。
+                     完整 IR 不进 wire dict，怕日志膨胀。
+        tool_uses:   本轮请求中 assistant 发起的 tool_use 列表（name + 参数体
+                     字符长度），用于开发者面板的工具调用统计。
+        tool_results: 本轮请求中 user 段里的 tool_result 块（tool_use_id +
+                     content 字符长度）。
     """
 
     wire: dict[str, Any]
@@ -43,6 +51,9 @@ class PipelineResult:
     model: str = ""
     cumulative_cache_creation: int = 0
     real_requests_since_refresh: int = 0
+    ir_layout: dict[str, Any] = field(default_factory=dict)
+    tool_uses: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 def process_anthropic_request(
@@ -91,6 +102,9 @@ def process_anthropic_request(
             wire[k] = raw[k]
 
     state = bridge.session_state
+    snapshot = bridge.snapshot_ir()
+    layout = _summarize_ir_layout(snapshot)
+    tool_uses, tool_results = _extract_tool_calls(snapshot)
     return PipelineResult(
         wire=wire,
         harness=name,
@@ -99,4 +113,114 @@ def process_anthropic_request(
         model=raw.get("model", ""),
         cumulative_cache_creation=state.stats.cumulative_cache_creation,
         real_requests_since_refresh=state.stats.real_requests_since_refresh,
+        ir_layout=layout,
+        tool_uses=tool_uses,
+        tool_results=tool_results,
     )
+
+
+# ---------------------------------------------------------------------------
+# IR 摘要：给开发者面板用的 region byte counts + per-message band 序列
+# ---------------------------------------------------------------------------
+
+_BANDS = ("pin", "fold", "drop")
+
+
+def _payload_size(payload: Any) -> int:
+    """估算 payload 的字符体积（用于"prompt regions"展示）。
+
+    text 用 len()；dict / list 走 json 序列化的字符数（这与 wire 大致同阶）。
+    任何异常都退化到 ``len(str(payload))``，绝不抛错（开发者面板永远要能渲染）。
+    """
+    if isinstance(payload, str):
+        return len(payload)
+    try:
+        import json as _json
+        return len(_json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                default=str))
+    except Exception:  # noqa: BLE001
+        return len(str(payload))
+
+
+def _summarize_ir_layout(ir: StelaIR) -> dict[str, Any]:
+    """返回 ``{segment: {pin/fold/drop: {blocks, chars}}, messages: [...]}``。
+
+    - segment ∈ {tools, system, messages}
+    - 每个 message 单独记录 (role, blocks: [(band, kind, chars, id)])
+    便于开发者面板逐 message 追溯 fold 区域的增减。
+    """
+    out: dict[str, Any] = {
+        "session_id": ir.session_id,
+        "engine": ir.hints.engine,
+        "model": ir.hints.model,
+        "segments": {seg: {b: {"blocks": 0, "chars": 0} for b in _BANDS}
+                     for seg in ("tools", "system", "messages")},
+        "messages": [],
+        "ref_pool": [],
+    }
+    # tools
+    for blk in ir.tools:
+        s = out["segments"]["tools"][blk.band.value]
+        s["blocks"] += 1
+        s["chars"] += _payload_size(blk.payload)
+    # system
+    for blk in ir.system:
+        s = out["segments"]["system"][blk.band.value]
+        s["blocks"] += 1
+        s["chars"] += _payload_size(blk.payload)
+    # messages（同时汇总到 segments.messages.* 桶里 & per-message 详情）
+    for mi, msg in enumerate(ir.messages):
+        detail = {"index": mi, "role": msg.role, "blocks": []}
+        for blk in msg.blocks:
+            chars = _payload_size(blk.payload)
+            s = out["segments"]["messages"][blk.band.value]
+            s["blocks"] += 1
+            s["chars"] += chars
+            detail["blocks"].append({
+                "id": blk.id,
+                "band": blk.band.value,
+                "kind": blk.kind,
+                "chars": chars,
+                "source_tag": blk.source_tag,
+                "ref_slug": blk.ref_slug,
+            })
+        out["messages"].append(detail)
+    # ref-pool：列出 slug + 当前 payload 字符数
+    for slug, blk in ir.ref_pool.items():
+        out["ref_pool"].append({
+            "slug": slug,
+            "band": blk.band.value,
+            "chars": _payload_size(blk.payload),
+        })
+    return out
+
+
+def _extract_tool_calls(ir: StelaIR) -> tuple[list[dict[str, Any]],
+                                                list[dict[str, Any]]]:
+    """从 IR 里捞出 (tool_uses, tool_results)。
+
+    tool_use 来自 assistant message；tool_result 来自 user message。每条记录
+    包含 name / args_chars / result_chars / tool_use_id（如果有），供
+    SessionInspector 累加统计。
+    """
+    uses: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    for mi, msg in enumerate(ir.messages):
+        for blk in msg.blocks:
+            if blk.kind == "tool_use" and isinstance(blk.payload, Mapping):
+                p = blk.payload
+                args = p.get("input") or p.get("arguments") or {}
+                uses.append({
+                    "message_index": mi,
+                    "id": p.get("id") or blk.id,
+                    "name": p.get("name") or "?",
+                    "args_chars": _payload_size(args),
+                })
+            elif blk.kind == "tool_result" and isinstance(blk.payload, Mapping):
+                p = blk.payload
+                results.append({
+                    "message_index": mi,
+                    "tool_use_id": p.get("tool_use_id", ""),
+                    "result_chars": _payload_size(p.get("content", "")),
+                })
+    return uses, results

@@ -19,24 +19,51 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from stela.output_filter.tokens import estimate_tokens
+
 
 @dataclass
 class FilterRecord:
-    """单个 tool_result 过滤的结果 + 计量。"""
+    """单个 tool_result 过滤的结果 + 计量。
+
+    ``original_tokens`` / ``filtered_tokens`` 是过滤前 / 后文本的 token
+    估算（``tokens.estimate_tokens``），过滤时按真实文本算，比 dashboard
+    端的 ``chars / 4`` 精确。
+    """
 
     text: str
     original_chars: int
     filtered_chars: int
     rule: str  # 命中的规则名，如 "rtk:git", "fallback:dedup", "passthrough"
+    original_tokens: int = 0
+    filtered_tokens: int = 0
 
     @property
     def saved_chars(self) -> int:
         return max(0, self.original_chars - self.filtered_chars)
 
+    @property
+    def saved_tokens(self) -> int:
+        return max(0, self.original_tokens - self.filtered_tokens)
+
+    @classmethod
+    def of(cls, before: str, after: str, *, rule: str) -> "FilterRecord":
+        """从过滤前 / 后文本构造，自动算字符数与 token 估算。"""
+        return cls(
+            text=after,
+            original_chars=len(before),
+            filtered_chars=len(after),
+            rule=rule,
+            original_tokens=estimate_tokens(before),
+            filtered_tokens=estimate_tokens(after),
+        )
+
     @classmethod
     def passthrough(cls, text: str, *, rule: str = "passthrough") -> "FilterRecord":
         n = len(text)
-        return cls(text=text, original_chars=n, filtered_chars=n, rule=rule)
+        t = estimate_tokens(text)
+        return cls(text=text, original_chars=n, filtered_chars=n, rule=rule,
+                   original_tokens=t, filtered_tokens=t)
 
 
 class ToolResultFilter(ABC):
@@ -92,7 +119,7 @@ class FallbackFilter(ToolResultFilter):
         if _PYTEST_RE.search(command) or _PYTEST_RE.search(text[:400]):
             out, hit = self._pytest(text)
             if hit:
-                return FilterRecord(out, original, len(out), "fallback:pytest")
+                return FilterRecord.of(text, out, rule="fallback:pytest")
 
         deduped = _collapse_repeats(text)
         rule = "fallback:dedup" if len(deduped) < original else "fallback:truncate"
@@ -101,7 +128,7 @@ class FallbackFilter(ToolResultFilter):
             rule = "fallback:truncate"
         if len(deduped) >= original:
             return FilterRecord.passthrough(text)
-        return FilterRecord(deduped, original, len(deduped), rule)
+        return FilterRecord.of(text, deduped, rule=rule)
 
     @staticmethod
     def _pytest(text: str) -> tuple[str, bool]:
@@ -195,7 +222,7 @@ class RtkFilter(ToolResultFilter):
         if len(out) >= len(text):
             return FilterRecord.passthrough(text)
         verb = (command.split() or ["?"])[0]
-        return FilterRecord(out, len(text), len(out), f"rtk:{verb}")
+        return FilterRecord.of(text, out, rule=f"rtk:{verb}")
 
 
 # ---------------------------------------------------------------------------

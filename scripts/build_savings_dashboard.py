@@ -168,7 +168,8 @@ def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
 # 聚合
 # ---------------------------------------------------------------------------
 
-# tool_result 文本估算 token 用的字符/token 比（粗略，英文混代码约 3.5–4）。
+# tool_result token 估算的字符/token 比。**仅作旧日志的兜底**——新日志
+# 里 tool_output_reduction 已带过滤时按真实文本算好的 original/filtered_tokens。
 _CHARS_PER_TOKEN = 4
 
 
@@ -180,7 +181,9 @@ class _Agg:
     - ``cache_write_5m`` / ``cache_write_1h``：拆分后的 cache_write 量
     - ``counterfactual_usd``：反事实成本（关闭 STELA 时要付多少）
     - ``tool_orig_chars`` / ``tool_filtered_chars``：RTK 过滤前/后的工具
-      输出字符数；``tool_saved_usd`` 是据此估算的省钱（input 价上界）。
+      输出字符数；``tool_orig_tokens`` / ``tool_filtered_tokens`` 是过滤时
+      按真实文本算好的 token 估算。``tool_saved_usd`` 是据此（缓存命中率
+      加权计价）估算的省钱。
     """
     raw_input: int = 0
     cache_read: int = 0
@@ -196,6 +199,8 @@ class _Agg:
     # RTK 工具输出过滤
     tool_orig_chars: int = 0
     tool_filtered_chars: int = 0
+    tool_orig_tokens: int = 0
+    tool_filtered_tokens: int = 0
     tool_blocks_filtered: int = 0
     tool_saved_usd: float = 0.0
 
@@ -205,6 +210,15 @@ class _Agg:
 
     @property
     def tool_saved_tokens(self) -> int:
+        """RTK 过滤省下的 token。
+
+        优先用日志里过滤时按真实文本算好的 token 估算（``original_tokens``
+        / ``filtered_tokens``，见 output_filter/tokens.py）；旧日志缺这两个
+        字段时回退到 ``saved_chars / _CHARS_PER_TOKEN`` 的粗估。
+        """
+        logged = max(0, self.tool_orig_tokens - self.tool_filtered_tokens)
+        if logged > 0:
+            return logged
         return self.tool_saved_chars // _CHARS_PER_TOKEN
 
     def add(self, n: dict[str, int], cost: dict[str, float], saved: float,
@@ -225,6 +239,8 @@ class _Agg:
         if tool_reduction:
             self.tool_orig_chars += int(tool_reduction.get("original_chars", 0) or 0)
             self.tool_filtered_chars += int(tool_reduction.get("filtered_chars", 0) or 0)
+            self.tool_orig_tokens += int(tool_reduction.get("original_tokens", 0) or 0)
+            self.tool_filtered_tokens += int(tool_reduction.get("filtered_tokens", 0) or 0)
             self.tool_blocks_filtered += int(tool_reduction.get("blocks_filtered", 0) or 0)
             self.tool_saved_usd += tool_saved_usd
         if ts > self.last_ts:
@@ -315,17 +331,38 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         saved = _saved_usd_for_call(model, n_dict)
         counterfactual = _counterfactual_cost_usd(model, n_dict)
 
-        # RTK 工具输出过滤：把省下的字符折成 token，按 input 价估算省钱
-        # （上界——这些 token 若不过滤，多数会以 cache_write/raw_input 入账）。
+        # RTK 工具输出过滤省钱估算。
+        #
+        # token 数：优先用日志里过滤时按真实文本算好的估算
+        # （original_tokens / filtered_tokens，见 output_filter/tokens.py）；
+        # 旧日志缺这些字段时回退 chars/4。
+        #
+        # 计价：缓存命中率加权。这些被过滤掉的 token 若不过滤，会进入 prompt——
+        # 其边际成本介于 cache_read 价（若命中前缀缓存）与 input 价（未命中）
+        # 之间。用这条 call 自身的命中率 h 加权：
+        #   eff_price = h × cache_read 价 + (1 − h) × input 价
+        # STELA 命中率越高，RTK 省下的钱越接近（更便宜的）cache_read 口径；
+        # 不开 STELA（h≈0）时退化为完整 input 价。
         tool_reduction = rec.get("tool_output_reduction")
         if not isinstance(tool_reduction, Mapping):
             tool_reduction = None
         tool_saved_usd = 0.0
         if tool_reduction:
-            saved_chars = max(0, int(tool_reduction.get("original_chars", 0) or 0)
-                              - int(tool_reduction.get("filtered_chars", 0) or 0))
-            tool_saved_usd = (_price_for(model)["input"]
-                              * (saved_chars / _CHARS_PER_TOKEN) / 1_000_000)
+            saved_tokens = int(tool_reduction.get("saved_tokens", 0) or 0)
+            if saved_tokens <= 0:
+                ot = int(tool_reduction.get("original_tokens", 0) or 0)
+                ft = int(tool_reduction.get("filtered_tokens", 0) or 0)
+                saved_tokens = max(0, ot - ft)
+            if saved_tokens <= 0:
+                saved_chars = max(0, int(tool_reduction.get("original_chars", 0) or 0)
+                                  - int(tool_reduction.get("filtered_chars", 0) or 0))
+                saved_tokens = saved_chars // _CHARS_PER_TOKEN
+            p = _price_for(model)
+            prompt_tokens = (n_dict["raw_input"] + n_dict["cache_read"]
+                             + n_dict["cache_write"])
+            hit = (n_dict["cache_read"] / prompt_tokens) if prompt_tokens else 0.0
+            eff_price = hit * p["cache_read"] + (1.0 - hit) * p["input"]
+            tool_saved_usd = eff_price * saved_tokens / 1_000_000
 
         def _add(agg: _Agg) -> None:
             agg.add(n_dict, cost, saved, counterfactual, ts,
@@ -688,7 +725,8 @@ def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
   </table>
   <p class="muted" style="font-size:11px;margin-top:8px">
     STELA saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
-    RTK saved $ = 工具输出过滤省下的字符折算 token × input 价（上界估算）。
+    RTK saved $ = 工具输出过滤省下的 token（过滤时按真实文本估算）×
+    缓存命中率加权的边际价（命中→cache_read 价、未命中→input 价）。
     两路相加 = combined。
   </p>
 </div>
@@ -870,6 +908,12 @@ def render_dashboard(
     # 来自 _counterfactual_cost_usd 的逐条值。
     counterfactual_cost = total.counterfactual_usd or (total.cost_usd + total.saved_usd)
     saved_share = total.saved_usd / counterfactual_cost if counterfactual_cost else 0.0
+    # 合并口径：STELA + RTK。RTK 的反事实成本 = 实付 + RTK 省下的钱，所以
+    # 合并反事实 = STELA 反事实 + RTK 省下额。
+    combined_saved = total.combined_saved_usd
+    combined_counterfactual = counterfactual_cost + total.tool_saved_usd
+    combined_share = (combined_saved / combined_counterfactual
+                      if combined_counterfactual else 0.0)
 
     if summary.first_ts and summary.last_ts:
         span = summary.last_ts - summary.first_ts
@@ -1039,12 +1083,12 @@ def render_dashboard(
     </div>
   </div>
   <div class="hero-card purple">
-    <div class="label">cost saved (estimated)</div>
-    <div class="value">{_fmt_usd(total.saved_usd)}</div>
+    <div class="label">total cost saved (estimated)</div>
+    <div class="value">{_fmt_usd(combined_saved)}</div>
     <div class="sub">
-      若关 STELA 预计要付 <b class="lilac">{_fmt_usd(counterfactual_cost)}</b>
-      · 实付 <b>{_fmt_usd(total.cost_usd)}</b>
-      · 节省 <b class="lilac">{_fmt_pct(saved_share)}</b>
+      STELA <b class="green">{_fmt_usd(total.saved_usd)}</b>
+      &nbsp;·&nbsp; RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>
+      &nbsp;·&nbsp; 占反事实总成本 <b class="lilac">{_fmt_pct(combined_share)}</b>
     </div>
   </div>
 </section>
@@ -1089,6 +1133,12 @@ def render_dashboard(
   <div class="kpi"><div class="label">RTK tool output removed</div>
     <div class="value gold">{_fmt_tokens(total.tool_saved_tokens)}</div>
     <div class="sub">{_fmt_int(total.tool_blocks_filtered)} blocks · ~{_fmt_usd(total.tool_saved_usd)}</div></div>
+  <div class="kpi"><div class="label">STELA saved $</div>
+    <div class="value green">{_fmt_usd(total.saved_usd)}</div>
+    <div class="sub">前缀缓存 vs 不开 cache_control</div></div>
+  <div class="kpi"><div class="label">RTK saved $</div>
+    <div class="value gold">{_fmt_usd(total.tool_saved_usd)}</div>
+    <div class="sub">工具输出过滤 · 命中率加权计价</div></div>
 </div>
 
 <div class="card with-only">
@@ -1249,8 +1299,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[savings-dashboard] wrote {out}")
     print(f"  {len(records):,} records · {summary.total.calls:,} calls "
           f"· {len(summary.sessions_seen):,} sessions")
-    print(f"  saved: {_fmt_tokens(summary.total.cache_read)} tokens "
-          f"· {_fmt_usd(summary.total.saved_usd)}")
+    print(f"  saved: {_fmt_tokens(summary.total.cache_read)} cache-read tokens "
+          f"· STELA {_fmt_usd(summary.total.saved_usd)}"
+          f" + RTK {_fmt_usd(summary.total.tool_saved_usd)}"
+          f" = {_fmt_usd(summary.total.combined_saved_usd)}")
     print(f"  open with:  open {out}")
     return 0
 

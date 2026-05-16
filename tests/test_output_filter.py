@@ -8,6 +8,8 @@ from stela.output_filter import (
     apply_filter,
     build_filter,
 )
+from stela.output_filter.filters import FilterRecord
+from stela.output_filter.tokens import estimate_tokens
 
 
 def test_mode_labels_roundtrip() -> None:
@@ -113,6 +115,60 @@ def test_apply_filter_handles_block_list_content() -> None:
     print("✓ test_apply_filter_handles_block_list_content")
 
 
+def test_estimate_tokens_heuristic() -> None:
+    """estimate_tokens：空串 0，非空恒 ≥1，标点密集文本比 chars/4 多。"""
+    assert estimate_tokens("") == 0
+    assert estimate_tokens("hello world") >= 1
+    # 纯标点：每个符号 1 token，远多于 chars/4
+    puncts = "(){}[];,.<>" * 10
+    assert estimate_tokens(puncts) > len(puncts) // 4
+    # 单调性：长文本 token 多于其前缀
+    long = "def foo(x): return x + 1\n" * 50
+    assert estimate_tokens(long) > estimate_tokens(long[:100])
+    print("✓ test_estimate_tokens_heuristic")
+
+
+def test_filter_record_token_fields() -> None:
+    """过滤命中时 FilterRecord 带 token 估算，saved_tokens 与字符同向。"""
+    flt = FallbackFilter()
+    text = "head\n" + ("repeated build line\n" * 100) + "tail"
+    rec = flt.filter_text(text, tool_name="Bash", command="cargo build")
+    assert rec.original_tokens > 0
+    assert rec.filtered_tokens > 0
+    assert rec.original_tokens > rec.filtered_tokens
+    assert rec.saved_tokens > 0
+    # passthrough：前后 token 相等 → saved_tokens == 0
+    pt = FilterRecord.passthrough("short")
+    assert pt.saved_tokens == 0
+    assert pt.original_tokens == pt.filtered_tokens
+    print("✓ test_filter_record_token_fields")
+
+
+def test_apply_filter_emits_token_fields() -> None:
+    """FilterStats.as_dict() 带 original/filtered/saved_tokens，写进 usage_log。"""
+    flt = build_filter()
+    big = "start\n" + ("compiling module\n" * 300) + "done\n"
+    raw = {
+        "model": "claude-opus-4-7",
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu1", "name": "Bash",
+                 "input": {"command": "cargo build"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": big},
+            ]},
+        ],
+    }
+    _, stats = apply_filter(raw, flt)
+    d = stats.as_dict()
+    assert d["original_tokens"] > 0
+    assert d["filtered_tokens"] > 0
+    assert d["saved_tokens"] == d["original_tokens"] - d["filtered_tokens"]
+    assert d["saved_tokens"] > 0
+    print("✓ test_apply_filter_emits_token_fields")
+
+
 def main() -> None:
     test_mode_labels_roundtrip()
     test_mode_unknown_falls_back_to_stela()
@@ -121,6 +177,9 @@ def main() -> None:
     test_fallback_truncates_long_unique_output()
     test_apply_filter_rewrites_tool_result_and_counts()
     test_apply_filter_handles_block_list_content()
+    test_estimate_tokens_heuristic()
+    test_filter_record_token_fields()
+    test_apply_filter_emits_token_fields()
     print("\nall output_filter tests passed.")
 
 

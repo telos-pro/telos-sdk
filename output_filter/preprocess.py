@@ -19,10 +19,16 @@ from stela.output_filter.filters import ToolResultFilter
 
 @dataclass
 class FilterStats:
-    """一次请求里所有 tool_result 过滤的汇总，写进 usage_log。"""
+    """一次请求里所有 tool_result 过滤的汇总，写进 usage_log。
+
+    ``original_tokens`` / ``filtered_tokens`` 由过滤器在真实文本上估算
+    （见 ``filters.FilterRecord``），dashboard 优先用它们而非 ``chars/4``。
+    """
 
     original_chars: int = 0
     filtered_chars: int = 0
+    original_tokens: int = 0
+    filtered_tokens: int = 0
     blocks_seen: int = 0      # 扫描到的 tool_result 文本块数
     blocks_filtered: int = 0  # 实际省下字节的块数
     by_rule: dict[str, int] = field(default_factory=lambda: defaultdict(int))
@@ -31,11 +37,18 @@ class FilterStats:
     def saved_chars(self) -> int:
         return max(0, self.original_chars - self.filtered_chars)
 
+    @property
+    def saved_tokens(self) -> int:
+        return max(0, self.original_tokens - self.filtered_tokens)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "original_chars": self.original_chars,
             "filtered_chars": self.filtered_chars,
             "saved_chars": self.saved_chars,
+            "original_tokens": self.original_tokens,
+            "filtered_tokens": self.filtered_tokens,
+            "saved_tokens": self.saved_tokens,
             "blocks_seen": self.blocks_seen,
             "blocks_filtered": self.blocks_filtered,
             "by_rule": dict(self.by_rule),
@@ -129,6 +142,8 @@ def _filter_tool_result(
         stats.blocks_seen += 1
         stats.original_chars += rec.original_chars
         stats.filtered_chars += rec.filtered_chars
+        stats.original_tokens += rec.original_tokens
+        stats.filtered_tokens += rec.filtered_tokens
         stats.by_rule[rec.rule] += 1
         if rec.saved_chars > 0:
             item["content"] = rec.text
@@ -146,6 +161,8 @@ def _filter_tool_result(
             stats.blocks_seen += 1
             stats.original_chars += rec.original_chars
             stats.filtered_chars += rec.filtered_chars
+            stats.original_tokens += rec.original_tokens
+            stats.filtered_tokens += rec.filtered_tokens
             stats.by_rule[rec.rule] += 1
             if rec.saved_chars > 0:
                 blk["text"] = rec.text

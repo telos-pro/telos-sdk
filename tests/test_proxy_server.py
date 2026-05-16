@@ -329,6 +329,91 @@ async def _test_strict_mode_returns_500_on_pipeline_failure() -> None:
         await up_runner.cleanup()
 
 
+class _FlakyUpstream:
+    """前 ``fail_first`` 个连接收到请求后直接关闭（不返回响应），
+
+    其余正常返回 JSON。客户端侧表现为 ``ServerDisconnectedError`` —— 模拟
+    api.anthropic.com 建连/早期阶段的瞬时抖动。
+    """
+
+    def __init__(self, *, fail_first: int) -> None:
+        self.fail_first = fail_first
+        self.requests = 0
+        self.served = 0
+
+    async def handler(self, request: web.Request) -> web.StreamResponse:
+        self.requests += 1
+        if self.requests <= self.fail_first:
+            # 收到请求后直接关闭连接，不发任何响应。
+            request.transport.close()
+            raise asyncio.CancelledError()
+        self.served += 1
+        return web.json_response({
+            "id": "msg_flaky",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-opus-4-7",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 0,
+                      "cache_creation_input_tokens": 0, "output_tokens": 1},
+        })
+
+
+def _req_body() -> dict[str, Any]:
+    return {
+        "model": "claude-opus-4-7",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
+        "stream": False,
+    }
+
+
+async def _test_retries_transient_connect_failure() -> None:
+    """前 2 次建连瞬时失败 → proxy 自己退避重试，客户端最终拿到 200。"""
+    mock = _FlakyUpstream(fail_first=2)
+    up_runner, up_url = await _start_upstream(mock)
+    px_runner, px_url = await _start_proxy(up_url)
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{px_url}/v1/messages", json=_req_body(),
+                headers={"x-api-key": "k", "x-stela-session": "retry-ok"},
+            ) as resp:
+                assert resp.status == 200, await resp.text()
+                body = await resp.json()
+                assert body["id"] == "msg_flaky"
+        # upstream 共收到 3 次（2 次失败 + 1 次成功），只成功服务 1 次。
+        assert mock.requests == 3, mock.requests
+        assert mock.served == 1, mock.served
+        print("✓ test_retries_transient_connect_failure")
+    finally:
+        await px_runner.cleanup()
+        await up_runner.cleanup()
+
+
+async def _test_502_after_exhausting_retries() -> None:
+    """建连一直失败 → 重试耗尽后 proxy 回 502（anthropic error 结构）。"""
+    mock = _FlakyUpstream(fail_first=999)
+    up_runner, up_url = await _start_upstream(mock)
+    px_runner, px_url = await _start_proxy(up_url)
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{px_url}/v1/messages", json=_req_body(),
+                headers={"x-api-key": "k", "x-stela-session": "retry-exhaust"},
+            ) as resp:
+                assert resp.status == 502, await resp.text()
+                body = await resp.json()
+                assert body["error"]["type"] == "api_error"
+        # 1 次初始 + 3 次重试 = 4 次尝试。
+        assert mock.requests == 4, mock.requests
+        print("✓ test_502_after_exhausting_retries")
+    finally:
+        await px_runner.cleanup()
+        await up_runner.cleanup()
+
+
 async def _run_all(tmp_log: Path) -> None:
     await _test_non_streaming()
     await _test_streaming_sse()
@@ -336,6 +421,8 @@ async def _run_all(tmp_log: Path) -> None:
     await _test_pipeline_error_returns_anthropic_error()
     await _test_pipeline_failure_falls_back_to_passthrough()
     await _test_strict_mode_returns_500_on_pipeline_failure()
+    await _test_retries_transient_connect_failure()
+    await _test_502_after_exhausting_retries()
 
 
 def main() -> None:

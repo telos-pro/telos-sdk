@@ -67,6 +67,11 @@ _FORWARD_HEADER_WHITELIST = (
 
 _log = logging.getLogger("stela.proxy")
 
+# upstream 建连阶段（TLS 握手 / connect）瞬时失败的有界退避重试。
+# 这些错误都发生在请求体送达 upstream 之前，重试不会重复计费 / 重复处理。
+_MAX_CONNECT_RETRIES = 3
+_CONNECT_BACKOFF_BASE = 0.5   # 秒；指数退避 0.5 / 1.0 / 2.0
+
 
 # ---------------------------------------------------------------------------
 # 稳定 session-id 派生
@@ -222,12 +227,63 @@ class ProxyApp:
 
     async def _session_get(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=64,
+                ttl_dns_cache=300,
+                keepalive_timeout=30.0,
+                # 缓解 macOS 上 aiohttp SSL transport 不及时释放的抖动。
+                enable_cleanup_closed=True,
+            )
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.request_timeout),
-                # 关闭自动解压，确保我们看到的字节就是 wire 字节。
+                connector=connector,
+                # sock_connect：卡死的建连快速失败进入重试，不耗尽 total。
+                timeout=aiohttp.ClientTimeout(
+                    total=self.request_timeout, sock_connect=15.0,
+                ),
+                # auto_decompress=True：proxy 需要读懂响应体（解析 usage、
+                # peek SSE），必须拿解压后的明文。响应不转发 Content-Encoding，
+                # 所以不能关——否则客户端会拿到没声明编码的压缩字节。
                 auto_decompress=True,
             )
         return self._session
+
+    async def _post_upstream(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        body_bytes: bytes,
+        headers: dict[str, str],
+        call_index: int,
+    ) -> aiohttp.ClientResponse:
+        """POST 到 upstream，对「建连阶段」的瞬时失败做有界退避重试。
+
+        只重试两类**响应产生前**的错误：
+
+        - ``ClientConnectorError``：连接从未建立（TLS 握手 / connect 失败）。
+        - ``ServerDisconnectedError``：upstream 在返回任何响应前断开，多为
+          复用的 keep-alive 死连接。
+
+        这两类失败时请求体一个字节都还没送达 upstream，重试 100% 安全——
+        不会重复计费、不会让 upstream 重复处理。其余 ``ClientError`` / 超时
+        不重试（可能请求已送达），照旧上抛给 ``handle_messages`` 回 502。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_CONNECT_RETRIES + 1):
+            try:
+                return await session.post(url, data=body_bytes, headers=headers)
+            except (aiohttp.ClientConnectorError,
+                    aiohttp.ServerDisconnectedError) as e:
+                last_exc = e
+                if attempt >= _MAX_CONNECT_RETRIES:
+                    break
+                backoff = _CONNECT_BACKOFF_BASE * (2 ** attempt)
+                _log.warning(
+                    "upstream connect failed (call=%d, attempt %d/%d): %s "
+                    "— retrying in %.1fs", call_index, attempt + 1,
+                    _MAX_CONNECT_RETRIES + 1, e, backoff)
+                await asyncio.sleep(backoff)
+        assert last_exc is not None
+        raise last_exc
 
     async def on_shutdown(self, app: web.Application) -> None:
         if self._session is not None and not self._session.closed:
@@ -371,9 +427,11 @@ class ProxyApp:
         t0 = time.time()
 
         try:
-            upstream = await session.post(url, data=body_bytes, headers=headers)
+            upstream = await self._post_upstream(
+                session, url, body_bytes, headers, call_index)
         except aiohttp.ClientError as e:
-            _log.exception("Upstream connection failed (call=%d)", call_index)
+            _log.error("Upstream connection failed after retries (call=%d): %s",
+                       call_index, e)
             return _anthropic_error(502, "api_error", f"Upstream error: {e}")
 
         if is_streaming:

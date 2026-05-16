@@ -83,12 +83,47 @@ def test_render_shows_total_cost_saved() -> None:
     print("✓ test_render_shows_total_cost_saved")
 
 
+def test_rtk_status_distinguishes_disabled_from_zero_save() -> None:
+    """rtk_status 把「$0」拆开：从未启用 / 启用但空闲 / 跑了但没省 / 实际省。"""
+    # disabled：根本没有 tool_output_reduction
+    s = aggregate([_rec(raw_input=1000)])
+    assert s.total.rtk_status == "disabled"
+    # disabled：tool_output_reduction 是空 dict（RTK 关时 proxy 写的就是 {}）
+    s = aggregate([_rec(raw_input=1000, tool={})])
+    assert s.total.rtk_status == "disabled"
+    # idle：RTK 跑了但没扫到 tool_result
+    s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 0,
+                                              "original_chars": 0})])
+    assert s.total.rtk_status == "idle"
+    # nosave：扫到了工具输出但没省（原文 == 过滤后）
+    s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 3, "saved_tokens": 0,
+                                              "original_chars": 500,
+                                              "filtered_chars": 500})])
+    assert s.total.rtk_status == "nosave"
+    # active：实际省下 token
+    s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 3, "saved_tokens": 4000,
+                                              "original_tokens": 9000,
+                                              "filtered_tokens": 5000})])
+    assert s.total.rtk_status == "active"
+    print("✓ test_rtk_status_distinguishes_disabled_from_zero_save")
+
+
+def test_render_marks_rtk_not_enabled() -> None:
+    """RTK 从未启用时，渲染产物显式标 not enabled，而非和省 0 混同。"""
+    summary = aggregate([_rec(raw_input=5000, cache_read=50000, mode="stela")])
+    html_doc = render_dashboard(summary, [Path("sample.jsonl")])
+    assert "not enabled" in html_doc or "未启用" in html_doc
+    print("✓ test_render_marks_rtk_not_enabled")
+
+
 def main() -> None:
     test_rtk_tokens_prefer_logged_token_fields()
     test_rtk_tokens_fall_back_to_chars_for_old_logs()
     test_combined_equals_stela_plus_rtk()
     test_cache_hit_weights_down_rtk_savings()
     test_render_shows_total_cost_saved()
+    test_rtk_status_distinguishes_disabled_from_zero_save()
+    test_render_marks_rtk_not_enabled()
     print("\nall savings_dashboard tests passed.")
 
 

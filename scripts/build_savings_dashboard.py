@@ -202,11 +202,30 @@ class _Agg:
     tool_orig_tokens: int = 0
     tool_filtered_tokens: int = 0
     tool_blocks_filtered: int = 0
+    tool_blocks_seen: int = 0
+    tool_rtk_calls: int = 0   # RTK 实际执行过过滤的 call 数（非空 reduction）
     tool_saved_usd: float = 0.0
 
     @property
     def tool_saved_chars(self) -> int:
         return max(0, self.tool_orig_chars - self.tool_filtered_chars)
+
+    @property
+    def rtk_status(self) -> str:
+        """RTK 在这组数据里的状态——把「没省钱」拆成三种本质不同的情况：
+
+        - ``disabled``：RTK 从未对任何 call 执行（proxy mode 不含 rtk）。
+        - ``idle``：RTK 开了，但没扫到任何 tool_result（对话还没产生工具输出）。
+        - ``nosave``：RTK 跑了、也扫到工具输出，但没省下 token。
+        - ``active``：RTK 实际省下了 token。
+        """
+        if self.tool_rtk_calls == 0:
+            return "disabled"
+        if self.tool_blocks_seen == 0:
+            return "idle"
+        if self.tool_saved_tokens == 0:
+            return "nosave"
+        return "active"
 
     @property
     def tool_saved_tokens(self) -> int:
@@ -242,6 +261,8 @@ class _Agg:
             self.tool_orig_tokens += int(tool_reduction.get("original_tokens", 0) or 0)
             self.tool_filtered_tokens += int(tool_reduction.get("filtered_tokens", 0) or 0)
             self.tool_blocks_filtered += int(tool_reduction.get("blocks_filtered", 0) or 0)
+            self.tool_blocks_seen += int(tool_reduction.get("blocks_seen", 0) or 0)
+            self.tool_rtk_calls += 1
             self.tool_saved_usd += tool_saved_usd
         if ts > self.last_ts:
             self.last_ts = ts
@@ -695,14 +716,21 @@ def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
         color = _mode_color(mode)
         desc = _MODE_META.get(mode, ("", ""))[1]
         bar_pct = (100 * a.combined_saved_usd / max_combined) if max_combined > 0 else 0.0
+        # RTK 没在这个 mode 下跑过 → 两个 RTK 列显式标 not enabled，
+        # 而不是和「跑了但没省」一样都显示 0。
+        if a.rtk_status == "disabled":
+            rtk_cells = ('<td class="muted" colspan="2" '
+                         'style="text-align:center">RTK not enabled</td>')
+        else:
+            rtk_cells = (f'<td class="gold">{_fmt_tokens(a.tool_saved_tokens)}</td>'
+                         f'<td class="gold">{_fmt_usd(a.tool_saved_usd)}</td>')
         rows.append(
             f"<tr>"
             f'<td class="left"><b style="color:{color}">{html.escape(mode)}</b>'
             f'<br><span class="muted" style="font-size:10px">{html.escape(desc)}</span></td>'
             f"<td>{_fmt_int(a.calls)}</td>"
             f'<td class="green">{_fmt_usd(a.saved_usd)}</td>'
-            f'<td class="gold">{_fmt_tokens(a.tool_saved_tokens)}</td>'
-            f'<td class="gold">{_fmt_usd(a.tool_saved_usd)}</td>'
+            f"{rtk_cells}"
             f'<td class="bar-cell">'
             f'<span class="fill" style="width:{bar_pct:.1f}%"></span>'
             f'<span class="label-overlay">{_fmt_usd(a.combined_saved_usd)}</span>'
@@ -780,6 +808,9 @@ def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
             hit = (a.cache_read / prompt_tokens) if prompt_tokens else 0.0
             badge = ('<span class="pill" style="background:#1a4d2e;color:#56d364">'
                      'best</span>') if is_best else ""
+            rtk_removed = ('<b class="muted">not enabled</b>'
+                           if a.rtk_status == "disabled"
+                           else f'<b class="gold">{_fmt_tokens(a.tool_saved_tokens)}</b>')
             cells.append(f"""
     <div class="compare-cell" style="border-color:{color}55">
       <h3><b style="color:{color}">{html.escape(mode)}</b> {badge}</h3>
@@ -787,7 +818,7 @@ def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
       <div class="row"><span>calls</span><b>{_fmt_int(a.calls)}</b></div>
       <div class="row"><span>cache hit%</span><b>{_fmt_pct(hit)}</b></div>
       <div class="row"><span>STELA saved $</span><b class="green">{_fmt_usd(a.saved_usd)}</b></div>
-      <div class="row"><span>RTK tokens removed</span><b class="gold">{_fmt_tokens(a.tool_saved_tokens)}</b></div>
+      <div class="row"><span>RTK tokens removed</span>{rtk_removed}</div>
       <div class="row"><span>combined saved $</span><b class="lilac">{_fmt_usd(a.combined_saved_usd)}</b></div>
       {delta_html}
     </div>""")
@@ -914,6 +945,22 @@ def render_dashboard(
     combined_counterfactual = counterfactual_cost + total.tool_saved_usd
     combined_share = (combined_saved / combined_counterfactual
                       if combined_counterfactual else 0.0)
+
+    # RTK 状态：把「$0」拆开——RTK 没启用 vs 启用了但没省，是两回事。
+    rtk_status = total.rtk_status
+    if rtk_status == "disabled":
+        rtk_hero = '<b class="muted">RTK 未启用</b>'
+        rtk_kpi_value = '<span class="muted" style="font-size:16px">not enabled</span>'
+        rtk_kpi_sub = "proxy mode 未含 rtk —— 用 --mode both 启用"
+    elif rtk_status == "idle":
+        rtk_hero = f'RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>'
+        rtk_kpi_value = f'<span class="gold">{_fmt_usd(total.tool_saved_usd)}</span>'
+        rtk_kpi_sub = "已启用 · 暂无工具输出可过滤"
+    else:  # nosave / active
+        rtk_hero = f'RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>'
+        rtk_kpi_value = f'<span class="gold">{_fmt_usd(total.tool_saved_usd)}</span>'
+        rtk_kpi_sub = ("工具输出过滤 · 命中率加权计价" if rtk_status == "active"
+                       else "已跑 · 本批无可省内容")
 
     if summary.first_ts and summary.last_ts:
         span = summary.last_ts - summary.first_ts
@@ -1087,7 +1134,7 @@ def render_dashboard(
     <div class="value">{_fmt_usd(combined_saved)}</div>
     <div class="sub">
       STELA <b class="green">{_fmt_usd(total.saved_usd)}</b>
-      &nbsp;·&nbsp; RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>
+      &nbsp;·&nbsp; {rtk_hero}
       &nbsp;·&nbsp; 占反事实总成本 <b class="lilac">{_fmt_pct(combined_share)}</b>
     </div>
   </div>
@@ -1137,8 +1184,8 @@ def render_dashboard(
     <div class="value green">{_fmt_usd(total.saved_usd)}</div>
     <div class="sub">前缀缓存 vs 不开 cache_control</div></div>
   <div class="kpi"><div class="label">RTK saved $</div>
-    <div class="value gold">{_fmt_usd(total.tool_saved_usd)}</div>
-    <div class="sub">工具输出过滤 · 命中率加权计价</div></div>
+    <div class="value gold">{rtk_kpi_value}</div>
+    <div class="sub">{rtk_kpi_sub}</div></div>
 </div>
 
 <div class="card with-only">

@@ -526,7 +526,16 @@ class ProxyApp:
                 "Connection": "keep-alive",
             },
         )
-        await downstream.prepare(request)
+        try:
+            await downstream.prepare(request)
+        except (ConnectionResetError, asyncio.CancelledError) as e:
+            # 下游客户端在我们回写响应头前就断开了——常见且无害（用户中断、
+            # 客户端超时）。不是错误：静默释放 upstream 连接后收尾，避免
+            # 异常逃逸打出 noisy traceback、也避免 upstream 连接泄漏。
+            _log.info("downstream disconnected before stream start (call=%d): %s",
+                      call_index, e)
+            upstream.release()
+            return downstream
 
         usage_aggregate: dict[str, Any] = {}
         sse_buf = b""

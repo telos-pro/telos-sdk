@@ -367,6 +367,10 @@ class ProxyApp:
 
         try:
             raw = await request.json()
+        except web.HTTPRequestEntityTooLarge as e:  # noqa: BLE001
+            # 请求体超过 client_max_size：与 JSON 语法错误区分开，回 413。
+            _log.warning("request body too large (call=%d): %s", call_index, e)
+            return _anthropic_error(413, "request_too_large", str(e))
         except Exception as e:  # noqa: BLE001
             return _anthropic_error(400, "invalid_request_error", f"Invalid JSON: {e}")
 

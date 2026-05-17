@@ -898,7 +898,11 @@ def make_app(
         corpus_dir=corpus_dir,
         record=record,
     )
-    app = web.Application()
+    # client_max_size：aiohttp 默认仅 1 MiB。Claude Code 等 harness 在长对话下
+    # 单次请求体（完整 messages 历史 + system + tools）会远超 1 MiB，触发
+    # HTTPRequestEntityTooLarge → 被 handle_messages 的 except 包成
+    # "400 Invalid JSON: Request Entity Too Large"。放到 1 GiB 实质上不设限。
+    app = web.Application(client_max_size=1024 ** 3)
     app.router.add_post("/v1/messages", proxy.handle_messages)
     # 必须在 catch-all passthrough 之前注册，否则会被吞掉。
     app.router.add_get("/__stela/dashboard", proxy.handle_dashboard)

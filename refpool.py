@@ -4,7 +4,7 @@
 --------
 - 每个 ref-pool 条目 *绑定一个稳定的 slug*，这个 slug 在整个会话期内
   不能变。emit-time lint 会扫描所有文本 block 内的 ``[ref:<slug>]`` 引用，
-  发现未注册的 slug 直接抛 ``StelaInvariantError``。
+  发现未注册的 slug 直接抛 ``TelosInvariantError``。
 - compact 时 *只换 payload 不换 slug*：``[ref:login.py]`` 字符串原地不动，
   user/assistant 中所有引用点的字节因此不变 —— 这是 Janus §8 提到的
   "引用天然折叠"的真正落地方式。
@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from stela.ir import Band, StelaBlock, StelaInvariantError
+from telos.ir import Band, TelosBlock, TelosInvariantError
 
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9_\-./]+$")
@@ -33,31 +33,31 @@ class RefPool:
     渲染进 system 段尾部（保证字节稳定）。
     """
 
-    _entries: dict[str, StelaBlock] = field(default_factory=dict)
+    _entries: dict[str, TelosBlock] = field(default_factory=dict)
 
     # ------ 注册与替换 ------
 
-    def register(self, slug: str, block: StelaBlock) -> None:
+    def register(self, slug: str, block: TelosBlock) -> None:
         """首次注册 slug；slug 一经注册不可重命名（违反 I3）。"""
         if not SLUG_RE.match(slug):
-            raise StelaInvariantError(
+            raise TelosInvariantError(
                 f"Invalid ref slug {slug!r}; must match {SLUG_RE.pattern}"
             )
         if slug in self._entries:
-            raise StelaInvariantError(
+            raise TelosInvariantError(
                 f"Slug {slug!r} already registered; ref-pool slugs are frozen"
             )
         if block.ref_slug != slug:
-            raise StelaInvariantError(
+            raise TelosInvariantError(
                 f"Block.ref_slug ({block.ref_slug!r}) must equal slug ({slug!r})"
             )
         if block.band is not Band.FOLD:
-            raise StelaInvariantError(
+            raise TelosInvariantError(
                 "Ref-pool entries must have band=FOLD (foldable on compact)"
             )
         self._entries[slug] = block
 
-    def register_or_skip(self, slug: str, block: StelaBlock) -> bool:
+    def register_or_skip(self, slug: str, block: TelosBlock) -> bool:
         """Idempotent register —— 跨 turn 共享 RefPool 时用。
 
         - slug 未注册 → 走标准 register
@@ -73,16 +73,16 @@ class RefPool:
         self.register(slug, block)
         return True
 
-    def fold(self, slug: str, *, summary: str | None = None) -> StelaBlock:
+    def fold(self, slug: str, *, summary: str | None = None) -> TelosBlock:
         """把 ref-pool 条目折叠成短占位符；返回新 block。
 
         slug 不动，``[ref:slug]`` 引用点字节不变 → 后续 BP 仍可命中。
         """
         if slug not in self._entries:
-            raise StelaInvariantError(f"Cannot fold unregistered slug {slug!r}")
+            raise TelosInvariantError(f"Cannot fold unregistered slug {slug!r}")
         old = self._entries[slug]
         placeholder = summary or f"<folded ref:{slug}>"
-        new = StelaBlock(
+        new = TelosBlock(
             id=old.id,
             band=Band.FOLD,
             kind="text",
@@ -99,11 +99,11 @@ class RefPool:
     def slugs(self) -> frozenset[str]:
         return frozenset(self._entries.keys())
 
-    def render_blocks(self) -> tuple[StelaBlock, ...]:
+    def render_blocks(self) -> tuple[TelosBlock, ...]:
         """按 slug 字典序渲染条目；保证多次 emit 字节稳定。"""
         return tuple(self._entries[k] for k in sorted(self._entries.keys()))
 
-    def to_mapping(self) -> dict[str, StelaBlock]:
+    def to_mapping(self) -> dict[str, TelosBlock]:
         return dict(self._entries)
 
     # ------ 引用 lint（§4 / §8.5 L1）------
@@ -113,12 +113,12 @@ class RefPool:
         for m in REF_RE.finditer(text):
             slug = m.group(1)
             if slug not in self._entries:
-                raise StelaInvariantError(
+                raise TelosInvariantError(
                     f"Unregistered ref slug {slug!r} in {where}; "
                     f"register via Pin() before emitting."
                 )
 
-    def lint_blocks(self, blocks: Iterable[StelaBlock], where: str) -> None:
+    def lint_blocks(self, blocks: Iterable[TelosBlock], where: str) -> None:
         for blk in blocks:
             if blk.kind == "text" and isinstance(blk.payload, str):
                 self.lint_text(blk.payload, f"{where}/block:{blk.id}")

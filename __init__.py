@@ -1,45 +1,45 @@
-"""STELA — Prompt Reuse via Indexed Span Marking.
+"""TELOS — Prompt Reuse via Indexed Span Marking.
 
 三层 cache-友好 prompt 协议的 Python 参考实现。
 
 公开入口：
-    from stela import (
+    from telos import (
         # IR
-        Band, StelaBlock, StelaMessage, StelaIR,
+        Band, TelosBlock, TelosMessage, TelosIR,
         # Bridge
         Bridge,
         # 工厂
         load_harness, load_engine,
     )
 
-详见 stela/README.zh.md。
+详见 telos/README.zh.md。
 """
 
-from stela.ir import (
+from telos.ir import (
     Band,
-    StelaBlock,
-    StelaHints,
-    StelaIR,
-    StelaInvariantError,
-    StelaMessage,
+    TelosBlock,
+    TelosHints,
+    TelosIR,
+    TelosInvariantError,
+    TelosMessage,
     UsageReport,
 )
-from stela.bridge import Bridge
-from stela.engine.base import (
+from telos.bridge import Bridge
+from telos.engine.base import (
     BidirectionalEngineAdapter,
     EngineAdapter,
     EngineCapabilities,
     ProbeResult,
 )
-from stela.registry import load_engine, load_harness
+from telos.registry import load_engine, load_harness
 
 __all__ = [
     "Band",
-    "StelaBlock",
-    "StelaHints",
-    "StelaMessage",
-    "StelaIR",
-    "StelaInvariantError",
+    "TelosBlock",
+    "TelosHints",
+    "TelosMessage",
+    "TelosIR",
+    "TelosInvariantError",
     "UsageReport",
     "Bridge",
     "EngineAdapter",

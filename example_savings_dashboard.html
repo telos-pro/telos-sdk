@@ -2,7 +2,7 @@
 <html lang="en"><head>
 <meta charset="utf-8">
 
-<title>STELA · Token Savings Dashboard</title>
+<title>TELOS · Token Savings Dashboard</title>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -178,17 +178,17 @@ tr:hover td { background: #131822; }
 <div class="wrap">
 
 <header>
-  <h1>STELA · Token Savings</h1>
+  <h1>TELOS · Token Savings</h1>
   <div class="sub">
     64 calls · 8 sessions · span 42.0 分钟
     · generated 2026-05-15 11:42 UTC
   </div>
 </header>
 
-<!-- ===== 视角切换：with STELA vs. without STELA ===== -->
+<!-- ===== 视角切换：with TELOS vs. without TELOS ===== -->
 <div class="toggle-wrap" role="tablist">
-  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 STELA）</button>
-  <button id="btn-without" onclick="setMode('without')">反事实（不开 STELA）</button>
+  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 TELOS）</button>
+  <button id="btn-without" onclick="setMode('without')">反事实（不开 TELOS）</button>
   <button id="btn-compare" onclick="setMode('compare')">并排对比</button>
 </div>
 
@@ -196,14 +196,14 @@ tr:hover td { background: #131822; }
 <section id="compare-view" style="display:none; margin-bottom: 18px;">
   <div class="compare-grid">
     <div class="compare-cell counter">
-      <h3>without STELA <span class="pill">counterfactual</span></h3>
+      <h3>without TELOS <span class="pill">counterfactual</span></h3>
       <div class="big">$6.42</div>
       <div class="row"><span>prompt tokens (input 价)</span><b>1.09M</b></div>
       <div class="row"><span>output tokens</span><b>39.28K</b></div>
       <div class="small">所有 prompt token 按基础 input 价计费；无 cache_read 折扣、无 cache_write 溢价。</div>
     </div>
     <div class="compare-cell actual">
-      <h3>with STELA <span class="pill">actual</span></h3>
+      <h3>with TELOS <span class="pill">actual</span></h3>
       <div class="big">$4.58</div>
       <div class="row"><span>raw_input · @input</span><b>586.83K</b></div>
       <div class="row"><span>cache_read · @0.1×input</span><b class="green">427.96K</b></div>
@@ -230,7 +230,7 @@ tr:hover td { background: #131822; }
     <div class="label">cost saved (estimated)</div>
     <div class="value">$1.84</div>
     <div class="sub">
-      若关 STELA 预计要付 <b class="lilac">$6.42</b>
+      若关 TELOS 预计要付 <b class="lilac">$6.42</b>
       · 实付 <b>$4.58</b>
       · 节省 <b class="lilac">28.6%</b>
     </div>
@@ -248,10 +248,10 @@ tr:hover td { background: #131822; }
     </div>
   </div>
   <div class="hero-card purple" style="opacity:.85">
-    <div class="label">cost (no STELA)</div>
+    <div class="label">cost (no TELOS)</div>
     <div class="value">$6.42</div>
     <div class="sub">
-      启用 STELA 后实际只付 <b>$4.58</b>
+      启用 TELOS 后实际只付 <b>$4.58</b>
       · 节省 <b class="lilac">$1.84</b>（<b class="lilac">28.6%</b>）
     </div>
   </div>
@@ -280,7 +280,7 @@ tr:hover td { background: #131822; }
 </div>
 
 <div class="card with-only">
-  <h2>Token mix（with STELA · 实际）</h2>
+  <h2>Token mix（with TELOS · 实际）</h2>
   <div class="seg-bar"><span class="raw_input" style="width:52.12%" title="raw_input: 586,830">586.83K</span><span class="cache_read" style="width:38.01%" title="cache_read: 427,965">427.96K</span><span class="cache_write" style="width:6.39%" title="cache_write: 71,901">71.90K</span><span class="output" style="width:3.49%" title="output: 39,280"></span></div>
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · 586.83K</span>
@@ -291,7 +291,7 @@ tr:hover td { background: #131822; }
 </div>
 
 <div class="card without-only">
-  <h2>Token mix（without STELA · 反事实）</h2>
+  <h2>Token mix（without TELOS · 反事实）</h2>
   <div class="seg-bar"><span class="raw_input" style="width:96.51%" title="raw_input (counterfactual): 1,086,696">1.09M</span><span class="output" style="width:3.49%" title="output: 39,280"></span></div>
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · 1.09M</span>
@@ -339,17 +339,17 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#d2a8ff">$0.227</div>
       <div class="row"><span>calls</span><b>7</b></div>
       <div class="row"><span>cache hit%</span><b>80.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.278</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.278</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">16.67K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.362</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.526</b></div>
     </div>
     <div class="compare-cell" style="border-color:#3fb95055">
-      <h3><b style="color:#3fb950">stela</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
+      <h3><b style="color:#3fb950">telos</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
       <div class="big" style="color:#3fb950">$0.318</div>
       <div class="row"><span>calls</span><b>7</b></div>
       <div class="row"><span>cache hit%</span><b>78.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.434</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.434</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.434</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.434</b></div>
@@ -359,7 +359,7 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#f0883e">$0.505</div>
       <div class="row"><span>calls</span><b>7</b></div>
       <div class="row"><span>cache hit%</span><b>0.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.0000</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">16.67K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.083</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.247</b></div>
@@ -369,7 +369,7 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#7d8590">$0.752</div>
       <div class="row"><span>calls</span><b>7</b></div>
       <div class="row"><span>cache hit%</span><b>0.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.0000</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.0000</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="muted">基线</b></div>
@@ -385,17 +385,17 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#d2a8ff">$0.341</div>
       <div class="row"><span>calls</span><b>9</b></div>
       <div class="row"><span>cache hit%</span><b>80.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.439</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.439</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">24.57K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.562</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.829</b></div>
     </div>
     <div class="compare-cell" style="border-color:#3fb95055">
-      <h3><b style="color:#3fb950">stela</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
+      <h3><b style="color:#3fb950">telos</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
       <div class="big" style="color:#3fb950">$0.486</div>
       <div class="row"><span>calls</span><b>9</b></div>
       <div class="row"><span>cache hit%</span><b>78.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.684</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.684</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.684</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.684</b></div>
@@ -405,7 +405,7 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#f0883e">$0.780</div>
       <div class="row"><span>calls</span><b>9</b></div>
       <div class="row"><span>cache hit%</span><b>0.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.0000</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">24.57K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.123</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.390</b></div>
@@ -415,7 +415,7 @@ saved: $1.15</title></circle>
       <div class="big" style="color:#7d8590">$1.17</div>
       <div class="row"><span>calls</span><b>9</b></div>
       <div class="row"><span>cache hit%</span><b>0.0%</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">$0.0000</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.0000</b></div>
       <div class="row"><span>vs 最贵 mode</span><b class="muted">基线</b></div>
@@ -429,15 +429,15 @@ saved: $1.15</title></circle>
     <thead><tr>
       <th class="left">mode</th>
       <th>calls</th>
-      <th>STELA saved $</th>
+      <th>TELOS saved $</th>
       <th>RTK tokens removed</th>
       <th>RTK saved $ (est)</th>
       <th class="left">combined saved $</th>
     </tr></thead>
-    <tbody><tr><td class="left"><b style="color:#d2a8ff">both</b><br><span class="muted" style="font-size:10px">STELA 前缀缓存 + RTK 工具过滤</span></td><td>16</td><td class="green">$0.717</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:82.6%"></span><span class="label-overlay">$0.924</span></td></tr><tr><td class="left"><b style="color:#3fb950">stela</b><br><span class="muted" style="font-size:10px">只 STELA 前缀缓存</span></td><td>16</td><td class="green">$1.12</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$1.12</span></td></tr><tr><td class="left"><b style="color:#f0883e">rtk</b><br><span class="muted" style="font-size:10px">只 RTK 工具过滤</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:18.4%"></span><span class="label-overlay">$0.206</span></td></tr><tr><td class="left"><b style="color:#7d8590">none</b><br><span class="muted" style="font-size:10px">纯透传，无优化</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
+    <tbody><tr><td class="left"><b style="color:#d2a8ff">both</b><br><span class="muted" style="font-size:10px">TELOS 前缀缓存 + RTK 工具过滤</span></td><td>16</td><td class="green">$0.717</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:82.6%"></span><span class="label-overlay">$0.924</span></td></tr><tr><td class="left"><b style="color:#3fb950">telos</b><br><span class="muted" style="font-size:10px">只 TELOS 前缀缓存</span></td><td>16</td><td class="green">$1.12</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$1.12</span></td></tr><tr><td class="left"><b style="color:#f0883e">rtk</b><br><span class="muted" style="font-size:10px">只 RTK 工具过滤</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:18.4%"></span><span class="label-overlay">$0.206</span></td></tr><tr><td class="left"><b style="color:#7d8590">none</b><br><span class="muted" style="font-size:10px">纯透传，无优化</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
   </table>
   <p class="muted" style="font-size:11px;margin-top:8px">
-    STELA saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
+    TELOS saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
     RTK saved $ = 工具输出过滤省下的字符折算 token × input 价（上界估算）。
     两路相加 = combined。
   </p>
@@ -490,7 +490,7 @@ saved: $1.15</title></circle>
       <th>hit%</th>
       <th class="left">saved $</th>
     </tr></thead>
-    <tbody><tr><td class="left">fix-auth-bug/stela</td><td>9</td><td>16.42K</td><td class="green">160.06K</td><td>28.73K</td><td>78.0%</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$0.684</span></td></tr><tr><td class="left">fix-auth-bug/both</td><td>9</td><td>10.19K</td><td class="green">101.78K</td><td>15.26K</td><td>80.0%</td><td class="bar-cell"><span class="fill" style="width:64.1%"></span><span class="label-overlay">$0.439</span></td></tr><tr><td class="left">add-csv-export/stela</td><td>7</td><td>10.42K</td><td class="green">101.56K</td><td>18.23K</td><td>78.0%</td><td class="bar-cell"><span class="fill" style="width:63.5%"></span><span class="label-overlay">$0.434</span></td></tr><tr><td class="left">add-csv-export/both</td><td>7</td><td>6.46K</td><td class="green">64.58K</td><td>9.68K</td><td>80.0%</td><td class="bar-cell"><span class="fill" style="width:40.7%"></span><span class="label-overlay">$0.278</span></td></tr><tr><td class="left">fix-auth-bug/none</td><td>9</td><td>205.20K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">fix-auth-bug/rtk</td><td>9</td><td>127.22K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">add-csv-export/none</td><td>7</td><td>130.20K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">add-csv-export/rtk</td><td>7</td><td>80.72K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
+    <tbody><tr><td class="left">fix-auth-bug/telos</td><td>9</td><td>16.42K</td><td class="green">160.06K</td><td>28.73K</td><td>78.0%</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$0.684</span></td></tr><tr><td class="left">fix-auth-bug/both</td><td>9</td><td>10.19K</td><td class="green">101.78K</td><td>15.26K</td><td>80.0%</td><td class="bar-cell"><span class="fill" style="width:64.1%"></span><span class="label-overlay">$0.439</span></td></tr><tr><td class="left">add-csv-export/telos</td><td>7</td><td>10.42K</td><td class="green">101.56K</td><td>18.23K</td><td>78.0%</td><td class="bar-cell"><span class="fill" style="width:63.5%"></span><span class="label-overlay">$0.434</span></td></tr><tr><td class="left">add-csv-export/both</td><td>7</td><td>6.46K</td><td class="green">64.58K</td><td>9.68K</td><td>80.0%</td><td class="bar-cell"><span class="fill" style="width:40.7%"></span><span class="label-overlay">$0.278</span></td></tr><tr><td class="left">fix-auth-bug/none</td><td>9</td><td>205.20K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">fix-auth-bug/rtk</td><td>9</td><td>127.22K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">add-csv-export/none</td><td>7</td><td>130.20K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr><tr><td class="left">add-csv-export/rtk</td><td>7</td><td>80.72K</td><td class="green">0</td><td>0</td><td>0.0%</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
   </table>
 </div>
 
@@ -519,11 +519,11 @@ function setMode(m) {
     body.setAttribute('data-mode', m);
     compareView.style.display = 'none';
   }
-  try { localStorage.setItem('stela.dashboard.mode', m); } catch(e) {}
+  try { localStorage.setItem('telos.dashboard.mode', m); } catch(e) {}
 }
 // 恢复上次选择
 try {
-  var saved = localStorage.getItem('stela.dashboard.mode');
+  var saved = localStorage.getItem('telos.dashboard.mode');
   if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);
 } catch(e) {}
 </script>

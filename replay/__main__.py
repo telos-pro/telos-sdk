@@ -1,13 +1,13 @@
-"""``python -m stela.replay`` / ``stela replay`` 入口。
+"""``python -m telos.replay`` / ``telos replay`` 入口。
 
 把语料库里某个真实会话，按多种 mode 各重放一遍，结果 append 到 usage_log，
 dashboard 的「A/B 对比」面板会自动并排展示（compare_group = 原会话 id）。
 
 用法::
 
-    stela replay --list                       # 列出语料库里的会话
-    stela replay --session stela-ab12cd34      # 默认 4 mode 全跑
-    stela replay --session <id> --modes none,both
+    telos replay --list                       # 列出语料库里的会话
+    telos replay --session telos-ab12cd34      # 默认 4 mode 全跑
+    telos replay --session <id> --modes none,both
 """
 
 from __future__ import annotations
@@ -20,18 +20,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from stela.corpus import DEFAULT_CORPUS_DIR, list_sessions, load_session
-from stela.output_filter import MODE_LABELS, StelaMode, build_filter
-from stela.replay import ReplayResult, anthropic_sender, replay_session
+from telos.corpus import DEFAULT_CORPUS_DIR, list_sessions, load_session
+from telos.output_filter import MODE_LABELS, TelosMode, build_filter
+from telos.replay import ReplayResult, anthropic_sender, replay_session
 
-_DEFAULT_USAGE_LOG = Path.home() / ".stela" / "usage.jsonl"
+_DEFAULT_USAGE_LOG = Path.home() / ".telos" / "usage.jsonl"
 
 
 def _print_sessions(corpus_dir: Path) -> int:
     infos = list_sessions(corpus_dir)
     if not infos:
         print(f"语料库为空：{corpus_dir}")
-        print("（先用 `stela proxy` 跑几个真实会话，默认就会录进去）")
+        print("（先用 `telos proxy` 跑几个真实会话，默认就会录进去）")
         return 0
     print(f"语料库 {corpus_dir} —— {len(infos)} 个会话：\n")
     print(f"  {'session_id':<40} {'calls':>6}  last_seen")
@@ -39,7 +39,7 @@ def _print_sessions(corpus_dir: Path) -> int:
         last = datetime.fromtimestamp(i.last_ts).strftime("%Y-%m-%d %H:%M") \
             if i.last_ts else "—"
         print(f"  {i.session_id:<40} {i.n_calls:>6}  {last}")
-    print("\n重放：stela replay --session <session_id>")
+    print("\n重放：telos replay --session <session_id>")
     return 0
 
 
@@ -67,7 +67,7 @@ def _print_summary(results: list[ReplayResult]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="stela.replay",
+        prog="telos.replay",
         description="录制 → 重放对照：同一会话按多种 mode 各跑一遍，"
                     "结果进 dashboard 的 A/B 对比面板。",
     )
@@ -77,8 +77,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="列出语料库里的会话后退出")
     ap.add_argument("--session", default=None,
                     help="要重放的会话 id（见 --list）")
-    ap.add_argument("--modes", default="none,stela,rtk,both",
-                    help="逗号分隔的 mode 列表（默认 none,stela,rtk,both）")
+    ap.add_argument("--modes", default="none,telos,rtk,both",
+                    help="逗号分隔的 mode 列表（默认 none,telos,rtk,both）")
     ap.add_argument("--usage-log", type=Path, default=_DEFAULT_USAGE_LOG,
                     help=f"重放结果 append 到此 jsonl（默认 {_DEFAULT_USAGE_LOG}）")
     ap.add_argument("--compare-group", default=None,
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         print("缺少 API key：设 ANTHROPIC_API_KEY 或传 --api-key", file=sys.stderr)
         return 2
 
-    modes = [StelaMode.from_label(m.strip()) for m in args.modes.split(",")
+    modes = [TelosMode.from_label(m.strip()) for m in args.modes.split(",")
              if m.strip()]
     if not modes:
         print(f"--modes 解析为空；合法值：{', '.join(MODE_LABELS)}", file=sys.stderr)
@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     n = _append_records(args.usage_log, results)
     _print_summary(results)
     print(f"\n写入 {n} 条记录 · 用时 {time.time() - t0:.1f}s")
-    print(f"看对比：stela dashboard --usage-log {args.usage_log}")
+    print(f"看对比：telos dashboard --usage-log {args.usage_log}")
     print(f"  （compare_group = {compare_group}）")
     return 0
 

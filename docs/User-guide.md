@@ -1,8 +1,8 @@
-# STELA User Guide
+# TELOS User Guide
 
 > 端到端使用手册：从安装到接入 agent，到多轮观测和调优。
 >
-> 协议层面看 [`2026-05-06-stela-protocol.md`](2026-05-06-stela-protocol.md)；
+> 协议层面看 [`2026-05-06-telos-protocol.md`](2026-05-06-telos-protocol.md)；
 > 改动历史看根目录 [`CHANGELOG.md`](../CHANGELOG.md)。
 
 ---
@@ -15,20 +15,20 @@
 ├─ 能（自研 Python agent / mini_swe_runner 这类 vendored 代码）
 │      ↓
 │   路径 A —— SDK Transport
-│   import StelaAnthropicTransport / StelaOpenAITransport
+│   import TelosAnthropicTransport / TelosOpenAITransport
 │   优点：完整 typed 响应、与 agent 进程同生命周期、调试直接
 │   缺点：每个 agent 要单独改 import；流式还没 wrap
 │
 └─ 不能（npm 全局装的 Claude Code、闭源二进制、共享主机多 agent）
        ↓
     路径 B —— HTTP 反向代理
-    stela proxy 起本机 7171，agent 设 ANTHROPIC_BASE_URL=http://127.0.0.1:7171
+    telos proxy 起本机 7171，agent 设 ANTHROPIC_BASE_URL=http://127.0.0.1:7171
     优点：零侵入、agent 升级不丢、多 agent 共享一份代理
     缺点：多一层进程、白名单外的 header 会被丢弃
 ```
 
 两条路径**功能等价**：
-- 同样的 STELA 管线（`process_anthropic_request` / `bridge.emit_with_plan`）
+- 同样的 TELOS 管线（`process_anthropic_request` / `bridge.emit_with_plan`）
 - 同样的多轮状态累积（`BridgeSessionState`）
 - 同样的 `cache_control` 注入 / canonical 排序
 - 同样的 usage 累计字段在日志里
@@ -46,14 +46,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-[`pyproject.toml`](../pyproject.toml) 把项目根目录映射成 `stela` 包。安装后：
+[`pyproject.toml`](../pyproject.toml) 把项目根目录映射成 `telos` 包。安装后：
 
 ```bash
-python -c "import stela; print(stela.__file__)"
+python -c "import telos; print(telos.__file__)"
 # .../telos-sdk/__init__.py
 
-stela --help
-# usage: stela <subcommand> [...]
+telos --help
+# usage: telos <subcommand> [...]
 ```
 
 需要 Python ≥ 3.10。依赖 `anthropic ≥ 0.49`、`openai ≥ 1.72`、`aiohttp ≥ 3.10`。
@@ -64,7 +64,7 @@ stela --help
 
 ### 3.1 Anthropic 客户端 — Claude Code / Openclaw / Hermes / 自研 agent
 
-把 `anthropic.Anthropic()` 换成 `StelaAnthropicTransport`，其余 `.messages.create()` 调用不变：
+把 `anthropic.Anthropic()` 换成 `TelosAnthropicTransport`，其余 `.messages.create()` 调用不变：
 
 ```python
 # 改前
@@ -72,8 +72,8 @@ import anthropic
 client = anthropic.Anthropic()
 
 # 改后
-from stela.scripts.stela_anthropic_transport import StelaAnthropicTransport
-client = StelaAnthropicTransport(
+from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
+client = TelosAnthropicTransport(
     session_id="my-agent-session",       # 同一对话用同一 id
     usage_log="logs/usage.jsonl",
     prompt_trace_log="logs/trace.jsonl",
@@ -97,7 +97,7 @@ print(response.content[0].text)
 |---|---|---|
 | `api_key` | `$ANTHROPIC_API_KEY` | Anthropic API key |
 | `base_url` | `None`（走 SDK 默认） | 调试时可指向本机代理 |
-| `session_id` | `"stela-session"` | 同一对话保持同一个 id；多轮 cache 累积的 key |
+| `session_id` | `"telos-session"` | 同一对话保持同一个 id；多轮 cache 累积的 key |
 | `harness_name` | `None`（auto-detect） | 强制 `"openclaw"` / `"hermes"` |
 | `engine_name` | `"anthropic"` | 一般不动 |
 | `usage_log` | `None` | jsonl 路径，每次调用追加一行（标准化 usage） |
@@ -114,8 +114,8 @@ from openai import OpenAI
 client = OpenAI(base_url="https://openrouter.ai/api/v1")
 
 # 改后
-from stela.scripts.stela_transport import StelaOpenAITransport
-client = StelaOpenAITransport(
+from telos.scripts.telos_transport import TelosOpenAITransport
+client = TelosOpenAITransport(
     base_url="https://openrouter.ai/api/v1",
     session_id="telos-session",
     usage_log="logs/usage.jsonl",
@@ -135,13 +135,13 @@ response = client.chat.completions.create(
 如果一段对话由多个 transport 实例处理（例如 retry 后重建 client），把 `BridgeSessionState` 显式传进去：
 
 ```python
-from stela.bridge import BridgeSessionState
-from stela.scripts.stela_anthropic_transport import StelaAnthropicTransport
+from telos.bridge import BridgeSessionState
+from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
 
 shared = BridgeSessionState()
-t1 = StelaAnthropicTransport(session_id="conv-1", session_state=shared)
+t1 = TelosAnthropicTransport(session_id="conv-1", session_state=shared)
 # ... t1 出错被销毁 ...
-t2 = StelaAnthropicTransport(session_id="conv-1", session_state=shared)
+t2 = TelosAnthropicTransport(session_id="conv-1", session_state=shared)
 # t2 看得到 t1 累积的 ref-pool 和 R8 计数
 ```
 
@@ -152,24 +152,24 @@ t2 = StelaAnthropicTransport(session_id="conv-1", session_state=shared)
 ### 4.1 启动代理
 
 ```bash
-stela proxy --port 7171 --usage-log ~/.stela/usage.jsonl
+telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl
 # 后台跑：
-stela proxy --port 7171 --usage-log ~/.stela/usage.jsonl &
+telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl &
 ```
 
 启动后输出：
 
 ```
-STELA proxy listening on http://127.0.0.1:7171 → https://api.anthropic.com
+TELOS proxy listening on http://127.0.0.1:7171 → https://api.anthropic.com
 usage log → /Users/.../usage.jsonl
 ```
 
-代理路径接受所有 Anthropic 协议路径；`/v1/messages` 经 STELA 改写，其他原样 passthrough。
+代理路径接受所有 Anthropic 协议路径；`/v1/messages` 经 TELOS 改写，其他原样 passthrough。
 
 ### 4.2 接入 Claude Code（一行命令）
 
 ```bash
-stela init --agent claude-code
+telos init --agent claude-code
 ```
 
 往 `~/.claude/settings.json` 的 `env` 字段写入：
@@ -178,7 +178,7 @@ stela init --agent claude-code
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:7171",
-    "__stela_installed": true
+    "__telos_installed": true
   }
 }
 ```
@@ -188,20 +188,20 @@ stela init --agent claude-code
 撤销：
 
 ```bash
-stela init --agent claude-code --uninstall
+telos init --agent claude-code --uninstall
 # 还原任何 install 之前的 ANTHROPIC_BASE_URL（如有）
 ```
 
 查状态：
 
 ```bash
-stela init --agent claude-code --status
+telos init --agent claude-code --status
 ```
 
 ### 4.3 接入其它 Anthropic-SDK 客户端（generic）
 
 ```bash
-stela init --agent generic
+telos init --agent generic
 # 打印一段 export 指令，自己加到 shell rc / Dockerfile / k8s env
 # export ANTHROPIC_BASE_URL=http://127.0.0.1:7171
 ```
@@ -211,16 +211,16 @@ stela init --agent generic
 ### 4.4 完整 CLI 参考
 
 ```
-stela proxy [options]
+telos proxy [options]
   --host HOST          监听地址（默认 127.0.0.1）
   --port PORT          监听端口（默认 7171）
   --upstream URL       真实 Anthropic API endpoint（默认 https://api.anthropic.com）
   --usage-log PATH     每次调用追加一行 jsonl
   --harness {openclaw,hermes}
                        强制 harness（默认按内容自动检测）
-  --strict             STELA 失败时返 500，而不是降级到 passthrough
+  --strict             TELOS 失败时返 500，而不是降级到 passthrough
 
-stela init [options]
+telos init [options]
   --agent {claude-code,generic}    必填
   --proxy-url URL      代理 URL（默认 http://127.0.0.1:7171）
   --uninstall          还原 install 之前的状态
@@ -231,7 +231,7 @@ stela init [options]
 
 ## 5. 多轮状态累积（关键能力）
 
-STELA 协议设计文档第 §4 / §6 提到的 ref-pool 持久化、R8 自适应 refresh 都依赖**跨 turn 的状态累积**。本节解释机制和如何观测。
+TELOS 协议设计文档第 §4 / §6 提到的 ref-pool 持久化、R8 自适应 refresh 都依赖**跨 turn 的状态累积**。本节解释机制和如何观测。
 
 ### 5.1 状态都在哪
 
@@ -244,7 +244,7 @@ class BridgeSessionState:
 
 ### 5.2 在路径 A 自动持有
 
-`StelaAnthropicTransport` / `StelaOpenAITransport` 实例 = 一个 session。`__init__` 内部创建 `BridgeSessionState`，每次 `_do_create` 传给 `Bridge`，response 回来时 `bridge.absorb_usage(...)` 累加 cache_creation。
+`TelosAnthropicTransport` / `TelosOpenAITransport` 实例 = 一个 session。`__init__` 内部创建 `BridgeSessionState`，每次 `_do_create` 传给 `Bridge`，response 回来时 `bridge.absorb_usage(...)` 累加 cache_creation。
 
 访问：`transport.session_state.stats.cumulative_cache_creation`。
 
@@ -252,9 +252,9 @@ class BridgeSessionState:
 
 代理内部 `_SessionRegistry`（OrderedDict LRU，默认 10000）按 session_id 持有 state。session_id 派生优先级：
 
-1. `x-stela-session` HTTP header（显式覆盖）
+1. `x-telos-session` HTTP header（显式覆盖）
 2. `metadata.user_id`（Anthropic SDK 内建字段）
-3. `blake2b(api_key + system + tools + messages[0])` → `stela-<16 hex>`
+3. `blake2b(api_key + system + tools + messages[0])` → `telos-<16 hex>`
 
 派生规则的语义：
 - 同一对话的 N 轮（只在 `messages[]` 尾部追加）→ 同一 session_id ✓
@@ -269,7 +269,7 @@ usage_log 每行新增 `cumulative` 块：
 
 ```json
 {
-  "session_id": "stela-46bbb9d3d3df581e",
+  "session_id": "telos-46bbb9d3d3df581e",
   "call_index": 4,
   "harness": "openclaw",
   "normalized": {"raw_input": 50, "cache_read": 6500, "cache_write": 0, "output": 5},
@@ -293,15 +293,15 @@ usage_log 每行新增 `cumulative` 块：
 
 ### 6.1 Proxy 返 500 / SDK 重试 10 次
 
-老版本 STELA 抛异常 → 代理返 500。现已**默认降级到 passthrough**：
+老版本 TELOS 抛异常 → 代理返 500。现已**默认降级到 passthrough**：
 - 代理日志首次失败：完整 traceback + `"falling back to passthrough"`
 - 后续失败：WARNING 单行
 - Wire 是 raw 透传（不带 cache_control 改写），但响应正常
 
-要在 dev 阶段让 STELA 失败立刻显式爆，启 `--strict`：
+要在 dev 阶段让 TELOS 失败立刻显式爆，启 `--strict`：
 
 ```bash
-stela proxy --strict
+telos proxy --strict
 ```
 
 ### 6.2 `Band order violated`
@@ -309,11 +309,11 @@ stela proxy --strict
 如果你看到：
 
 ```
-StelaInvariantError: Band order violated in messages[0]:
+TelosInvariantError: Band order violated in messages[0]:
   block 'msg0/blk3/q' has band 'pin' after a higher-band block.
 ```
 
-说明 harness 输出违反了 §5。**这是 STELA-side 的 bug，不是你的请求问题。**
+说明 harness 输出违反了 §5。**这是 TELOS-side 的 bug，不是你的请求问题。**
 
 最常见原因：harness 不知道某种 content block 类型，或多 part 拼接没按 band 排。当前 openclaw / hermes 都已用 `enforce_band_order` 兜底；如果你扩展了新 harness，记得在 message 末尾过一遍 `enforce_band_order(blocks)`。
 
@@ -336,7 +336,7 @@ StelaInvariantError: Band order violated in messages[0]:
 
 ### 6.5 流式响应（Claude Code 默认开）
 
-- 路径 A（SDK transport）：当前 `messages.create(stream=True)` 不做 STELA 处理，直接调底层 SDK。**避免在 SDK transport 路径用流式**。
+- 路径 A（SDK transport）：当前 `messages.create(stream=True)` 不做 TELOS 处理，直接调底层 SDK。**避免在 SDK transport 路径用流式**。
 - 路径 B（proxy）：完整 SSE 支持，旁路解析 `message_start` / `message_delta` 抽 usage 字段。
 
 ---
@@ -347,7 +347,7 @@ StelaInvariantError: Band order violated in messages[0]:
 
 ```jsonc
 {
-  "session_id": "stela-...",          // 跨轮稳定
+  "session_id": "telos-...",          // 跨轮稳定
   "call_index": 1,                     // 进程内递增
   "harness": "openclaw" | "hermes" | "telos" | "passthrough",
   "n_slots": 3,                        // EmitPlan 的 slot 数
@@ -372,20 +372,20 @@ StelaInvariantError: Band order violated in messages[0]:
 
 ### 7.2 `prompt_trace_log`（仅 SDK transport）
 
-包含 IR layout 快照、plan 细节、跨 call 的 prefix 重合度等诊断信息——粒度比 usage_log 重，用于 cache 行为深度分析。具体字段见 [scripts/stela_anthropic_transport.py](../scripts/stela_anthropic_transport.py)。
+包含 IR layout 快照、plan 细节、跨 call 的 prefix 重合度等诊断信息——粒度比 usage_log 重，用于 cache 行为深度分析。具体字段见 [scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py)。
 
 ### 7.3 看日志的几个常用命令
 
 ```bash
 # 查看每轮 cache_read 增量（验证多轮命中）
 jq -c '{call: .call_index, cache_read: .normalized.cache_read, cum: .cumulative.cache_creation}' \
-    < ~/.stela/usage.jsonl
+    < ~/.telos/usage.jsonl
 
 # 查看 ref-pool 是否稳定（不应反复变化）
-jq -c '.cumulative.refpool_slugs' < ~/.stela/usage.jsonl | sort -u
+jq -c '.cumulative.refpool_slugs' < ~/.telos/usage.jsonl | sort -u
 
 # 找所有降级到 passthrough 的请求
-jq -c 'select(.harness == "passthrough")' < ~/.stela/usage.jsonl
+jq -c 'select(.harness == "passthrough")' < ~/.telos/usage.jsonl
 ```
 
 ---
@@ -399,7 +399,7 @@ for t in test_smoke test_harness_multiblock \
          test_proxy_pipeline test_proxy_server test_proxy_session_id \
          test_proxy_accumulation test_bridge_session_state \
          test_sdk_transport_accumulation test_init_claude_code; do
-  python -m stela.tests.$t
+  python -m telos.tests.$t
 done
 ```
 

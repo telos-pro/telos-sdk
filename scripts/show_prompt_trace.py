@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pretty-print prompt_trace.jsonl produced by ``StelaOpenAITransport``.
+"""Pretty-print prompt_trace.jsonl produced by ``TelosOpenAITransport``.
 
 Per call we now surface, beyond the headline cache numbers:
 
@@ -16,8 +16,8 @@ Per call we now surface, beyond the headline cache numbers:
 
 Usage::
 
-    python -m stela.scripts.show_prompt_trace \\
-        /tmp/stela-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
+    python -m telos.scripts.show_prompt_trace \\
+        /tmp/telos-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
 """
 
 from __future__ import annotations

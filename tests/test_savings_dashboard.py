@@ -1,10 +1,10 @@
-"""``build_savings_dashboard`` 单测：RTK token 来源、缓存加权计价、STELA/RTK 分项。"""
+"""``build_savings_dashboard`` 单测：RTK token 来源、缓存加权计价、TELOS/RTK 分项。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from stela.scripts.build_savings_dashboard import aggregate, render_dashboard
+from telos.scripts.build_savings_dashboard import aggregate, render_dashboard
 
 
 def _rec(*, model: str = "claude-opus-4-7", raw_input: int = 0,
@@ -44,15 +44,15 @@ def test_rtk_tokens_fall_back_to_chars_for_old_logs() -> None:
     print("✓ test_rtk_tokens_fall_back_to_chars_for_old_logs")
 
 
-def test_combined_equals_stela_plus_rtk() -> None:
-    """combined_saved_usd 严格等于 STELA + RTK 两路之和，不双算。"""
+def test_combined_equals_telos_plus_rtk() -> None:
+    """combined_saved_usd 严格等于 TELOS + RTK 两路之和，不双算。"""
     tool = {"original_tokens": 8000, "filtered_tokens": 2000, "saved_tokens": 6000,
             "original_chars": 32000, "filtered_chars": 8000}
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, tool=tool)])
     t = summary.total
     assert abs(t.combined_saved_usd - (t.saved_usd + t.tool_saved_usd)) < 1e-12
     assert t.saved_usd > 0 and t.tool_saved_usd > 0
-    print("✓ test_combined_equals_stela_plus_rtk")
+    print("✓ test_combined_equals_telos_plus_rtk")
 
 
 def test_cache_hit_weights_down_rtk_savings() -> None:
@@ -73,12 +73,12 @@ def test_cache_hit_weights_down_rtk_savings() -> None:
 
 
 def test_render_shows_total_cost_saved() -> None:
-    """渲染产物含 combined 口径的 hero 卡与 STELA/RTK 分项 KPI。"""
+    """渲染产物含 combined 口径的 hero 卡与 TELOS/RTK 分项 KPI。"""
     tool = {"original_tokens": 8000, "filtered_tokens": 2000, "saved_tokens": 6000}
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, tool=tool)])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
     assert "total cost saved" in html_doc
-    assert "STELA saved $" in html_doc
+    assert "TELOS saved $" in html_doc
     assert "RTK saved $" in html_doc
     print("✓ test_render_shows_total_cost_saved")
 
@@ -110,7 +110,7 @@ def test_rtk_status_distinguishes_disabled_from_zero_save() -> None:
 
 def test_render_marks_rtk_not_enabled() -> None:
     """RTK 从未启用时，渲染产物显式标 not enabled，而非和省 0 混同。"""
-    summary = aggregate([_rec(raw_input=5000, cache_read=50000, mode="stela")])
+    summary = aggregate([_rec(raw_input=5000, cache_read=50000, mode="telos")])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
     assert "not enabled" in html_doc or "未启用" in html_doc
     print("✓ test_render_marks_rtk_not_enabled")
@@ -119,7 +119,7 @@ def test_render_marks_rtk_not_enabled() -> None:
 def main() -> None:
     test_rtk_tokens_prefer_logged_token_fields()
     test_rtk_tokens_fall_back_to_chars_for_old_logs()
-    test_combined_equals_stela_plus_rtk()
+    test_combined_equals_telos_plus_rtk()
     test_cache_hit_weights_down_rtk_savings()
     test_render_shows_total_cost_saved()
     test_rtk_status_distinguishes_disabled_from_zero_save()

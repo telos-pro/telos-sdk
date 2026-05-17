@@ -9,9 +9,9 @@
 
 幂等性：
 - ``install`` 多次 = 一次。
-- 已存在用户自定义 ``ANTHROPIC_BASE_URL`` 时，挪到 ``__stela_previous_base_url``，
+- 已存在用户自定义 ``ANTHROPIC_BASE_URL`` 时，挪到 ``__telos_previous_base_url``，
   install 期间用我们的值覆盖，uninstall 时还原。
-- 完整原始 settings.json 还会备份到 ``settings.json.stela.bak``（首次 install
+- 完整原始 settings.json 还会备份到 ``settings.json.telos.bak``（首次 install
   时一次性写入；后续重复 install 不动）。
 """
 
@@ -24,11 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from stela.init.base import AgentInstaller, InstallResult
+from telos.init.base import AgentInstaller, InstallResult
 
 
-_STELA_MARK_KEY = "__stela_installed"
-_PREVIOUS_KEY = "__stela_previous_base_url"
+_TELOS_MARK_KEY = "__telos_installed"
+_PREVIOUS_KEY = "__telos_previous_base_url"
 _BASE_URL_KEY = "ANTHROPIC_BASE_URL"
 
 
@@ -51,7 +51,7 @@ def _load(path: Path) -> _LoadedSettings:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise RuntimeError(
-            f"{path} 不是合法 JSON（{e}）。请先备份并手动修复后再运行 stela init。"
+            f"{path} 不是合法 JSON（{e}）。请先备份并手动修复后再运行 telos init。"
         ) from e
     if not isinstance(data, dict):
         raise RuntimeError(f"{path} 顶层必须是 JSON object，实际是 {type(data).__name__}")
@@ -92,15 +92,15 @@ class ClaudeCodeInstaller(AgentInstaller):
         result = InstallResult(agent=self.name, action="install")
 
         current = env.get(_BASE_URL_KEY)
-        already_ours = env.get(_STELA_MARK_KEY) is True and current == self.proxy_url
+        already_ours = env.get(_TELOS_MARK_KEY) is True and current == self.proxy_url
         if already_ours:
             result.already_installed = True
-            result.notes.append(f"已接入 STELA 代理 ({current})；无操作")
+            result.notes.append(f"已接入 TELOS 代理 ({current})；无操作")
             return result
 
         # 首次 patch：备份原文件
         if loaded.existed:
-            backup = self.settings_path.with_suffix(self.settings_path.suffix + ".stela.bak")
+            backup = self.settings_path.with_suffix(self.settings_path.suffix + ".telos.bak")
             if not backup.exists():
                 shutil.copy2(self.settings_path, backup)
                 result.backups.append(backup)
@@ -111,7 +111,7 @@ class ClaudeCodeInstaller(AgentInstaller):
             result.notes.append(f"保留原 ANTHROPIC_BASE_URL ({current}) 到 {_PREVIOUS_KEY}")
 
         env[_BASE_URL_KEY] = self.proxy_url
-        env[_STELA_MARK_KEY] = True
+        env[_TELOS_MARK_KEY] = True
 
         _atomic_write(self.settings_path, loaded.data)
         result.changed_files.append(self.settings_path)
@@ -132,11 +132,11 @@ class ClaudeCodeInstaller(AgentInstaller):
 
         loaded = _load(self.settings_path)
         env = loaded.data.get("env")
-        if not isinstance(env, dict) or env.get(_STELA_MARK_KEY) is not True:
-            result.notes.append("settings.json 没有 STELA 标记；无操作")
+        if not isinstance(env, dict) or env.get(_TELOS_MARK_KEY) is not True:
+            result.notes.append("settings.json 没有 TELOS 标记；无操作")
             return result
 
-        env.pop(_STELA_MARK_KEY, None)
+        env.pop(_TELOS_MARK_KEY, None)
         previous = env.pop(_PREVIOUS_KEY, None)
         if previous is not None:
             env[_BASE_URL_KEY] = previous
@@ -163,16 +163,16 @@ class ClaudeCodeInstaller(AgentInstaller):
             return result
         loaded = _load(self.settings_path)
         env = loaded.data.get("env") or {}
-        if env.get(_STELA_MARK_KEY) is True:
+        if env.get(_TELOS_MARK_KEY) is True:
             result.already_installed = True
             result.notes.append(
-                f"已接入 STELA 代理：{env.get(_BASE_URL_KEY)}"
+                f"已接入 TELOS 代理：{env.get(_BASE_URL_KEY)}"
             )
             if _PREVIOUS_KEY in env:
                 result.notes.append(f"原值会在 uninstall 时还原：{env[_PREVIOUS_KEY]}")
         elif _BASE_URL_KEY in env:
             result.notes.append(
-                f"settings.json 已设 ANTHROPIC_BASE_URL = {env[_BASE_URL_KEY]}（非 STELA 注入）"
+                f"settings.json 已设 ANTHROPIC_BASE_URL = {env[_BASE_URL_KEY]}（非 TELOS 注入）"
             )
         else:
             result.notes.append("settings.json 未注入 ANTHROPIC_BASE_URL")

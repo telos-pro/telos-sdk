@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""STELA developer page —— 实时显示 session 结构 / pin·fold·drop 区域变化 /
+"""TELOS developer page —— 实时显示 session 结构 / pin·fold·drop 区域变化 /
 api 返回的 cache 字段 / 工具调用统计。
 
 与 ``build_savings_dashboard``（面向用户的省钱看板）不同：本页面面向开发者，
@@ -16,7 +16,7 @@ api 返回的 cache 字段 / 工具调用统计。
   * 上一次 API 返回的 raw cache 字段（cache_creation.ephemeral_*、
     cache_read_input_tokens 等）
 
-依赖 ``stela.proxy.server._SessionInspector`` 提供的内存视图。完全 self-
+依赖 ``telos.proxy.server._SessionInspector`` 提供的内存视图。完全 self-
 contained 的 HTML，复用 savings dashboard 的 CSS 调色板。
 """
 
@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from stela.proxy.inspector import SessionInspector
-    from stela.proxy.server import _SessionRegistry
+    from telos.proxy.inspector import SessionInspector
+    from telos.proxy.server import _SessionRegistry
 
 
 class _RegistryLike(Protocol):
@@ -407,14 +407,14 @@ def _render_session_detail(entry, registry: "_SessionRegistry",
 </div>
 """
 
-    # ---- original (pre-STELA) messages ----
+    # ---- original (pre-TELOS) messages ----
     raw_messages_html = _render_raw_messages(entry)
 
     return kpis + region_html + raw_messages_html + calls_html + messages_html + tools_html + api_html
 
 
 def _render_raw_messages(entry) -> str:
-    """渲染最近一次 call 的原始（STELA 改写前）messages 摘要。
+    """渲染最近一次 call 的原始（TELOS 改写前）messages 摘要。
 
     每条 message 列出 role + 各 content block 的 type / 字符数 / 文本预览。
     数据来自 ``calls[-1]["raw_messages"]``（proxy 层在每次 call 时回填）。
@@ -450,7 +450,7 @@ def _render_raw_messages(entry) -> str:
     ci = (last or {}).get("call_index", "?")
     return f"""
 <div class="card">
-  <h2>Original messages · pre-STELA raw request (call #{ci})</h2>
+  <h2>Original messages · pre-TELOS raw request (call #{ci})</h2>
   {''.join(rows) or '<div class="muted">no raw messages captured yet</div>'}
 </div>
 """
@@ -498,19 +498,19 @@ def render_developer(
         title = 'overview'
         back = (
             '<div class="refresh-bar">JSON view available at '
-            '<a href="developer.json">/__stela/developer.json</a></div>'
+            '<a href="developer.json">/__telos/developer.json</a></div>'
         )
 
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 {refresh_tag}
-<title>STELA · developer · {html.escape(title)}</title>
+<title>TELOS · developer · {html.escape(title)}</title>
 <style>{CSS}</style>
 </head><body>
 <div class="wrap">
 <header>
-  <h1>STELA · developer inspector</h1>
+  <h1>TELOS · developer inspector</h1>
   <div class="sub">
     {len(inspector)} session(s) tracked · {len(registry)} bridge state(s) ·
     {html.escape(title)} · generated {ts_now}{refresh_note}

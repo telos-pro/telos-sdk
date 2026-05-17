@@ -1,1 +1,1 @@
-"""Internal package for runnable scripts that drive STELA end-to-end."""
+"""Internal package for runnable scripts that drive TELOS end-to-end."""

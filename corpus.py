@@ -1,15 +1,15 @@
 """会话语料库 —— proxy 把每次 ``/v1/messages`` 的**原始请求**录到磁盘，
-供 ``stela replay`` 之后重放对照。
+供 ``telos replay`` 之后重放对照。
 
 为什么只录请求、不录响应：Anthropic ``/v1/messages`` 是无状态的，第 N 轮
 的请求体里 ``messages[]`` 已经包含了前 N-1 轮的全部 assistant 回复和
 tool_result。所以「请求序列」本身就是完整的可重放轨迹；assistant 响应
 不必单独存（也避免把模型输出落盘）。
 
-录的是 client→proxy 的**原始**请求（RTK 过滤前、STELA 改写前），即「规范
+录的是 client→proxy 的**原始**请求（RTK 过滤前、TELOS 改写前），即「规范
 输入」。replay 时每个 mode 各自从同一份规范输入重新推导 wire，对照才公平。
 
-默认目录 ``~/.stela/corpus/``，一个 session 一个 ``<session>.jsonl``。
+默认目录 ``~/.telos/corpus/``，一个 session 一个 ``<session>.jsonl``。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CORPUS_DIR = Path.home() / ".stela" / "corpus"
+DEFAULT_CORPUS_DIR = Path.home() / ".telos" / "corpus"
 
 
 def _safe_name(session_id: str) -> str:
@@ -40,7 +40,7 @@ def record_call(
 ) -> None:
     """把一次调用的原始请求 append 到 ``<corpus_dir>/<session>.jsonl``。
 
-    调用方负责保证 ``request`` 是 client 发来的原始 body（未经 RTK / STELA
+    调用方负责保证 ``request`` 是 client 发来的原始 body（未经 RTK / TELOS
     改写）。本函数从不抛错由调用方决定——这里照常抛，proxy 侧包 try。
     """
     corpus_dir.mkdir(parents=True, exist_ok=True)

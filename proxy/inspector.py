@@ -1,5 +1,5 @@
 """Session inspector —— 旁路存储每个 session 的实时 IR / usage / 工具调用
-快照，供 ``/__stela/developer`` 页面渲染。
+快照，供 ``/__telos/developer`` 页面渲染。
 
 设计：
 - 与 ``BridgeSessionState`` 平行：bridge 自己只关心 ref-pool / 统计计数，
@@ -180,7 +180,7 @@ class SessionInspector:
 
 
 def entry_to_json(entry: SessionInspectorEntry) -> dict[str, Any]:
-    """``SessionInspectorEntry`` → JSON-safe dict（给 /__stela/developer.json 用）。"""
+    """``SessionInspectorEntry`` → JSON-safe dict（给 /__telos/developer.json 用）。"""
     return {
         "session_id": entry.session_id,
         "model": entry.last_model,

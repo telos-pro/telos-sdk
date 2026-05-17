@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from stela import Bridge, Band, load_engine, load_harness
-from stela.bridge import BridgeSessionState
+from telos import Bridge, Band, load_engine, load_harness
+from telos.bridge import BridgeSessionState
 
 
 def _make_req_with_large_doc(turn: int) -> dict:

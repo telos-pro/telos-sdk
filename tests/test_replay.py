@@ -1,12 +1,12 @@
-"""``stela.replay`` 单测：用注入的假 sender 重放，不打网络。"""
+"""``telos.replay`` 单测：用注入的假 sender 重放，不打网络。"""
 
 from __future__ import annotations
 
 import json
 
-from stela.output_filter import StelaMode
-from stela.replay import replay_session
-from stela.scripts.build_savings_dashboard import aggregate
+from telos.output_filter import TelosMode
+from telos.replay import replay_session
+from telos.scripts.build_savings_dashboard import aggregate
 
 
 def _turns() -> list[dict]:
@@ -50,7 +50,7 @@ def _make_sender() -> tuple:
 
 def test_replay_records_carry_mode_and_compare_group() -> None:
     sender, _ = _make_sender()
-    r = replay_session(_turns(), StelaMode.from_label("both"),
+    r = replay_session(_turns(), TelosMode.from_label("both"),
                        session_id="sess-X", compare_group="grp-1", sender=sender)
     assert r.turns_ok == 2
     assert len(r.records) == 2
@@ -65,7 +65,7 @@ def test_replay_records_carry_mode_and_compare_group() -> None:
 
 def test_replay_forces_max_tokens_and_strips_streaming() -> None:
     sender, seen = _make_sender()
-    replay_session(_turns(), StelaMode.from_label("none"),
+    replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="s", compare_group="g", sender=sender)
     for wire in seen:
         assert wire["max_tokens"] == 1, "replay 应把 max_tokens 强制为 1"
@@ -77,22 +77,22 @@ def test_replay_forces_max_tokens_and_strips_streaming() -> None:
 def test_replay_injects_cache_namespace() -> None:
     """默认给每个 mode 注入唯一 system 前缀，缓存隔离。"""
     sender, seen = _make_sender()
-    replay_session(_turns(), StelaMode.from_label("none"),
+    replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="sess-Y", compare_group="g", sender=sender)
     blob = json.dumps(seen)
-    assert "stela-replay ns=sess-Y/none" in blob
+    assert "telos-replay ns=sess-Y/none" in blob
     # 关掉隔离则不注入
     sender2, seen2 = _make_sender()
-    replay_session(_turns(), StelaMode.from_label("none"),
+    replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="sess-Y", compare_group="g", sender=sender2,
                    cache_isolation=False)
-    assert "stela-replay" not in json.dumps(seen2)
+    assert "telos-replay" not in json.dumps(seen2)
     print("✓ test_replay_injects_cache_namespace")
 
 
 def test_replay_rtk_mode_shrinks_and_records_reduction() -> None:
     sender, seen = _make_sender()
-    r = replay_session(_turns(), StelaMode.from_label("rtk"),
+    r = replay_session(_turns(), TelosMode.from_label("rtk"),
                        session_id="s", compare_group="g", sender=sender)
     # 第二轮带大输出 → reduction 非空
     turn2 = r.records[1]
@@ -115,15 +115,15 @@ def test_replay_output_feeds_dashboard_compare_panel() -> None:
     """重放记录应被 dashboard aggregate 收进 compare_groups + replay_groups。"""
     sender, _ = _make_sender()
     all_recs = []
-    for label in ("none", "stela", "rtk", "both"):
-        r = replay_session(_turns(), StelaMode.from_label(label),
+    for label in ("none", "telos", "rtk", "both"):
+        r = replay_session(_turns(), TelosMode.from_label(label),
                            session_id="sess-Z", compare_group="sess-Z",
                            sender=sender)
         all_recs.extend(r.records)
     summary = aggregate(all_recs)
     assert "sess-Z" in summary.compare_groups
     assert set(summary.compare_groups["sess-Z"].keys()) == {
-        "none", "stela", "rtk", "both"}
+        "none", "telos", "rtk", "both"}
     assert "sess-Z" in summary.replay_groups
     print("✓ test_replay_output_feeds_dashboard_compare_panel")
 

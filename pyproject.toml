@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stela"
+name = "telos-sdk"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,22 +13,22 @@ dependencies = [
 ]
 
 [project.scripts]
-stela = "stela.cli:main"
+telos = "telos.cli:main"
 
 [tool.setuptools]
-# 当前目录（telos-sdk/）就是 stela 包本身；
-# stela.harness → ./harness/，stela.engine → ./engine/，以此类推。
+# 当前目录（telos-sdk/）就是 telos 包本身；
+# telos.harness → ./harness/，telos.engine → ./engine/，以此类推。
 packages = [
-    "stela",
-    "stela.harness",
-    "stela.engine",
-    "stela.tests",
-    "stela.scripts",
-    "stela.proxy",
-    "stela.init",
-    "stela.output_filter",
-    "stela.replay",
+    "telos",
+    "telos.harness",
+    "telos.engine",
+    "telos.tests",
+    "telos.scripts",
+    "telos.proxy",
+    "telos.init",
+    "telos.output_filter",
+    "telos.replay",
 ]
 
 [tool.setuptools.package-dir]
-stela = "."
+telos = "."

@@ -19,7 +19,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from stela.output_filter.tokens import estimate_tokens
+from telos.output_filter.tokens import estimate_tokens
 
 
 @dataclass

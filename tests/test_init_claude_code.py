@@ -1,4 +1,4 @@
-"""``stela.init.claude_code`` installer 测试（操作隔离的临时 settings.json）。"""
+"""``telos.init.claude_code`` installer 测试（操作隔离的临时 settings.json）。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import json
 import tempfile
 from pathlib import Path
 
-from stela.init.claude_code import ClaudeCodeInstaller
+from telos.init.claude_code import ClaudeCodeInstaller
 
 
 def _new_settings_path() -> Path:
-    return Path(tempfile.mkdtemp(prefix="stela-claude-")) / "settings.json"
+    return Path(tempfile.mkdtemp(prefix="telos-claude-")) / "settings.json"
 
 
 def _read(path: Path) -> dict:
@@ -25,7 +25,7 @@ def test_install_on_missing_file() -> None:
     assert p in r.changed_files
     data = _read(p)
     assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:7171"
-    assert data["env"]["__stela_installed"] is True
+    assert data["env"]["__telos_installed"] is True
     print("✓ test_install_on_missing_file")
 
 
@@ -38,7 +38,7 @@ def test_install_preserves_existing_settings() -> None:
     }))
     inst = ClaudeCodeInstaller(settings_path=p, proxy_url="http://127.0.0.1:7171")
     r = inst.install()
-    assert r.backups, "应生成 .stela.bak 备份"
+    assert r.backups, "应生成 .telos.bak 备份"
     data = _read(p)
     assert data["permissions"]["defaultMode"] == "ask"  # 未动
     assert data["env"]["FOO"] == "bar"
@@ -54,7 +54,7 @@ def test_install_preserves_user_anthropic_base_url() -> None:
     inst.install()
     data = _read(p)
     assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:7171"
-    assert data["env"]["__stela_previous_base_url"] == "https://my.proxy/"
+    assert data["env"]["__telos_previous_base_url"] == "https://my.proxy/"
     print("✓ test_install_preserves_user_anthropic_base_url")
 
 
@@ -77,8 +77,8 @@ def test_uninstall_restores_state() -> None:
     inst.uninstall()
     data = _read(p)
     assert data["env"]["ANTHROPIC_BASE_URL"] == "https://my.proxy/"
-    assert "__stela_installed" not in data["env"]
-    assert "__stela_previous_base_url" not in data["env"]
+    assert "__telos_installed" not in data["env"]
+    assert "__telos_previous_base_url" not in data["env"]
     print("✓ test_uninstall_restores_state")
 
 

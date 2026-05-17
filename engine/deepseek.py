@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from stela.engine.base import EmitPlan, EngineAdapter, EngineCapabilities
-from stela.ir import Band, StelaIR, UsageReport
+from telos.engine.base import EmitPlan, EngineAdapter, EngineCapabilities
+from telos.ir import Band, TelosIR, UsageReport
 
 
 class DeepSeekAdapter(EngineAdapter):
@@ -31,10 +31,10 @@ class DeepSeekAdapter(EngineAdapter):
             max_breakpoints=0,
         )
 
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         return EmitPlan()  # 完全无控制面
 
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         # OpenAI-compatible chat/completions 形态
         # 关键：把所有 PIN/FOLD 集中到 system 头部、DROP 全部沉到 system 尾部
         # （DeepSeek 的 prefix unit 是 exact-match，DROP 必须放最后否则前缀漂移）

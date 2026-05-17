@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from stela.scripts.stela_anthropic_transport import StelaAnthropicTransport
-from stela.scripts.stela_transport import StelaOpenAITransport
+from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
+from telos.scripts.telos_transport import TelosOpenAITransport
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ def _make_req() -> dict:
 
 
 def test_anthropic_transport_accumulates() -> None:
-    t = StelaAnthropicTransport(api_key="test-not-real",
+    t = TelosAnthropicTransport(api_key="test-not-real",
                                  session_id="multi-anth")
     t._inner = _MockAnthropicClient()  # 拦截网络
 
@@ -141,7 +141,7 @@ def _make_openai_req() -> dict:
 
 
 def test_openai_transport_accumulates() -> None:
-    t = StelaOpenAITransport(api_key="test-not-real",
+    t = TelosOpenAITransport(api_key="test-not-real",
                               session_id="multi-oai")
     t._inner = _MockOpenAIClient()
 
@@ -161,8 +161,8 @@ def test_openai_transport_accumulates() -> None:
 
 def test_anthropic_transport_independent_instances() -> None:
     """两个 transport 实例彼此独立 —— state 不串台。"""
-    t1 = StelaAnthropicTransport(api_key="k1", session_id="a")
-    t2 = StelaAnthropicTransport(api_key="k2", session_id="b")
+    t1 = TelosAnthropicTransport(api_key="k1", session_id="a")
+    t2 = TelosAnthropicTransport(api_key="k2", session_id="b")
     t1._inner = _MockAnthropicClient()
     t2._inner = _MockAnthropicClient()
 

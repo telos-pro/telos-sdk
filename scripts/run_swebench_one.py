@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""End-to-end Scope-B runner: telos (Hermes mini_swe_runner) → STELA → OpenRouter
+"""End-to-end Scope-B runner: telos (Hermes mini_swe_runner) → TELOS → OpenRouter
 → patch → optional evaluate.
 
-执行一个 SWE-bench Verified 任务，证明 telos-as-harness 通过 stela 这条
+执行一个 SWE-bench Verified 任务，证明 telos-as-harness 通过 telos 这条
 管道走通；输出与 ``token-efficient-framework/benchmark/scripts/evaluate-patches.py``
-兼容的 ``<results-dir>/telos-<instance_id>.patch``，外加 stela 维度的
+兼容的 ``<results-dir>/telos-<instance_id>.patch``，外加 telos 维度的
 ``usage.jsonl`` / ``result.json``。
 
 用法::
 
     export OPENROUTER_API_KEY=sk-or-...
-    python -m stela.scripts.run_swebench_one \\
+    python -m telos.scripts.run_swebench_one \\
         --instance pallets__flask-5014 \\
         --model deepseek/deepseek-chat \\
         --max-iterations 25 \\
-        --results-dir /tmp/stela-telos-run
+        --results-dir /tmp/telos-telos-run
 
 依赖 telos 仓库已经按其 README 走过 ``git submodule update --init``，
 即 vendor/hermes 已就位。
 
 注意：``mini_swe_runner`` 的 LocalEnvironment 直接在 ``cwd`` 里 exec
-shell；本脚本会先在 ``/tmp/stela-swebench/<inst>`` 下做 git worktree，
+shell；本脚本会先在 ``/tmp/telos-swebench/<inst>`` 下做 git worktree，
 再把那个目录传给 runner。运行结束 ``git diff HEAD`` 取 patch。
 """
 
@@ -47,8 +47,8 @@ TELOS_ROOT = Path("/Users/george/Code/tokenpilot-ai/telos")
 HERMES_ROOT = TELOS_ROOT / "vendor" / "hermes"
 TEF_ROOT = Path("/Users/george/Code/token-efficient-framework")
 DEFAULT_DATASET = TEF_ROOT / "benchmark" / "datasets" / "swe-bench-verified.jsonl"
-DEFAULT_RESULTS = Path("/tmp/stela-telos-runs")
-WORK_ROOT = Path("/tmp/stela-swebench")
+DEFAULT_RESULTS = Path("/tmp/telos-telos-runs")
+WORK_ROOT = Path("/tmp/telos-swebench")
 REPO_CACHE = Path("/tmp/swebench-repos")
 
 
@@ -181,7 +181,7 @@ def main() -> None:
     # ---- import telos's vendored runner & patch its client ----
     from mini_swe_runner import MiniSWERunner  # type: ignore[import-not-found]
 
-    from stela.scripts.stela_transport import StelaOpenAITransport
+    from telos.scripts.telos_transport import TelosOpenAITransport
 
     usage_log = results_dir / f"{tag}.usage.jsonl"
     trace_log = results_dir / f"{tag}.prompt_trace.jsonl"
@@ -193,7 +193,7 @@ def main() -> None:
         command_timeout=args.command_timeout,
         verbose=False,
     )
-    runner.client = StelaOpenAITransport(
+    runner.client = TelosOpenAITransport(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.environ["OPENROUTER_API_KEY"],
         session_id=session_id,

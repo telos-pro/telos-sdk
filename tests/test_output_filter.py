@@ -1,36 +1,36 @@
-"""``stela.output_filter`` 单测：mode 解析、fallback 过滤器、apply_filter。"""
+"""``telos.output_filter`` 单测：mode 解析、fallback 过滤器、apply_filter。"""
 
 from __future__ import annotations
 
-from stela.output_filter import (
+from telos.output_filter import (
     FallbackFilter,
-    StelaMode,
+    TelosMode,
     apply_filter,
     build_filter,
 )
-from stela.output_filter.filters import FilterRecord
-from stela.output_filter.tokens import estimate_tokens
+from telos.output_filter.filters import FilterRecord
+from telos.output_filter.tokens import estimate_tokens
 
 
 def test_mode_labels_roundtrip() -> None:
-    for label, (stela, rtk) in {
+    for label, (telos, rtk) in {
         "none": (False, False),
-        "stela": (True, False),
+        "telos": (True, False),
         "rtk": (False, True),
         "both": (True, True),
     }.items():
-        m = StelaMode.from_label(label)
-        assert (m.stela, m.rtk) == (stela, rtk), label
+        m = TelosMode.from_label(label)
+        assert (m.telos, m.rtk) == (telos, rtk), label
         assert m.label == label
     print("✓ test_mode_labels_roundtrip")
 
 
-def test_mode_unknown_falls_back_to_stela() -> None:
-    """空 / None / 垃圾值都退化到默认 stela（保持引入开关前的历史行为）。"""
-    for bad in (None, "", "garbage", "STELA+RTK"):
-        m = StelaMode.from_label(bad)
-        assert m.label == "stela", bad
-    print("✓ test_mode_unknown_falls_back_to_stela")
+def test_mode_unknown_falls_back_to_telos() -> None:
+    """空 / None / 垃圾值都退化到默认 telos（保持引入开关前的历史行为）。"""
+    for bad in (None, "", "garbage", "TELOS+RTK"):
+        m = TelosMode.from_label(bad)
+        assert m.label == "telos", bad
+    print("✓ test_mode_unknown_falls_back_to_telos")
 
 
 def test_fallback_dedup_collapses_repeats() -> None:
@@ -171,7 +171,7 @@ def test_apply_filter_emits_token_fields() -> None:
 
 def main() -> None:
     test_mode_labels_roundtrip()
-    test_mode_unknown_falls_back_to_stela()
+    test_mode_unknown_falls_back_to_telos()
     test_fallback_dedup_collapses_repeats()
     test_fallback_skips_short_output()
     test_fallback_truncates_long_unique_output()

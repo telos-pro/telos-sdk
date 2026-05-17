@@ -401,7 +401,7 @@ wheels = [
 ]
 
 [[package]]
-name = "stela"
+name = "telos-sdk"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

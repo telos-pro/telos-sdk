@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""批量跑 SWE-bench Verified（telos + STELA + OpenRouter）。
+"""批量跑 SWE-bench Verified（telos + TELOS + OpenRouter）。
 
 从数据集随机采样 N 个 instance，并发地通过 ``run_swebench_one`` 跑完，
 可选自动跑 evaluator 并聚合 ``result_5_2.md`` 风格的指标。
@@ -10,14 +10,14 @@
     export PYTHONPATH=/Users/george/Code
 
     # 随机 5 个，4 路并发，跑完直接评测
-    python -m stela.scripts.run_swebench_batch \\
+    python -m telos.scripts.run_swebench_batch \\
         -n 5 --seed 42 --workers 4 \\
         --model deepseek/deepseek-v4-flash \\
-        --results-dir /tmp/stela-telos-runs \\
+        --results-dir /tmp/telos-telos-runs \\
         --evaluate
 
     # 只跑指定的 instance（绕过随机采样）
-    python -m stela.scripts.run_swebench_batch \\
+    python -m telos.scripts.run_swebench_batch \\
         --instances pallets__flask-5014 django__django-14373 \\
         --workers 2
 
@@ -47,7 +47,7 @@ from typing import Any
 TELOS_ROOT = Path("/Users/george/Code/tokenpilot-ai/telos")
 TEF_ROOT = Path("/Users/george/Code/token-efficient-framework")
 DEFAULT_DATASET = TEF_ROOT / "benchmark" / "datasets" / "swe-bench-verified.jsonl"
-DEFAULT_RESULTS = Path("/tmp/stela-telos-runs")
+DEFAULT_RESULTS = Path("/tmp/telos-telos-runs")
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
             log_dir: Path) -> dict[str, Any]:
     """在子进程里调用 run_swebench_one；返回该任务的元信息。"""
     cmd = [
-        sys.executable, "-m", "stela.scripts.run_swebench_one",
+        sys.executable, "-m", "telos.scripts.run_swebench_one",
         "--instance", instance_id,
         "--model", args.model,
         "--dataset", args.dataset,
@@ -112,7 +112,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
         logf.write(f"$ {' '.join(cmd)}\n\n")
         logf.flush()
         env = os.environ.copy()
-        # 让子进程也能 import stela
+        # 让子进程也能 import telos
         repo_root = str(Path(__file__).resolve().parents[2])
         env["PYTHONPATH"] = (
             repo_root + os.pathsep + env.get("PYTHONPATH", "")

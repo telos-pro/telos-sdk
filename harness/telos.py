@@ -35,14 +35,14 @@ import json
 import re
 from typing import Any, Mapping
 
-from stela.harness._user_split import split_user_text
-from stela.harness.base import HarnessPlugin
-from stela.ir import (
+from telos.harness._user_split import split_user_text
+from telos.harness.base import HarnessPlugin
+from telos.ir import (
     Band,
-    StelaBlock,
-    StelaHints,
-    StelaIR,
-    StelaMessage,
+    TelosBlock,
+    TelosHints,
+    TelosIR,
+    TelosMessage,
 )
 
 
@@ -99,16 +99,16 @@ class TelosPlugin(HarnessPlugin):
         engine: str,
         model: str = "",
         expected_turns: int = 0,
-    ) -> StelaIR:
-        ref_pool: dict[str, StelaBlock] = {}
+    ) -> TelosIR:
+        ref_pool: dict[str, TelosBlock] = {}
 
         # ---- tools (OpenAI function-tool schema) ----
-        def _build_tool(i: int, t: Mapping[str, Any]) -> StelaBlock:
+        def _build_tool(i: int, t: Mapping[str, Any]) -> TelosBlock:
             source, mcp_server = _classify_openai_tool(t)
             extra: dict[str, Any] = {"source": source}
             if mcp_server:
                 extra["mcp_server"] = mcp_server
-            return StelaBlock(
+            return TelosBlock(
                 id=f"tool:{(t.get('function') or {}).get('name', i)}",
                 band=Band.PIN,
                 kind="tool_def",
@@ -125,7 +125,7 @@ class TelosPlugin(HarnessPlugin):
         # ---- system + messages 在 OpenAI shape 下混在 messages[] 里。
         # 切：开头连续若干条 role=system 进 system 段；其余进 messages。
         raw_messages = list(raw_request.get("messages") or [])
-        system_blocks: list[StelaBlock] = []
+        system_blocks: list[TelosBlock] = []
         cursor = 0
         for cursor, msg in enumerate(raw_messages):
             if msg.get("role") != "system":
@@ -137,7 +137,7 @@ class TelosPlugin(HarnessPlugin):
                 if len(body) > _REFPOOL_THRESHOLD:
                     slug = _slug_from_path(path)
                     if slug not in ref_pool:
-                        ref_pool[slug] = StelaBlock(
+                        ref_pool[slug] = TelosBlock(
                             id=f"ref:{slug}",
                             band=Band.FOLD,
                             kind="text",
@@ -146,7 +146,7 @@ class TelosPlugin(HarnessPlugin):
                             source_tag="telos/file-block",
                         )
                     stripped = stripped.replace(m.group(0), f"[ref:{slug}]")
-            system_blocks.append(StelaBlock(
+            system_blocks.append(TelosBlock(
                 id=f"system/{len(system_blocks)}",
                 band=Band.PIN,
                 kind="text",
@@ -158,19 +158,19 @@ class TelosPlugin(HarnessPlugin):
             cursor = len(raw_messages)
 
         # ---- 其余 message（user / assistant / tool）----
-        messages: list[StelaMessage] = []
+        messages: list[TelosMessage] = []
         for mi, msg in enumerate(raw_messages[cursor:], start=cursor):
             role = msg.get("role")
             text_content = _coerce_content_to_text(msg.get("content"))
 
             if role == "user":
                 blocks = list(split_user_text(text_content, base_id=f"msg{mi}"))
-                messages.append(StelaMessage(role="user", blocks=tuple(blocks)))
+                messages.append(TelosMessage(role="user", blocks=tuple(blocks)))
 
             elif role == "assistant":
-                blocks: list[StelaBlock] = []
+                blocks: list[TelosBlock] = []
                 if text_content:
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/at",
                         band=Band.FOLD,
                         kind="text",
@@ -178,7 +178,7 @@ class TelosPlugin(HarnessPlugin):
                         source_tag="telos/assistant-text",
                     ))
                 for ti, tc in enumerate(msg.get("tool_calls") or []):
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/au{ti}",
                         band=Band.FOLD,
                         kind="tool_use",
@@ -188,43 +188,43 @@ class TelosPlugin(HarnessPlugin):
                 if not blocks:
                     # 空 assistant message：跳过，避免 IR 出现空 message
                     continue
-                messages.append(StelaMessage(role="assistant", blocks=tuple(blocks)))
+                messages.append(TelosMessage(role="assistant", blocks=tuple(blocks)))
 
             elif role == "tool":
-                # OpenAI: 独立 role=tool message。STELA 协议里 tool_result
+                # OpenAI: 独立 role=tool message。TELOS 协议里 tool_result
                 # 必须挂在 user message 内（与 Anthropic 对齐），所以包成 user。
                 payload = {
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id", ""),
                     "content": text_content,
                 }
-                blocks = (StelaBlock(
+                blocks = (TelosBlock(
                     id=f"msg{mi}/tr",
                     band=Band.FOLD,
                     kind="tool_result",
                     payload=payload,
                     source_tag="telos/tool-result",
                 ),)
-                messages.append(StelaMessage(role="user", blocks=blocks))
+                messages.append(TelosMessage(role="user", blocks=blocks))
 
             elif role == "system":
                 # 中途出现的 system（不常见）：当 PIN 文本插进 user 段。
-                blocks = (StelaBlock(
+                blocks = (TelosBlock(
                     id=f"msg{mi}/sys",
                     band=Band.PIN,
                     kind="text",
                     payload=text_content,
                     source_tag="telos/inline-system",
                 ),)
-                messages.append(StelaMessage(role="user", blocks=blocks))
+                messages.append(TelosMessage(role="user", blocks=blocks))
 
-        return StelaIR(
+        return TelosIR(
             session_id=session_id,
             tools=tools,
             system=tuple(system_blocks),
             messages=tuple(messages),
             ref_pool=ref_pool,
-            hints=StelaHints(
+            hints=TelosHints(
                 engine=engine if engine in ("anthropic", "openai", "deepseek") else "openai",  # type: ignore[arg-type]
                 model=model or raw_request.get("model", ""),
                 expected_turns=expected_turns,

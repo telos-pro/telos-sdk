@@ -1,12 +1,12 @@
-"""``python -m stela.init`` 入口。"""
+"""``python -m telos.init`` 入口。"""
 
 from __future__ import annotations
 
 import argparse
 import sys
 
-from stela.init import INSTALLERS
-from stela.init.base import InstallResult
+from telos.init import INSTALLERS
+from telos.init.base import InstallResult
 
 
 def _render(result: InstallResult) -> str:
@@ -26,8 +26,8 @@ def _render(result: InstallResult) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="stela.init",
-        description="把 STELA 代理接入到指定 agent 的配置。",
+        prog="telos.init",
+        description="把 TELOS 代理接入到指定 agent 的配置。",
     )
     parser.add_argument("--agent", required=True, choices=sorted(INSTALLERS.keys()),
                         help="目标 agent")

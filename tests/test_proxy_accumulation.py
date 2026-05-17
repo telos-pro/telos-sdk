@@ -16,7 +16,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-from stela.proxy.server import make_app
+from telos.proxy.server import make_app
 
 
 class _CountingUpstream:

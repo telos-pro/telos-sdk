@@ -1,7 +1,7 @@
-# 用 Telos + STELA 跑 SWE-bench Benchmark
+# 用 Telos + TELOS 跑 SWE-bench Benchmark
 
 > 把 [Telos](https://github.com/tokenpilot-ai/telos)（vendored Hermes Agent）作为
-> harness，通过 STELA 这条 cache-friendly 管道，调 OpenRouter 上的 DeepSeek-V4
+> harness，通过 TELOS 这条 cache-friendly 管道，调 OpenRouter 上的 DeepSeek-V4
 > 跑 SWE-bench Verified 任务，并复现 [`result_5_2.md`][r52] 的指标格式。
 >
 > [r52]: https://github.com/.../token-efficient-framework/blob/main/result_5_2.md
@@ -18,14 +18,14 @@
                │ OpenAI ChatCompletions shape
                ▼
 ┌────────────────────────────┐
-│ StelaOpenAITransport       │  ← stela/scripts/stela_transport.py
+│ TelosOpenAITransport       │  ← telos/scripts/telos_transport.py
 │   harness=telos            │
 │   engine=deepseek          │
 │   ┌──────────────────────┐ │
-│   │ telos harness plugin │ │  ← stela/harness/telos.py
-│   │   parse → StelaIR    │ │
+│   │ telos harness plugin │ │  ← telos/harness/telos.py
+│   │   parse → TelosIR    │ │
 │   ├──────────────────────┤ │
-│   │ Bridge.mark()        │ │  ← stela/bridge.py
+│   │ Bridge.mark()        │ │  ← telos/bridge.py
 │   │   canonicalize +     │ │
 │   │   §5 band layout     │ │
 │   └──────────────────────┘ │
@@ -46,7 +46,7 @@
 ### 路径速记
 
 ```bash
-export STELA=/Users/george/Code/stela
+export TELOS=/Users/george/Code/telos
 export TELOS=/Users/george/Code/tokenpilot-ai/telos
 export TEF=/Users/george/Code/token-efficient-framework
 export PY=$TELOS/.venv/bin/python    # ← 全程用 telos venv
@@ -58,14 +58,14 @@ export PY=$TELOS/.venv/bin/python    # ← 全程用 telos venv
 # OpenRouter API key
 export OPENROUTER_API_KEY=sk-or-v1-...
 
-# stela 必须能被 import（仓库根在 /Users/george/Code）
-# ⚠️ 新开 shell 必须重新 export，否则 -m stela.scripts.run_swebench_one 会报
-#    ModuleNotFoundError: No module named 'stela'
+# telos 必须能被 import（仓库根在 /Users/george/Code）
+# ⚠️ 新开 shell 必须重新 export，否则 -m telos.scripts.run_swebench_one 会报
+#    ModuleNotFoundError: No module named 'telos'
 export PYTHONPATH=/Users/george/Code
 ```
 
-> 想免 export，可以一次性 `cd $TELOS && uv pip install -e $STELA` 把 stela 装进
-> telos venv；之后任何 shell 直接 `$PY -m stela.scripts.run_swebench_one ...` 即可。
+> 想免 export，可以一次性 `cd $TELOS && uv pip install -e $TELOS` 把 telos 装进
+> telos venv；之后任何 shell 直接 `$PY -m telos.scripts.run_swebench_one ...` 即可。
 
 ### 子模块 / 数据集
 
@@ -83,20 +83,20 @@ ls $TEF/benchmark/datasets/swe-bench-verified.jsonl
 ## 1. 跑一个任务
 
 ```bash
-cd $STELA
+cd $TELOS
 PYTHONPATH=/Users/george/Code \
-$PY -m stela.scripts.run_swebench_one \
+$PY -m telos.scripts.run_swebench_one \
     --instance pallets__flask-5014 \
     --model deepseek/deepseek-v4-flash \
     --max-iterations 25 \
     --command-timeout 60 \
-    --results-dir /tmp/stela-telos-runs
+    --results-dir /tmp/telos-telos-runs
 ```
 
 > 把 `PYTHONPATH=...` 内联进命令是最稳的写法；如果当前 shell 已经
 > `export PYTHONPATH=/Users/george/Code` 可以省略前缀。
 
-跑完后 `/tmp/stela-telos-runs/` 下生成 5 个文件：
+跑完后 `/tmp/telos-telos-runs/` 下生成 5 个文件：
 
 | 文件 | 内容 |
 |---|---|
@@ -141,8 +141,8 @@ print('\n'.join(random.sample(ids, 5)))
 ### 命令行阅读
 
 ```bash
-$PY -m stela.scripts.show_prompt_trace \
-    /tmp/stela-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
+$PY -m telos.scripts.show_prompt_trace \
+    /tmp/telos-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
 ```
 
 输出例（1 行 = 1 次 LLM 调用）：
@@ -157,7 +157,7 @@ TOTAL  raw_input=18,743  cache_read=9,728  output=1,603  cache_share=34.2%
 
 看三个点：
 
-- **`prefix%` 单调上升** → STELA 把 system/tools/历史对话摆稳了（改动仅发生在尾部）。
+- **`prefix%` 单调上升** → TELOS 把 system/tools/历史对话摆稳了（改动仅发生在尾部）。
 - **`cache%` 间歇峰值** → DeepSeek 的 512-token 块边界在跑；连续两三调用跳过同一个边界就会都命中。
 - **`TOTAL cache_share`** 是与 `result_5_2.md` 对齐的全局指标。
 
@@ -165,7 +165,7 @@ TOTAL  raw_input=18,743  cache_read=9,728  output=1,603  cache_share=34.2%
 
 ```bash
 jq -c '{i: .call_index, prefix: .prefix.prefix_stability, cache: .cache.cache_share}' \
-    /tmp/stela-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
+    /tmp/telos-telos-runs/telos-pallets__flask-5014.prompt_trace.jsonl
 ```
 
 ---
@@ -186,7 +186,7 @@ git clone https://github.com/django/django.git /tmp/swebench-repos/django__djang
 
 ```bash
 $PY $TEF/benchmark/scripts/evaluate-patches.py \
-    --results-dir /tmp/stela-telos-runs \
+    --results-dir /tmp/telos-telos-runs \
     --dataset $TEF/benchmark/datasets/swe-bench-verified.jsonl \
     --filter-agent telos \
     --max-parallel 1 \
@@ -197,7 +197,7 @@ $PY $TEF/benchmark/scripts/evaluate-patches.py \
 ### 2.3 看结果
 
 ```bash
-cat /tmp/stela-telos-runs/telos-pallets__flask-5014.eval.json | $PY -m json.tool
+cat /tmp/telos-telos-runs/telos-pallets__flask-5014.eval.json | $PY -m json.tool
 ```
 
 关键字段：
@@ -218,7 +218,7 @@ cat /tmp/stela-telos-runs/telos-pallets__flask-5014.eval.json | $PY -m json.tool
 ```bash
 $PY -c "
 import json
-path = '/tmp/stela-telos-runs/telos-pallets__flask-5014.usage.jsonl'
+path = '/tmp/telos-telos-runs/telos-pallets__flask-5014.usage.jsonl'
 tot = {'raw_input': 0, 'cache_read': 0, 'output': 0}
 n = 0
 for l in open(path):
@@ -250,23 +250,23 @@ print(f'calls={n}  raw_input={tot[\"raw_input\"]}  '
 
 ```bash
 # \u5e72\u8dd1\uff1a\u770b\u4f1a\u91c7\u6837\u54ea\u4e9b
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.run_swebench_batch \
     -n 5 --seed 42 --dry-run
 
 # 真跑：随机 5 个，4 路并发，跑完直接评测
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.run_swebench_batch \
     -n 5 --seed 42 --workers 4 \
     --model deepseek/deepseek-v4-flash \
-    --results-dir /tmp/stela-telos-runs \
+    --results-dir /tmp/telos-telos-runs \
     --evaluate
 
 # 只挑某些 repo
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.run_swebench_batch \
     -n 10 --repo pallets/flask --repo psf/requests \
     --workers 2 --evaluate
 
 # 指定具体 instance（覆盖随机采样）
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.run_swebench_batch \
     --instances pallets__flask-5014 django__django-14373 \
     --workers 2 --evaluate
 ```
@@ -305,15 +305,15 @@ PYTHONPATH=/Users/george/Code $PY -m stela.scripts.run_swebench_batch \
 
 ```bash
 # 全部 instance
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.build_dashboard \
-    --results-dir /tmp/stela-telos-runs
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.build_dashboard \
+    --results-dir /tmp/telos-telos-runs
 
 # 只看一个
-PYTHONPATH=/Users/george/Code $PY -m stela.scripts.build_dashboard \
+PYTHONPATH=/Users/george/Code $PY -m telos.scripts.build_dashboard \
     --instance pallets__flask-5014 \
     --out /tmp/dashboard-flask.html
 
-open /tmp/stela-telos-runs/benchmark/dashboard.html
+open /tmp/telos-telos-runs/benchmark/dashboard.html
 ```
 
 ### 页面结构
@@ -337,7 +337,7 @@ open /tmp/stela-telos-runs/benchmark/dashboard.html
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--results-dir` | `/tmp/stela-telos-runs` | 扫描 `telos-*.prompt_trace.jsonl` |
+| `--results-dir` | `/tmp/telos-telos-runs` | 扫描 `telos-*.prompt_trace.jsonl` |
 | `--instance`    | —   | 只包含指定 instance（可重复）|
 | `--out`         | `<results-dir>/benchmark/dashboard.html` | 输出 HTML 路径 |
 
@@ -348,7 +348,7 @@ open /tmp/stela-telos-runs/benchmark/dashboard.html
 | 现象 | 修法 |
 |---|---|
 | `OPENROUTER_API_KEY not set` | `export OPENROUTER_API_KEY=...` |
-| `ModuleNotFoundError: stela` | `export PYTHONPATH=/Users/george/Code` |
+| `ModuleNotFoundError: telos` | `export PYTHONPATH=/Users/george/Code` |
 | `mini_swe_runner` 找不到 | `cd $TELOS && git submodule update --init` |
 | evaluator 报 `repo_not_cloned` | `git clone https://github.com/<owner>/<repo>.git /tmp/swebench-repos/<owner>__<repo>` |
 | evaluator 报 `ModuleNotFoundError: <pkg>` | `cd $TELOS && uv pip install <pkg>` |
@@ -365,11 +365,11 @@ open /tmp/stela-telos-runs/benchmark/dashboard.html
 | `--instance`         | `pallets__flask-5014` | SWE-bench Verified `instance_id` |
 | `--model`            | `deepseek/deepseek-chat` | OpenRouter model id；`result_5_2.md` 用 `deepseek/deepseek-v4-flash` |
 | `--dataset`          | `$TEF/benchmark/datasets/swe-bench-verified.jsonl` | 数据集路径（不存在会自动从 HF 下） |
-| `--results-dir`      | `/tmp/stela-telos-runs` | 输出目录 |
+| `--results-dir`      | `/tmp/telos-telos-runs` | 输出目录 |
 | `--max-iterations`   | 25 | agent 循环上限 |
 | `--command-timeout`  | 60 | 单次 bash 超时（秒） |
 | `--evaluate`         | off | 任务跑完直接调 evaluator（需先克隆仓库） |
-| `--keep-worktree`    | off | 调试：不删 `/tmp/stela-swebench/<tag>` |
+| `--keep-worktree`    | off | 调试：不删 `/tmp/telos-swebench/<tag>` |
 
 ---
 
@@ -390,14 +390,14 @@ open /tmp/stela-telos-runs/benchmark/dashboard.html
 复现命令：
 
 ```bash
-$PY -m stela.scripts.run_swebench_one \
+$PY -m telos.scripts.run_swebench_one \
     --instance pallets__flask-5014 \
     --model deepseek/deepseek-v4-flash \
     --max-iterations 12 \
-    --results-dir /tmp/stela-telos-runs
+    --results-dir /tmp/telos-telos-runs
 
 $PY $TEF/benchmark/scripts/evaluate-patches.py \
-    --results-dir /tmp/stela-telos-runs \
+    --results-dir /tmp/telos-telos-runs \
     --dataset $TEF/benchmark/datasets/swe-bench-verified.jsonl \
     --filter-agent telos --max-parallel 1 \
     --python-bin $PY --force
@@ -409,13 +409,13 @@ $PY $TEF/benchmark/scripts/evaluate-patches.py \
 
 | 文件 | 作用 |
 |---|---|
-| [stela/harness/telos.py](../harness/telos.py) | telos harness 插件（OpenAI ChatCompletions → StelaIR） |
-| [stela/scripts/stela_transport.py](../scripts/stela_transport.py) | OpenAI 鸭子接口 client，内部走 STELA Bridge；写 `usage.jsonl` + `prompt_trace.jsonl` |
-| [stela/scripts/run_swebench_one.py](../scripts/run_swebench_one.py) | **单任务**端到端 runner |
-| [stela/scripts/run_swebench_batch.py](../scripts/run_swebench_batch.py) | **批量** runner（采样 + 并发 + 自动评测 + 批次报告） |
-| [stela/scripts/show_prompt_trace.py](../scripts/show_prompt_trace.py) | 命令行查看 `prompt_trace.jsonl` |
-| [stela/scripts/build_dashboard.py](../scripts/build_dashboard.py) | 生成单文件 HTML 看板 |
-| [stela/tests/test_telos_harness.py](../tests/test_telos_harness.py) | telos 插件 smoke 测试 |
+| [telos/harness/telos.py](../harness/telos.py) | telos harness 插件（OpenAI ChatCompletions → TelosIR） |
+| [telos/scripts/telos_transport.py](../scripts/telos_transport.py) | OpenAI 鸭子接口 client，内部走 TELOS Bridge；写 `usage.jsonl` + `prompt_trace.jsonl` |
+| [telos/scripts/run_swebench_one.py](../scripts/run_swebench_one.py) | **单任务**端到端 runner |
+| [telos/scripts/run_swebench_batch.py](../scripts/run_swebench_batch.py) | **批量** runner（采样 + 并发 + 自动评测 + 批次报告） |
+| [telos/scripts/show_prompt_trace.py](../scripts/show_prompt_trace.py) | 命令行查看 `prompt_trace.jsonl` |
+| [telos/scripts/build_dashboard.py](../scripts/build_dashboard.py) | 生成单文件 HTML 看板 |
+| [telos/tests/test_telos_harness.py](../tests/test_telos_harness.py) | telos 插件 smoke 测试 |
 | [token-efficient-framework/benchmark/scripts/evaluate-patches.py][evp] | SWE-bench patch 评测器（无 docker，git worktree 隔离） |
 
 [evp]: file:///Users/george/Code/token-efficient-framework/benchmark/scripts/evaluate-patches.py

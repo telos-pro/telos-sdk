@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""STELA savings dashboard —— 把 usage_log 聚合成「节约了多少 token / 多少美刀」。
+"""TELOS savings dashboard —— 把 usage_log 聚合成「节约了多少 token / 多少美刀」。
 
 输入：一个或多个 ``usage_log`` jsonl 文件（proxy 或 SDK transport 都行；
 schema 见 docs/User-guide.md §7.1）。
 
 用法::
 
-    stela dashboard --usage-log ~/.stela/usage.jsonl
+    telos dashboard --usage-log ~/.telos/usage.jsonl
     # 或多个：
-    stela dashboard --usage-log a.jsonl --usage-log b.jsonl --out savings.html
+    telos dashboard --usage-log a.jsonl --usage-log b.jsonl --out savings.html
 
 输出：纯静态 HTML（inline SVG + CSS，零 JS），离线可开。
 """
@@ -130,7 +130,7 @@ def _cost_usd(model: str, n: dict[str, int]) -> dict[str, float]:
 
 
 def _counterfactual_cost_usd(model: str, n: dict[str, int]) -> float:
-    """"如果完全不开 STELA / cache_control" 的对照价。
+    """"如果完全不开 TELOS / cache_control" 的对照价。
 
     在这个反事实里，所有 prompt tokens（raw_input + cache_read +
     cache_write）都会按基础 input 价计费——没有 cache_read 折扣，也没有
@@ -144,7 +144,7 @@ def _counterfactual_cost_usd(model: str, n: dict[str, int]) -> float:
 
 
 def _saved_usd_for_call(model: str, n: dict[str, int]) -> float:
-    """这一 call 因为接入 STELA / cache_control 实际省下（或多花）的钱。
+    """这一 call 因为接入 TELOS / cache_control 实际省下（或多花）的钱。
 
     与"完全不开 cache_control"对照：
       saved = counterfactual_cost − actual_cost
@@ -179,7 +179,7 @@ class _Agg:
 
     新增字段：
     - ``cache_write_5m`` / ``cache_write_1h``：拆分后的 cache_write 量
-    - ``counterfactual_usd``：反事实成本（关闭 STELA 时要付多少）
+    - ``counterfactual_usd``：反事实成本（关闭 TELOS 时要付多少）
     - ``tool_orig_chars`` / ``tool_filtered_chars``：RTK 过滤前/后的工具
       输出字符数；``tool_orig_tokens`` / ``tool_filtered_tokens`` 是过滤时
       按真实文本算好的 token 估算。``tool_saved_usd`` 是据此（缓存命中率
@@ -269,7 +269,7 @@ class _Agg:
 
     @property
     def combined_saved_usd(self) -> float:
-        """STELA 前缀缓存省钱 + RTK 工具输出过滤省钱。"""
+        """TELOS 前缀缓存省钱 + RTK 工具输出过滤省钱。"""
         return self.saved_usd + self.tool_saved_usd
 
 
@@ -279,14 +279,14 @@ class Summary:
     by_harness: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_model: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     by_session: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
-    # 开关维度：mode ∈ {none, stela, rtk, both, passthrough, rtk-only}
+    # 开关维度：mode ∈ {none, telos, rtk, both, passthrough, rtk-only}
     by_mode: dict[str, _Agg] = field(default_factory=lambda: defaultdict(_Agg))
     # 对比实验：compare_group → mode → _Agg。同一 group 下不同 mode 的
     # session 会在 dashboard 上并排展示。
     compare_groups: dict[str, dict[str, _Agg]] = field(
         default_factory=lambda: defaultdict(lambda: defaultdict(_Agg))
     )
-    # 哪些 compare_group 来自 `stela replay`（受控重放）而非真实双 session。
+    # 哪些 compare_group 来自 `telos replay`（受控重放）而非真实双 session。
     replay_groups: set[str] = field(default_factory=set)
     # 时间序列：以 hour bucket 累计 cache_read / saved_usd / counterfactual / cost / calls
     timeline: dict[str, dict[str, float]] = field(
@@ -344,7 +344,7 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         model = rec.get("model") or ""
         harness = rec.get("harness") or "?"
         session = rec.get("session_id") or "(no-session)"
-        mode = rec.get("mode") or "stela"
+        mode = rec.get("mode") or "telos"
         compare_group = rec.get("compare_group")
         ts = float(rec.get("ts") or 0.0)
 
@@ -362,8 +362,8 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         # 其边际成本介于 cache_read 价（若命中前缀缓存）与 input 价（未命中）
         # 之间。用这条 call 自身的命中率 h 加权：
         #   eff_price = h × cache_read 价 + (1 − h) × input 价
-        # STELA 命中率越高，RTK 省下的钱越接近（更便宜的）cache_read 口径；
-        # 不开 STELA（h≈0）时退化为完整 input 价。
+        # TELOS 命中率越高，RTK 省下的钱越接近（更便宜的）cache_read 口径；
+        # 不开 TELOS（h≈0）时退化为完整 input 价。
         tool_reduction = rec.get("tool_output_reduction")
         if not isinstance(tool_reduction, Mapping):
             tool_reduction = None
@@ -689,8 +689,8 @@ def _render_breakdown_table(label: str, data: dict[str, _Agg],
 
 # mode label → 展示用颜色 / 说明
 _MODE_META: dict[str, tuple[str, str]] = {
-    "both":        ("#d2a8ff", "STELA 前缀缓存 + RTK 工具过滤"),
-    "stela":       ("#3fb950", "只 STELA 前缀缓存"),
+    "both":        ("#d2a8ff", "TELOS 前缀缓存 + RTK 工具过滤"),
+    "telos":       ("#3fb950", "只 TELOS 前缀缓存"),
     "rtk":         ("#f0883e", "只 RTK 工具过滤"),
     "rtk-only":    ("#f0883e", "只 RTK 工具过滤"),
     "none":        ("#7d8590", "纯透传，无优化"),
@@ -703,10 +703,10 @@ def _mode_color(mode: str) -> str:
 
 
 def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
-    """开关维度 breakdown：每种 mode 一行，展示 STELA / RTK 两路省钱。"""
+    """开关维度 breakdown：每种 mode 一行，展示 TELOS / RTK 两路省钱。"""
     if not by_mode:
         return ""
-    order = {"both": 0, "stela": 1, "rtk": 2, "rtk-only": 2, "none": 3,
+    order = {"both": 0, "telos": 1, "rtk": 2, "rtk-only": 2, "none": 3,
              "passthrough": 4}
     rows_sorted = sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9))
     max_combined = max((a.combined_saved_usd for _, a in rows_sorted), default=0.0)
@@ -744,7 +744,7 @@ def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
     <thead><tr>
       <th class="left">mode</th>
       <th>calls</th>
-      <th>STELA saved $</th>
+      <th>TELOS saved $</th>
       <th>RTK tokens removed</th>
       <th>RTK saved $ (est)</th>
       <th class="left">combined saved $</th>
@@ -752,7 +752,7 @@ def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
     <tbody>{''.join(rows)}</tbody>
   </table>
   <p class="muted" style="font-size:11px;margin-top:8px">
-    STELA saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
+    TELOS saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
     RTK saved $ = 工具输出过滤省下的 token（过滤时按真实文本估算）×
     缓存命中率加权的边际价（命中→cache_read 价、未命中→input 价）。
     两路相加 = combined。
@@ -768,7 +768,7 @@ def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
     每个 group 一张卡，卡里每个 mode 一个 cell；自动高亮 combined saved $
     最高的 mode。用于「同任务、相同用户输入、不同开关」的 A/B 对照。
 
-    ``replay_groups`` 里的 group 来自 `stela replay`（受控重放），卡标题
+    ``replay_groups`` 里的 group 来自 `telos replay`（受控重放），卡标题
     标 ``replay`` 徽章；其余来自真实双 session，标 ``live A/B``。
     """
     if not compare_groups:
@@ -792,7 +792,7 @@ def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
         # 最贵基线：成本最高的 mode，用来算各 mode 省了多少
         max_cost = max((a.cost_usd for a in by_mode.values()), default=0.0)
         cells = []
-        order = {"both": 0, "stela": 1, "rtk": 2, "rtk-only": 2, "none": 3,
+        order = {"both": 0, "telos": 1, "rtk": 2, "rtk-only": 2, "none": 3,
                  "passthrough": 4}
         for mode, a in sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9)):
             color = _mode_color(mode)
@@ -817,7 +817,7 @@ def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
       <div class="big" style="color:{color}">{_fmt_usd(a.cost_usd)}</div>
       <div class="row"><span>calls</span><b>{_fmt_int(a.calls)}</b></div>
       <div class="row"><span>cache hit%</span><b>{_fmt_pct(hit)}</b></div>
-      <div class="row"><span>STELA saved $</span><b class="green">{_fmt_usd(a.saved_usd)}</b></div>
+      <div class="row"><span>TELOS saved $</span><b class="green">{_fmt_usd(a.saved_usd)}</b></div>
       <div class="row"><span>RTK tokens removed</span>{rtk_removed}</div>
       <div class="row"><span>combined saved $</span><b class="lilac">{_fmt_usd(a.combined_saved_usd)}</b></div>
       {delta_html}
@@ -939,8 +939,8 @@ def render_dashboard(
     # 来自 _counterfactual_cost_usd 的逐条值。
     counterfactual_cost = total.counterfactual_usd or (total.cost_usd + total.saved_usd)
     saved_share = total.saved_usd / counterfactual_cost if counterfactual_cost else 0.0
-    # 合并口径：STELA + RTK。RTK 的反事实成本 = 实付 + RTK 省下的钱，所以
-    # 合并反事实 = STELA 反事实 + RTK 省下额。
+    # 合并口径：TELOS + RTK。RTK 的反事实成本 = 实付 + RTK 省下的钱，所以
+    # 合并反事实 = TELOS 反事实 + RTK 省下额。
     combined_saved = total.combined_saved_usd
     combined_counterfactual = counterfactual_cost + total.tool_saved_usd
     combined_share = (combined_saved / combined_counterfactual
@@ -981,14 +981,14 @@ def render_dashboard(
     ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sources_html = "<br>".join(f"<code>{html.escape(str(s))}</code>" for s in sources)
 
-    # —— "with STELA" 视角的 token mix（实际值） ——
+    # —— "with TELOS" 视角的 token mix（实际值） ——
     seg_bar_with = _render_seg_bar([
         ("raw_input",   total.raw_input,   "raw_input"),
         ("cache_read",  total.cache_read,  "cache_read"),
         ("cache_write", total.cache_write, "cache_write"),
         ("output",      total.output,      "output"),
     ])
-    # —— "without STELA" 视角：所有 prompt token 都落 raw_input 桶 ——
+    # —— "without TELOS" 视角：所有 prompt token 都落 raw_input 桶 ——
     seg_bar_without = _render_seg_bar([
         ("raw_input",   prompt_tokens_total, "raw_input (counterfactual)"),
         ("output",      total.output,        "output"),
@@ -1030,7 +1030,7 @@ def render_dashboard(
         if refresh_seconds and refresh_seconds > 0 else ""
     )
 
-    # 对照模式下需要的数字（关 STELA 时，所有 token 走 input 价）
+    # 对照模式下需要的数字（关 TELOS 时，所有 token 走 input 价）
     without_input_value = _fmt_tokens(prompt_tokens_total)
     without_cost = _fmt_usd(counterfactual_cost)
     with_cost = _fmt_usd(total.cost_usd)
@@ -1074,24 +1074,24 @@ def render_dashboard(
 <html lang="en"><head>
 <meta charset="utf-8">
 {refresh_tag}
-<title>STELA · Token Savings Dashboard</title>
+<title>TELOS · Token Savings Dashboard</title>
 <style>{CSS}</style>
 <style>{toggle_css}</style>
 </head><body data-mode="with">
 <div class="wrap">
 
 <header>
-  <h1>STELA · Token Savings</h1>
+  <h1>TELOS · Token Savings</h1>
   <div class="sub">
     {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
     · generated {ts_now}{refresh_note}
   </div>
 </header>
 
-<!-- ===== 视角切换：with STELA vs. without STELA ===== -->
+<!-- ===== 视角切换：with TELOS vs. without TELOS ===== -->
 <div class="toggle-wrap" role="tablist">
-  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 STELA）</button>
-  <button id="btn-without" onclick="setMode('without')">反事实（不开 STELA）</button>
+  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 TELOS）</button>
+  <button id="btn-without" onclick="setMode('without')">反事实（不开 TELOS）</button>
   <button id="btn-compare" onclick="setMode('compare')">并排对比</button>
 </div>
 
@@ -1099,14 +1099,14 @@ def render_dashboard(
 <section id="compare-view" style="display:none; margin-bottom: 18px;">
   <div class="compare-grid">
     <div class="compare-cell counter">
-      <h3>without STELA <span class="pill">counterfactual</span></h3>
+      <h3>without TELOS <span class="pill">counterfactual</span></h3>
       <div class="big">{without_cost}</div>
       <div class="row"><span>prompt tokens (input 价)</span><b>{without_input_value}</b></div>
       <div class="row"><span>output tokens</span><b>{_fmt_tokens(total.output)}</b></div>
       <div class="small">所有 prompt token 按基础 input 价计费；无 cache_read 折扣、无 cache_write 溢价。</div>
     </div>
     <div class="compare-cell actual">
-      <h3>with STELA <span class="pill">actual</span></h3>
+      <h3>with TELOS <span class="pill">actual</span></h3>
       <div class="big">{with_cost}</div>
       <div class="row"><span>raw_input · @input</span><b>{_fmt_tokens(total.raw_input)}</b></div>
       <div class="row"><span>cache_read · @0.1×input</span><b class="green">{_fmt_tokens(total.cache_read)}</b></div>
@@ -1133,7 +1133,7 @@ def render_dashboard(
     <div class="label">total cost saved (estimated)</div>
     <div class="value">{_fmt_usd(combined_saved)}</div>
     <div class="sub">
-      STELA <b class="green">{_fmt_usd(total.saved_usd)}</b>
+      TELOS <b class="green">{_fmt_usd(total.saved_usd)}</b>
       &nbsp;·&nbsp; {rtk_hero}
       &nbsp;·&nbsp; 占反事实总成本 <b class="lilac">{_fmt_pct(combined_share)}</b>
     </div>
@@ -1151,10 +1151,10 @@ def render_dashboard(
     </div>
   </div>
   <div class="hero-card purple" style="opacity:.85">
-    <div class="label">cost (no STELA)</div>
+    <div class="label">cost (no TELOS)</div>
     <div class="value">{without_cost}</div>
     <div class="sub">
-      启用 STELA 后实际只付 <b>{with_cost}</b>
+      启用 TELOS 后实际只付 <b>{with_cost}</b>
       · 节省 <b class="lilac">{delta_cost}</b>（<b class="lilac">{delta_share}</b>）
     </div>
   </div>
@@ -1180,7 +1180,7 @@ def render_dashboard(
   <div class="kpi"><div class="label">RTK tool output removed</div>
     <div class="value gold">{_fmt_tokens(total.tool_saved_tokens)}</div>
     <div class="sub">{_fmt_int(total.tool_blocks_filtered)} blocks · ~{_fmt_usd(total.tool_saved_usd)}</div></div>
-  <div class="kpi"><div class="label">STELA saved $</div>
+  <div class="kpi"><div class="label">TELOS saved $</div>
     <div class="value green">{_fmt_usd(total.saved_usd)}</div>
     <div class="sub">前缀缓存 vs 不开 cache_control</div></div>
   <div class="kpi"><div class="label">RTK saved $</div>
@@ -1189,7 +1189,7 @@ def render_dashboard(
 </div>
 
 <div class="card with-only">
-  <h2>Token mix（with STELA · 实际）</h2>
+  <h2>Token mix（with TELOS · 实际）</h2>
   {seg_bar_with}
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · {_fmt_tokens(total.raw_input)}</span>
@@ -1200,7 +1200,7 @@ def render_dashboard(
 </div>
 
 <div class="card without-only">
-  <h2>Token mix（without STELA · 反事实）</h2>
+  <h2>Token mix（without TELOS · 反事实）</h2>
   {seg_bar_without}
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · {without_input_value}</span>
@@ -1247,11 +1247,11 @@ function setMode(m) {{
     body.setAttribute('data-mode', m);
     compareView.style.display = 'none';
   }}
-  try {{ localStorage.setItem('stela.dashboard.mode', m); }} catch(e) {{}}
+  try {{ localStorage.setItem('telos.dashboard.mode', m); }} catch(e) {{}}
 }}
 // 恢复上次选择
 try {{
-  var saved = localStorage.getItem('stela.dashboard.mode');
+  var saved = localStorage.getItem('telos.dashboard.mode');
   if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);
 }} catch(e) {{}}
 </script>
@@ -1298,10 +1298,10 @@ def _render_empty(title: str, body: str, *,
 <html lang="en"><head>
 <meta charset="utf-8">
 {refresh_tag}
-<title>STELA · Token Savings</title>
+<title>TELOS · Token Savings</title>
 <style>{CSS}</style>
 </head><body><div class="wrap">
-<header><h1>STELA · Token Savings</h1></header>
+<header><h1>TELOS · Token Savings</h1></header>
 <div class="card">
   <h2>{html.escape(title)}</h2>
   <p class="muted">{body}</p>
@@ -1316,14 +1316,14 @@ def _render_empty(title: str, body: str, *,
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="stela.scripts.build_savings_dashboard",
+        prog="telos.scripts.build_savings_dashboard",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--usage-log", action="append", required=True,
                     help="usage_log jsonl 路径或 glob，可重复")
-    ap.add_argument("--out", default="stela_savings.html",
-                    help="输出 HTML 路径（默认 ./stela_savings.html）")
+    ap.add_argument("--out", default="telos_savings.html",
+                    help="输出 HTML 路径（默认 ./telos_savings.html）")
     args = ap.parse_args(argv)
 
     sources = _resolve_inputs(args.usage_log)
@@ -1347,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {len(records):,} records · {summary.total.calls:,} calls "
           f"· {len(summary.sessions_seen):,} sessions")
     print(f"  saved: {_fmt_tokens(summary.total.cache_read)} cache-read tokens "
-          f"· STELA {_fmt_usd(summary.total.saved_usd)}"
+          f"· TELOS {_fmt_usd(summary.total.saved_usd)}"
           f" + RTK {_fmt_usd(summary.total.tool_saved_usd)}"
           f" = {_fmt_usd(summary.total.combined_saved_usd)}")
     print(f"  open with:  open {out}")

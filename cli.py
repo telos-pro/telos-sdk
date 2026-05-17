@@ -1,10 +1,10 @@
-"""``stela`` 命令行入口（统一 dispatch）。
+"""``telos`` 命令行入口（统一 dispatch）。
 
 子命令：
-- ``stela proxy``      → ``python -m stela.proxy``
-- ``stela init``       → ``python -m stela.init``
-- ``stela dashboard``  → ``python -m stela.scripts.build_savings_dashboard``
-- ``stela replay``     → ``python -m stela.replay``
+- ``telos proxy``      → ``python -m telos.proxy``
+- ``telos init``       → ``python -m telos.init``
+- ``telos dashboard``  → ``python -m telos.scripts.build_savings_dashboard``
+- ``telos replay``     → ``python -m telos.replay``
 """
 
 from __future__ import annotations
@@ -20,16 +20,16 @@ def main(argv: list[str] | None = None) -> int:
 
     subcommand, rest = argv[0], argv[1:]
     if subcommand == "proxy":
-        from stela.proxy.__main__ import main as proxy_main
+        from telos.proxy.__main__ import main as proxy_main
         return proxy_main(rest)
     if subcommand == "init":
-        from stela.init.__main__ import main as init_main
+        from telos.init.__main__ import main as init_main
         return init_main(rest)
     if subcommand == "dashboard":
-        from stela.scripts.build_savings_dashboard import main as dash_main
+        from telos.scripts.build_savings_dashboard import main as dash_main
         return dash_main(rest)
     if subcommand == "replay":
-        from stela.replay.__main__ import main as replay_main
+        from telos.replay.__main__ import main as replay_main
         return replay_main(rest)
     print(f"unknown subcommand: {subcommand}", file=sys.stderr)
     _print_usage()
@@ -38,22 +38,22 @@ def main(argv: list[str] | None = None) -> int:
 
 def _print_usage() -> None:
     print(
-        "usage: stela <subcommand> [...]\n"
+        "usage: telos <subcommand> [...]\n"
         "\n"
         "subcommands:\n"
-        "  proxy       启动 STELA Anthropic 反向代理\n"
+        "  proxy       启动 TELOS Anthropic 反向代理\n"
         "  init        把代理接入到指定 agent 的配置\n"
         "  dashboard   把 usage_log 聚合成 saved-token / saved-$ HTML 看板\n"
         "  replay      把录下的会话按多种 mode 重放，做受控 A/B 对比\n"
         "\n"
         "examples:\n"
-        "  stela proxy --port 7171 --usage-log /tmp/usage.jsonl\n"
-        "  stela init --agent claude-code\n"
-        "  stela init --agent claude-code --status\n"
-        "  stela init --agent claude-code --uninstall\n"
-        "  stela dashboard --usage-log ~/.stela/usage.jsonl --out savings.html\n"
-        "  stela replay --list\n"
-        "  stela replay --session <id> --modes none,stela,rtk,both\n"
+        "  telos proxy --port 7171 --usage-log /tmp/usage.jsonl\n"
+        "  telos init --agent claude-code\n"
+        "  telos init --agent claude-code --status\n"
+        "  telos init --agent claude-code --uninstall\n"
+        "  telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html\n"
+        "  telos replay --list\n"
+        "  telos replay --session <id> --modes none,telos,rtk,both\n"
     )
 
 

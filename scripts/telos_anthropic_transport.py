@@ -1,10 +1,10 @@
-"""StelaAnthropicTransport：把 Anthropic ``messages.create`` 串到 stela。
+"""TelosAnthropicTransport：把 Anthropic ``messages.create`` 串到 telos。
 
 OpenClaw / Hermes agent 调用：
 
     self.client.messages.create(model=..., system=..., messages=[...], tools=[...])
 
-本 transport 实现同样接口，但内部走对应 harness → STELA Bridge →
+本 transport 实现同样接口，但内部走对应 harness → TELOS Bridge →
 canonicalize / band-reorder → 用 ``AnthropicAdapter.emit()`` 重新生成带
 ``cache_control`` 标记的 wire → 真正发到 Anthropic ``/v1/messages``。
 
@@ -15,7 +15,7 @@ canonicalize / band-reorder → 用 ``AnthropicAdapter.emit()`` 重新生成带
 
 也可在构造时显式传 ``harness_name`` 覆盖自动检测。
 
-设计要点（与 stela_transport.py 对齐）：
+设计要点（与 telos_transport.py 对齐）：
 - 使用 ``engine.emit(ir2, plan)`` 而非自定义 wire builder，确保 Anthropic
   ``cache_control`` breakpoint 正确插入（§4.2 BP-T / BP-S / BP-R / BP-X）。
 - ``max_tokens``：Anthropic 必填字段，从调用方传入；若未传则默认 8192。
@@ -32,8 +32,8 @@ from os.path import commonprefix
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from stela import Bridge, load_engine, load_harness
-from stela.bridge import BridgeSessionState
+from telos import Bridge, load_engine, load_harness
+from telos.bridge import BridgeSessionState
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +163,11 @@ def _normalize_usage(response_usage: Mapping[str, Any]) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# IR summary helpers（从 stela_transport.py 复用）
+# IR summary helpers（从 telos_transport.py 复用）
 # ---------------------------------------------------------------------------
 
 def _summarize_ir(ir) -> dict[str, Any]:
-    from stela.ir import Band
+    from telos.ir import Band
 
     def _bucket():
         return {b.name: {"blocks": 0, "chars": 0} for b in Band}
@@ -203,7 +203,7 @@ def _summarize_ir(ir) -> dict[str, Any]:
 
 
 def _flatten_regions(ir_summary: Mapping[str, Any]) -> dict[str, Any]:
-    from stela.ir import Band
+    from telos.ir import Band
 
     bands = ir_summary.get("bands") or {}
     regions: dict[str, Any] = {}
@@ -289,8 +289,8 @@ def _wire_text(wire: Mapping[str, Any]) -> str:
 # Transport
 # ---------------------------------------------------------------------------
 
-class StelaAnthropicTransport:
-    """Anthropic-鸭子接口的 client，内部走 STELA（openclaw 或 hermes harness）。
+class TelosAnthropicTransport:
+    """Anthropic-鸭子接口的 client，内部走 TELOS（openclaw 或 hermes harness）。
 
     Args:
         api_key:      envvar 读不到时显式传入。
@@ -307,7 +307,7 @@ class StelaAnthropicTransport:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
-        session_id: str = "stela-session",
+        session_id: str = "telos-session",
         harness_name: str | None = None,
         engine_name: str = "anthropic",
         usage_log: str | None = None,
@@ -359,7 +359,7 @@ class StelaAnthropicTransport:
     # ------------------------------------------------------------------
 
     def _do_create(self, kwargs: dict[str, Any]):
-        from stela.ir import Band
+        from telos.ir import Band
 
         self._call_count += 1
         model = kwargs.get("model", "")
@@ -421,7 +421,7 @@ class StelaAnthropicTransport:
         wire: dict[str, Any] = dict(wire_dict)
         wire["max_tokens"] = max_tokens
 
-        # 透传调用方传入的非 stela 字段
+        # 透传调用方传入的非 telos 字段
         for k in ("temperature", "top_p", "stream", "stop_sequences",
                   "tool_choice", "thinking", "metadata", "timeout"):
             if k in kwargs and kwargs[k] is not None:
@@ -522,7 +522,7 @@ class StelaAnthropicTransport:
 
 
 class _MessagesNS:
-    def __init__(self, t: StelaAnthropicTransport):
+    def __init__(self, t: TelosAnthropicTransport):
         self._t = t
 
     def create(self, **kwargs):

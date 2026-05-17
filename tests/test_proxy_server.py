@@ -10,7 +10,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from stela.proxy.server import make_app
+from telos.proxy.server import make_app
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ async def _test_non_streaming() -> None:
                 headers={
                     "x-api-key": "test-key",
                     "anthropic-version": "2023-06-01",
-                    "x-stela-session": "smoke-non-stream",
+                    "x-telos-session": "smoke-non-stream",
                 },
             ) as resp:
                 assert resp.status == 200, await resp.text()
@@ -132,7 +132,7 @@ async def _test_non_streaming() -> None:
                 assert body["id"] == "msg_test"
                 assert body["usage"]["cache_read_input_tokens"] == 1000
 
-        # ---- 验证 upstream 拿到的是 STELA 处理过的 wire ----
+        # ---- 验证 upstream 拿到的是 TELOS 处理过的 wire ----
         wire = mock.last_body
         assert wire is not None
         # tools 段或 system 段至少有一处出现 cache_control（BP-T 或 BP-S）
@@ -200,7 +200,7 @@ async def _test_usage_log_written(tmp_log: Path) -> None:
                                   "content": [{"type": "text", "text": "x"}]}],
                 },
                 headers={"x-api-key": "k", "anthropic-version": "2023-06-01",
-                         "x-stela-session": "log-test"},
+                         "x-telos-session": "log-test"},
             ) as resp:
                 assert resp.status == 200
 
@@ -240,12 +240,12 @@ async def _test_pipeline_error_returns_anthropic_error() -> None:
 
 
 async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
-    """STELA 失败时（默认非 strict），原 raw 透传到 upstream，client 看到正常响应。
+    """TELOS 失败时（默认非 strict），原 raw 透传到 upstream，client 看到正常响应。
 
     构造方法：发一个 model 字段缺失但 content 合法的请求 —— harness 能解析，
-    但我们 monkey-patch process_anthropic_request 让它抛异常，模拟 STELA bug。
+    但我们 monkey-patch process_anthropic_request 让它抛异常，模拟 TELOS bug。
     """
-    from stela.proxy import server as srv_mod
+    from telos.proxy import server as srv_mod
 
     mock = _MockUpstream(sse=False)
     up_runner, up_url = await _start_upstream(mock)
@@ -255,7 +255,7 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
     original = srv_mod.process_anthropic_request
 
     def boom(*args, **kwargs):
-        raise RuntimeError("simulated STELA bug")
+        raise RuntimeError("simulated TELOS bug")
 
     srv_mod.process_anthropic_request = boom
     try:
@@ -280,7 +280,7 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
         # upstream 收到的应当是 ORIGINAL raw（无 cache_control 改写）
         wire = mock.last_body
         all_blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
-        # 不应该出现 cache_control（因为没跑 STELA）
+        # 不应该出现 cache_control（因为没跑 TELOS）
         assert not any("cache_control" in b for b in all_blocks), \
             "passthrough 不应有 cache_control 改写"
         print("✓ test_pipeline_failure_falls_back_to_passthrough")
@@ -291,9 +291,9 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
 
 
 async def _test_strict_mode_returns_500_on_pipeline_failure() -> None:
-    """strict=True 时 STELA 失败必须返 500（不降级）。"""
-    from stela.proxy import server as srv_mod
-    from stela.proxy.server import make_app
+    """strict=True 时 TELOS 失败必须返 500（不降级）。"""
+    from telos.proxy import server as srv_mod
+    from telos.proxy.server import make_app
 
     mock = _MockUpstream(sse=False)
     up_runner, up_url = await _start_upstream(mock)
@@ -378,7 +378,7 @@ async def _test_retries_transient_connect_failure() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_body(),
-                headers={"x-api-key": "k", "x-stela-session": "retry-ok"},
+                headers={"x-api-key": "k", "x-telos-session": "retry-ok"},
             ) as resp:
                 assert resp.status == 200, await resp.text()
                 body = await resp.json()
@@ -401,7 +401,7 @@ async def _test_502_after_exhausting_retries() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_body(),
-                headers={"x-api-key": "k", "x-stela-session": "retry-exhaust"},
+                headers={"x-api-key": "k", "x-telos-session": "retry-exhaust"},
             ) as resp:
                 assert resp.status == 502, await resp.text()
                 body = await resp.json()
@@ -416,7 +416,7 @@ async def _test_502_after_exhausting_retries() -> None:
 
 def test_wire_tool_result_first_helper() -> None:
     """_wire_tool_result_first：tool_result 居首 → True，殿后 → False。"""
-    from stela.proxy.server import _wire_tool_result_first
+    from telos.proxy.server import _wire_tool_result_first
     ok = {"messages": [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "t", "content": "r"},
         {"type": "text", "text": "go"}]}]}
@@ -432,8 +432,8 @@ def test_wire_tool_result_first_helper() -> None:
 
 
 async def _test_invalid_wire_falls_back_to_passthrough() -> None:
-    """STELA 产出 tool_result 殿后的非法 wire → proxy 退回 passthrough。"""
-    from stela.proxy import server as srv_mod
+    """TELOS 产出 tool_result 殿后的非法 wire → proxy 退回 passthrough。"""
+    from telos.proxy import server as srv_mod
 
     mock = _MockUpstream(sse=False)
     up_runner, up_url = await _start_upstream(mock)
@@ -442,7 +442,7 @@ async def _test_invalid_wire_falls_back_to_passthrough() -> None:
     real = srv_mod.process_anthropic_request
 
     def bad_wire(raw, **kw):
-        # 模拟 STELA bug：把每条 user message 的 tool_result 排到最后
+        # 模拟 TELOS bug：把每条 user message 的 tool_result 排到最后
         res = real(raw, **kw)
         for m in res.wire.get("messages", []):
             c = m.get("content")
@@ -474,7 +474,7 @@ async def _test_invalid_wire_falls_back_to_passthrough() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=req,
-                headers={"x-api-key": "k", "x-stela-session": "bad-wire"},
+                headers={"x-api-key": "k", "x-telos-session": "bad-wire"},
             ) as resp:
                 assert resp.status == 200, await resp.text()
         # upstream 收到的是退回 passthrough 的请求 —— tool_result 仍居首

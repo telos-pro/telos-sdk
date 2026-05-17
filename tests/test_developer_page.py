@@ -1,4 +1,4 @@
-"""``stela.scripts.build_developer_page`` 的纯函数单测。
+"""``telos.scripts.build_developer_page`` 的纯函数单测。
 
 不需要起 aiohttp：手动构造 _SessionInspector + _SessionRegistry 喂数据，
 检查渲染出的 HTML 包含关键字段。验证：
@@ -11,8 +11,8 @@
 
 from __future__ import annotations
 
-from stela.proxy.inspector import SessionInspector
-from stela.scripts.build_developer_page import render_developer
+from telos.proxy.inspector import SessionInspector
+from telos.scripts.build_developer_page import render_developer
 
 
 # 复用更友好的别名
@@ -33,7 +33,7 @@ def test_empty_overview_renders() -> None:
         _SessionInspector(), _SessionRegistry(),
         focus_session=None, refresh_seconds=5,
     )
-    assert "STELA · developer inspector" in body
+    assert "TELOS · developer inspector" in body
     assert "0 session(s) tracked" in body
     assert "尚无 session" in body
     assert 'content="5"' in body  # refresh tag
@@ -184,7 +184,7 @@ def test_unknown_focus_falls_back_to_friendly_404() -> None:
 def test_entry_to_json_roundtrips() -> None:
     """JSON 视图必须 serializable，且字段齐全。"""
     import json as _json
-    from stela.proxy.inspector import entry_to_json
+    from telos.proxy.inspector import entry_to_json
 
     insp = _SessionInspector()
     e = insp.touch("s-X")

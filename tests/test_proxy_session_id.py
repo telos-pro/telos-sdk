@@ -5,7 +5,7 @@
 - 不同 ``messages[0]`` 的对话 → 不同 session_id
 - 不同 ``system`` / ``tools`` 配置 → 不同 session_id
 - 不同 ``x-api-key`` → 不同 session_id（多租户隔离）
-- 显式 ``x-stela-session`` header 永远覆盖（最高优先级）
+- 显式 ``x-telos-session`` header 永远覆盖（最高优先级）
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import asyncio
 import aiohttp
 from aiohttp import web
 
-from stela.proxy.server import _derive_session_id, make_app
+from telos.proxy.server import _derive_session_id, make_app
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def test_bearer_auth_normalized() -> None:
 def test_empty_messages_does_not_crash() -> None:
     req = dict(_BASE_REQ, messages=[])
     sid = _derive_session_id(req, _HDR)
-    assert sid.startswith("stela-")
+    assert sid.startswith("telos-")
     print("✓ test_empty_messages_does_not_crash")
 
 
@@ -158,7 +158,7 @@ async def _test_end_to_end_multi_turn_same_session_id(tmp_log) -> None:
         sids = [json.loads(l)["session_id"] for l in lines]
         assert sids[0] == sids[1], \
             f"两轮 session_id 漂移：{sids[0]} != {sids[1]}"
-        assert sids[0].startswith("stela-")
+        assert sids[0].startswith("telos-")
         print(f"✓ test_end_to_end_multi_turn_same_session_id ({sids[0]})")
     finally:
         await px_runner.cleanup()
@@ -166,7 +166,7 @@ async def _test_end_to_end_multi_turn_same_session_id(tmp_log) -> None:
 
 
 async def _test_explicit_header_overrides_derivation() -> None:
-    """``x-stela-session`` header 必须永远胜过派生算法。"""
+    """``x-telos-session`` header 必须永远胜过派生算法。"""
     import json
     import tempfile
     from pathlib import Path
@@ -191,7 +191,7 @@ async def _test_explicit_header_overrides_derivation() -> None:
                 f"http://127.0.0.1:{px_port}/v1/messages",
                 json=_BASE_REQ,
                 headers={"x-api-key": "k", "anthropic-version": "2023-06-01",
-                         "x-stela-session": "my-custom-session"},
+                         "x-telos-session": "my-custom-session"},
             ) as r:
                 assert r.status == 200
 

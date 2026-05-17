@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-from stela import Band, Bridge, load_engine, load_harness
-from stela.ir import assert_ir_invariants
-from stela.proxy.pipeline import process_anthropic_request
+from telos import Band, Bridge, load_engine, load_harness
+from telos.ir import assert_ir_invariants
+from telos.proxy.pipeline import process_anthropic_request
 
 
 _CLAUDE_CODE_USER_MSG = {
@@ -36,7 +36,7 @@ _CLAUDE_CODE_REQ = {
 
 
 def _assert_tool_result_first(msg, where: str) -> None:
-    """断言一条 StelaMessage 里 tool_result 块都排在非 tool_result 之前。"""
+    """断言一条 TelosMessage 里 tool_result 块都排在非 tool_result 之前。"""
     kinds = [b.kind for b in msg.blocks]
     tr_idx = [i for i, k in enumerate(kinds) if k == "tool_result"]
     if tr_idx:
@@ -70,7 +70,7 @@ def test_openclaw_tool_result_stays_first() -> None:
 
 
 def test_wire_user_message_leads_with_tool_result() -> None:
-    """端到端：跑完整 STELA 管线，wire 里 user message 必须 tool_result 居首。
+    """端到端：跑完整 TELOS 管线，wire 里 user message 必须 tool_result 居首。
 
     这是 Anthropic 400 "tool use concurrency" 的直接回归——修复前 wire 会把
     tool_result 排到 text 之后。
@@ -91,7 +91,7 @@ def test_wire_user_message_leads_with_tool_result() -> None:
 
 
 def test_bridge_accepts_reordered_message() -> None:
-    """Bridge 构造不应抛 StelaInvariantError。"""
+    """Bridge 构造不应抛 TelosInvariantError。"""
     harness = load_harness("hermes")
     engine = load_engine("anthropic")
     ir = harness.parse(_CLAUDE_CODE_REQ, session_id="r-b",

@@ -1,8 +1,8 @@
 """把工具结果过滤器应用到原始 ``/v1/messages`` 请求体。
 
-在 STELA 管线**之前**跑：rtk 开关打开时，proxy 收到请求后先用这里的
+在 TELOS 管线**之前**跑：rtk 开关打开时，proxy 收到请求后先用这里的
 ``apply_filter`` 把 ``messages[].content[].tool_result`` 里的大段 bash
-输出缩短，再（可选地）交给 STELA 管线打 cache 标记。
+输出缩短，再（可选地）交给 TELOS 管线打 cache 标记。
 
 纯函数：不改入参，返回新的 request dict + ``FilterStats`` 计量。
 """
@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from stela.output_filter.filters import ToolResultFilter
+from telos.output_filter.filters import ToolResultFilter
 
 
 @dataclass

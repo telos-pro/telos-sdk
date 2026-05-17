@@ -1,10 +1,10 @@
-"""StelaOpenAITransport：把 OpenAI-shape 的 chat.completions client 串到 stela。
+"""TelosOpenAITransport：把 OpenAI-shape 的 chat.completions client 串到 telos。
 
 mini_swe_runner（telos vendored hermes）调用：
 
     self.client.chat.completions.create(model=..., messages=[...], tools=[...])
 
-本 transport 实现同样接口，但内部走 ``telos`` harness → STELA Bridge →
+本 transport 实现同样接口，但内部走 ``telos`` harness → TELOS Bridge →
 canonicalize / band-reorder → 转回 chat-completions shape → 真正发到
 OpenRouter 的 ``/v1/chat/completions``。响应回来后用 ``deepseek``
 adapter 归一化 usage（DeepSeek V3+ 在 OpenRouter 的 usage 字段是
@@ -15,7 +15,7 @@ adapter 归一化 usage（DeepSeek V3+ 在 OpenRouter 的 usage 字段是
 - **不破坏 tool_calls 结构**：role=assistant 的 ``tool_calls`` 与 role=tool
   的 ``tool_call_id`` 必须按 OpenAI 协议挂回 wire，不能像 DeepSeek
   adapter 那样直接 inline 成文本——否则 agent 循环拿不到工具结果。
-- **应用 STELA 政策的最小子集**：DROP 段（``<environment_info>`` /
+- **应用 TELOS 政策的最小子集**：DROP 段（``<environment_info>`` /
   ``Current time:`` 等）下沉到每个 user message 文本的尾部；tool 定义
   做 canonicalize（key 排序）；其余按 §5 顺序。这是 cache-命中收益最
   直接的两条规则。
@@ -33,8 +33,8 @@ from os.path import commonprefix
 from pathlib import Path
 from typing import Any, Mapping
 
-from stela import Band, Bridge, load_engine, load_harness
-from stela.bridge import BridgeSessionState, _canonicalize_ir
+from telos import Band, Bridge, load_engine, load_harness
+from telos.bridge import BridgeSessionState, _canonicalize_ir
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +238,8 @@ def _wire_text(wire: Mapping[str, Any]) -> str:
 # Transport（鸭子接口：mini_swe_runner 只用到 .chat.completions.create）
 # ---------------------------------------------------------------------------
 
-class StelaOpenAITransport:
-    """OpenAI-鸭子接口的 client，内部走 STELA。
+class TelosOpenAITransport:
+    """OpenAI-鸭子接口的 client，内部走 TELOS。
 
     Args:
         base_url: 底层真实端点，例如 ``https://openrouter.ai/api/v1``。
@@ -341,7 +341,7 @@ class StelaOpenAITransport:
                 "total": regions["total"] - prev["total"],
             }
         wire = _ir_to_chat_completions(ir2, model=model)
-        # 4. 透传一些非 stela 关心的字段
+        # 4. 透传一些非 telos 关心的字段
         for k in ("temperature", "top_p", "max_tokens", "stream",
                   "timeout", "tool_choice", "response_format"):
             if k in kwargs and kwargs[k] is not None:
@@ -447,12 +447,12 @@ class StelaOpenAITransport:
 
 
 class _ChatNS:
-    def __init__(self, t: StelaOpenAITransport):
+    def __init__(self, t: TelosOpenAITransport):
         self.completions = _CompletionsNS(t)
 
 
 class _CompletionsNS:
-    def __init__(self, t: StelaOpenAITransport):
+    def __init__(self, t: TelosOpenAITransport):
         self._t = t
 
     def create(self, **kwargs):

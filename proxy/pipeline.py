@@ -1,6 +1,6 @@
-"""STELA 处理管线 —— 纯函数，从原始 Anthropic 请求出 wire 请求。
+"""TELOS 处理管线 —— 纯函数，从原始 Anthropic 请求出 wire 请求。
 
-把 ``StelaAnthropicTransport._do_create`` 里 parse → bridge → emit 这一段
+把 ``TelosAnthropicTransport._do_create`` 里 parse → bridge → emit 这一段
 拆出来，让 proxy 和 transport 共用同一份实现，不会出现 wire 行为漂移。
 """
 
@@ -9,13 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from stela import Bridge, load_engine, load_harness
-from stela.bridge import BridgeSessionState
-from stela.ir import Band, StelaIR
-from stela.scripts.stela_anthropic_transport import _detect_harness
+from telos import Bridge, load_engine, load_harness
+from telos.bridge import BridgeSessionState
+from telos.ir import Band, TelosIR
+from telos.scripts.telos_anthropic_transport import _detect_harness
 
 
-# 透传给上游、不参与 STELA 管线的字段。
+# 透传给上游、不参与 TELOS 管线的字段。
 _PASSTHROUGH_FIELDS = (
     "max_tokens", "temperature", "top_p", "stream", "stop_sequences",
     "tool_choice", "thinking", "metadata", "service_tier", "top_k",
@@ -24,7 +24,7 @@ _PASSTHROUGH_FIELDS = (
 
 @dataclass
 class PipelineResult:
-    """STELA 管线的输出。
+    """TELOS 管线的输出。
 
     Attributes:
         wire:        可直接发到 ``api.anthropic.com/v1/messages`` 的请求体。
@@ -57,10 +57,10 @@ class PipelineResult:
     # ↓ proxy 层在管线跑完后回填的字段（见 proxy/server.py）。
     # 对比实验需要按 (mode, compare_group) 切片 usage_log，故放进 result
     # 一并落盘。pipeline 本身不设置它们。
-    mode: str = "stela"
+    mode: str = "telos"
     compare_group: str | None = None
     tool_output_reduction: dict[str, Any] = field(default_factory=dict)
-    # 原始（STELA 改写前）请求里每条 message 的摘要，供 developer 页面展示。
+    # 原始（TELOS 改写前）请求里每条 message 的摘要，供 developer 页面展示。
     # 由 proxy 层在 handle_messages 里回填；pipeline 本身不设置。
     raw_messages: list[dict[str, Any]] = field(default_factory=list)
 
@@ -73,11 +73,11 @@ def process_anthropic_request(
     harness_name: str | None = None,
     engine_name: str = "anthropic",
 ) -> PipelineResult:
-    """跑一次 STELA 管线，返回处理后的 wire 请求 + 诊断信息。
+    """跑一次 TELOS 管线，返回处理后的 wire 请求 + 诊断信息。
 
     Args:
         raw:           原始 ``/v1/messages`` 请求体（dict）。
-        session_id:    STELA session 标识，用于 Bridge 内部 IR.session_id 字段。
+        session_id:    TELOS session 标识，用于 Bridge 内部 IR.session_id 字段。
         session_state: 跨 turn 持久化的 Bridge 状态。**传入则 ref-pool /
                        R8 计数器跨调用累积**；不传则每轮独立（行为退化为
                        早期版本）。
@@ -112,7 +112,7 @@ def process_anthropic_request(
     wire_dict, plan = bridge.emit_with_plan()
     wire: dict[str, Any] = dict(wire_dict)
 
-    # 透传调用方原始的非 STELA 字段
+    # 透传调用方原始的非 TELOS 字段
     for k in _PASSTHROUGH_FIELDS:
         if k in raw and raw[k] is not None:
             wire[k] = raw[k]
@@ -158,7 +158,7 @@ def _payload_size(payload: Any) -> int:
         return len(str(payload))
 
 
-def _summarize_ir_layout(ir: StelaIR) -> dict[str, Any]:
+def _summarize_ir_layout(ir: TelosIR) -> dict[str, Any]:
     """返回 ``{segment: {pin/fold/drop: {blocks, chars}}, messages: [...]}``。
 
     - segment ∈ {tools, system, messages}
@@ -211,7 +211,7 @@ def _summarize_ir_layout(ir: StelaIR) -> dict[str, Any]:
     return out
 
 
-def _extract_tool_calls(ir: StelaIR) -> tuple[list[dict[str, Any]],
+def _extract_tool_calls(ir: TelosIR) -> tuple[list[dict[str, Any]],
                                                 list[dict[str, Any]]]:
     """从 IR 里捞出 (tool_uses, tool_results)。
 

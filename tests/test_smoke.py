@@ -1,7 +1,7 @@
-"""STELA 协议的最小自检：跑 demo 中的请求，验证不变量、Mark slot、usage 解析。
+"""TELOS 协议的最小自检：跑 demo 中的请求，验证不变量、Mark slot、usage 解析。
 
 运行方式：
-    python -m stela.tests.test_smoke
+    python -m telos.tests.test_smoke
 """
 
 from __future__ import annotations
@@ -9,13 +9,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# 允许直接 python -m stela.tests.test_smoke 运行
+# 允许直接 python -m telos.tests.test_smoke 运行
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from stela import Band, Bridge, StelaInvariantError  # noqa: E402
-from stela import load_engine, load_harness          # noqa: E402
-from stela.demo import RAW_REQUEST                   # noqa: E402
-from stela.ir import assert_ir_invariants            # noqa: E402
+from telos import Band, Bridge, TelosInvariantError  # noqa: E402
+from telos import load_engine, load_harness          # noqa: E402
+from telos.demo import RAW_REQUEST                   # noqa: E402
+from telos.ir import assert_ir_invariants            # noqa: E402
 
 
 def test_harness_band_split() -> None:
@@ -134,25 +134,25 @@ def test_vllm_pin_cache_policy() -> None:
 
 def test_band_order_violation_caught() -> None:
     """手动构造一个违反 §5 的 IR，确认 bridge 会拒绝。"""
-    from stela.ir import StelaBlock, StelaIR, StelaMessage, StelaHints
+    from telos.ir import TelosBlock, TelosIR, TelosMessage, TelosHints
 
-    bad = StelaIR(
+    bad = TelosIR(
         session_id="bad",
         tools=(),
         system=(),
-        messages=(StelaMessage(role="user", blocks=(
-            StelaBlock(id="d", band=Band.DROP, kind="text", payload="x"),
-            StelaBlock(id="p", band=Band.PIN,  kind="text", payload="y"),  # PIN 在 DROP 后 → 违反
+        messages=(TelosMessage(role="user", blocks=(
+            TelosBlock(id="d", band=Band.DROP, kind="text", payload="x"),
+            TelosBlock(id="p", band=Band.PIN,  kind="text", payload="y"),  # PIN 在 DROP 后 → 违反
         )),),
         ref_pool={},
-        hints=StelaHints(engine="anthropic"),
+        hints=TelosHints(engine="anthropic"),
     )
     try:
         assert_ir_invariants(bad)
-    except StelaInvariantError:
+    except TelosInvariantError:
         print("✓ test_band_order_violation_caught")
         return
-    raise AssertionError("expected StelaInvariantError")
+    raise AssertionError("expected TelosInvariantError")
 
 
 def test_usage_normalization() -> None:

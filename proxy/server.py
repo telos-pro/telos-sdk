@@ -1,15 +1,15 @@
 """aiohttp 反向代理 server。
 
-监听 ``POST /v1/messages``：跑 STELA 管线、转发到 Anthropic（或自定义 upstream），
+监听 ``POST /v1/messages``：跑 TELOS 管线、转发到 Anthropic（或自定义 upstream），
 支持 SSE 流式响应。其他路径（``/v1/messages/batches``、``/v1/models`` 等）
-按原样透传，不经过 STELA 改写。
+按原样透传，不经过 TELOS 改写。
 
 零侵入接入：
 
 ::
 
     # 启动代理
-    python -m stela.proxy --port 7171
+    python -m telos.proxy --port 7171
 
     # 任意 Anthropic-SDK 客户端：
     export ANTHROPIC_BASE_URL=http://localhost:7171
@@ -40,16 +40,16 @@ from typing import Any, Mapping
 import aiohttp
 from aiohttp import web
 
-from stela.bridge import BridgeSessionState
-from stela.corpus import record_call
-from stela.output_filter import StelaMode, apply_filter, build_filter
-from stela.proxy.inspector import (
+from telos.bridge import BridgeSessionState
+from telos.corpus import record_call
+from telos.output_filter import TelosMode, apply_filter, build_filter
+from telos.proxy.inspector import (
     SessionInspector as _SessionInspector,
     SessionInspectorEntry as _SessionInspectorEntry,
     ToolStat as _ToolStat,
     entry_to_json as _inspector_entry_to_json,
 )
-from stela.proxy.pipeline import PipelineResult, process_anthropic_request
+from telos.proxy.pipeline import PipelineResult, process_anthropic_request
 
 
 _DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -65,7 +65,7 @@ _FORWARD_HEADER_WHITELIST = (
     "user-agent",
 )
 
-_log = logging.getLogger("stela.proxy")
+_log = logging.getLogger("telos.proxy")
 
 # upstream 建连阶段（TLS 握手 / connect）瞬时失败的有界退避重试。
 # 这些错误都发生在请求体送达 upstream 之前，重试不会重复计费 / 重复处理。
@@ -77,7 +77,7 @@ def _wire_tool_result_first(req: Mapping[str, Any]) -> bool:
     """校验请求体里每条 user message 的 tool_result 块都排在非 tool_result 之前。
 
     Anthropic 要求 user message 的 tool_result 物理居首，违反会被 upstream 判
-    400。proxy 在发送前用它兜底——STELA 改写若产出非法 wire，退回 passthrough。
+    400。proxy 在发送前用它兜底——TELOS 改写若产出非法 wire，退回 passthrough。
     """
     messages = req.get("messages")
     if not isinstance(messages, list):
@@ -127,7 +127,7 @@ def _derive_session_id(raw: Mapping[str, Any], headers: Mapping[str, str]) -> st
     消息）。每轮请求只在 ``messages[]`` 尾部追加新内容。所以这四项的 hash
     就唯一标识一段对话。
 
-    返回形如 ``"stela-<16字节hex>"``，方便 grep。
+    返回形如 ``"telos-<16字节hex>"``，方便 grep。
     """
     seed = {
         "client": _client_identity(headers),
@@ -140,7 +140,7 @@ def _derive_session_id(raw: Mapping[str, Any], headers: Mapping[str, str]) -> st
     body = json.dumps(seed, sort_keys=True, ensure_ascii=False,
                        default=str).encode("utf-8")
     digest = hashlib.blake2b(body, digest_size=8).hexdigest()
-    return f"stela-{digest}"
+    return f"telos-{digest}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ class _SessionRegistry:
 
 
 # ---------------------------------------------------------------------------
-# usage 归一化（与 stela_anthropic_transport._normalize_usage 同 schema）
+# usage 归一化（与 telos_anthropic_transport._normalize_usage 同 schema）
 # ---------------------------------------------------------------------------
 
 def _normalize_usage(u: dict[str, Any]) -> dict[str, int]:
@@ -200,7 +200,7 @@ def _anthropic_error(status: int, err_type: str, message: str) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# 原始 message 摘要（developer 页面展示 STELA 改写前的对话原貌）
+# 原始 message 摘要（developer 页面展示 TELOS 改写前的对话原貌）
 # ---------------------------------------------------------------------------
 
 _RAW_MSG_PREVIEW_CHARS = 240
@@ -287,7 +287,7 @@ class ProxyApp:
         strict: bool = False,
         max_sessions: int = _DEFAULT_MAX_SESSIONS,
         dashboard_refresh: int = 5,
-        mode: StelaMode | None = None,
+        mode: TelosMode | None = None,
         corpus_dir: Path | None = None,
         record: bool = True,
     ):
@@ -295,21 +295,21 @@ class ProxyApp:
         self.usage_log = usage_log
         self.harness_override = harness_override
         self.request_timeout = request_timeout
-        # 进程级默认开关；可被单条请求的 X-Stela-Mode header 覆盖（且首个
+        # 进程级默认开关；可被单条请求的 X-Telos-Mode header 覆盖（且首个
         # 请求的取值会被 sticky 到该 session）。
-        self.mode = mode or StelaMode()
+        self.mode = mode or TelosMode()
         # 工具结果过滤器：rtk 二进制可用就走 rtk，否则纯 Python fallback。
         # 构造一次、全 session 复用（无状态）。
         self._filter = build_filter()
         # 会话录制：默认开启，把每次调用的原始请求录进 corpus_dir，供
-        # `stela replay` 重放。仅录请求、不录响应。--no-record 可关。
+        # `telos replay` 重放。仅录请求、不录响应。--no-record 可关。
         self._record = record
         self._corpus_dir = corpus_dir if record else None
-        # strict=False（默认）：STELA 失败时原样透传到 upstream，保证
+        # strict=False（默认）：TELOS 失败时原样透传到 upstream，保证
         # 优化层永远不会破坏正确性（RTK 同款"rewrite 失败 → 原命令"原则）。
-        # strict=True：测试 / 调试用，STELA 失败直接 500。
+        # strict=True：测试 / 调试用，TELOS 失败直接 500。
         self.strict = strict
-        # /__stela/dashboard 的 meta-refresh 间隔（秒）；0 = 关闭 auto-refresh。
+        # /__telos/dashboard 的 meta-refresh 间隔（秒）；0 = 关闭 auto-refresh。
         self.dashboard_refresh = dashboard_refresh
 
         if usage_log is not None:
@@ -402,28 +402,28 @@ class ProxyApp:
 
     def _resolve_mode(
         self, request: web.Request, session_state: BridgeSessionState,
-    ) -> StelaMode:
+    ) -> TelosMode:
         """决定本次请求的 mode。
 
-        优先级：``X-Stela-Mode`` header > session 已锁定的 sticky_mode >
+        优先级：``X-Telos-Mode`` header > session 已锁定的 sticky_mode >
         proxy 进程默认。首个带 header 的请求会把取值 sticky 到该 session，
         保证对比实验里同一 session 全程不换挡。
         """
-        header = request.headers.get("x-stela-mode")
+        header = request.headers.get("x-telos-mode")
         if header:
-            mode = StelaMode.from_label(header)
+            mode = TelosMode.from_label(header)
             if session_state.sticky_mode is None:
                 session_state.sticky_mode = mode.label
             return mode
         if session_state.sticky_mode is not None:
-            return StelaMode.from_label(session_state.sticky_mode)
+            return TelosMode.from_label(session_state.sticky_mode)
         return self.mode
 
     def _resolve_compare_group(
         self, request: web.Request, session_state: BridgeSessionState,
     ) -> str | None:
-        """对比实验分组标签（``X-Stela-Compare-Group`` header），sticky。"""
-        header = request.headers.get("x-stela-compare-group")
+        """对比实验分组标签（``X-Telos-Compare-Group`` header），sticky。"""
+        header = request.headers.get("x-telos-compare-group")
         if header:
             if session_state.compare_group is None:
                 session_state.compare_group = header
@@ -448,13 +448,13 @@ class ProxyApp:
             return _anthropic_error(400, "invalid_request_error", f"Invalid JSON: {e}")
 
         session_id = (
-            request.headers.get("x-stela-session")
+            request.headers.get("x-telos-session")
             or (raw.get("metadata") or {}).get("user_id")
             or _derive_session_id(raw, request.headers)
         )
         session_state = self._registry.get_or_create(session_id)
 
-        # ---- 0a. 录会话语料（原始请求，RTK / STELA 改写之前）----
+        # ---- 0a. 录会话语料（原始请求，RTK / TELOS 改写之前）----
         if self._corpus_dir is not None:
             try:
                 record_call(self._corpus_dir, session_id, call_index, raw)
@@ -477,8 +477,8 @@ class ProxyApp:
                                call_index)
                 effective_raw = raw
 
-        # ---- 1. STELA 管线（仅 mode.stela）----
-        if mode.stela:
+        # ---- 1. TELOS 管线（仅 mode.telos）----
+        if mode.telos:
             try:
                 result = process_anthropic_request(
                     effective_raw,
@@ -490,15 +490,15 @@ class ProxyApp:
                 self._pipeline_failures += 1
                 # 第一次失败打完整 traceback；后续只打一行短消息减少日志噪音。
                 if self._pipeline_failures == 1:
-                    _log.exception("STELA pipeline failed (call=%d) — falling back to "
+                    _log.exception("TELOS pipeline failed (call=%d) — falling back to "
                                    "passthrough. Further failures will log a single line.",
                                    call_index)
                 else:
-                    _log.warning("STELA pipeline failed (call=%d, total=%d): %s",
+                    _log.warning("TELOS pipeline failed (call=%d, total=%d): %s",
                                  call_index, self._pipeline_failures, e)
                 if self.strict:
                     return _anthropic_error(500, "api_error",
-                                            f"STELA pipeline failed: {e}")
+                                            f"TELOS pipeline failed: {e}")
                 # 优雅降级：用（过滤后的）raw 当 wire，造空 result 走透传。
                 result = PipelineResult(
                     wire=dict(effective_raw),
@@ -508,7 +508,7 @@ class ProxyApp:
                     model=raw.get("model", ""),
                 )
         else:
-            # STELA 关：不打 cache 标记，(过滤后的) raw 直接当 wire。
+            # TELOS 关：不打 cache 标记，(过滤后的) raw 直接当 wire。
             result = PipelineResult(
                 wire=dict(effective_raw),
                 harness="rtk-only" if mode.rtk else "passthrough",
@@ -521,22 +521,22 @@ class ProxyApp:
         result.mode = mode.label
         result.compare_group = compare_group
         result.tool_output_reduction = filter_reduction
-        # 原始（STELA 改写前）请求的 message 摘要，供 developer 页面展示。
+        # 原始（TELOS 改写前）请求的 message 摘要，供 developer 页面展示。
         result.raw_messages = _summarize_raw_messages(raw)
 
-        # 发送前兜底校验：STELA 改写若产出结构非法的 wire（tool_result 不居首
+        # 发送前兜底校验：TELOS 改写若产出结构非法的 wire（tool_result 不居首
         # 等），不能让它打到 upstream 吃 400。退回 passthrough——未改写的
         # effective_raw 结构合法。与 strict=False「优化层永不破坏正确性」一致。
         if not _wire_tool_result_first(result.wire):
             if _wire_tool_result_first(effective_raw):
                 _log.warning(
-                    "STELA wire failed tool_result-order check (call=%d) — "
+                    "TELOS wire failed tool_result-order check (call=%d) — "
                     "falling back to passthrough", call_index)
                 result.wire = dict(effective_raw)
                 result.harness = "passthrough"
             else:
                 _log.warning(
-                    "tool_result-order issue not introduced by STELA "
+                    "tool_result-order issue not introduced by TELOS "
                     "(call=%d) — forwarding request as-is", call_index)
 
         is_streaming = bool(raw.get("stream", False))
@@ -754,7 +754,7 @@ class ProxyApp:
                 usage["output_tokens"] = int(u["output_tokens"])
 
     # ------------------------------------------------------------------
-    # GET /__stela/dashboard —— live savings dashboard
+    # GET /__telos/dashboard —— live savings dashboard
     # ------------------------------------------------------------------
 
     async def handle_dashboard(self, request: web.Request) -> web.Response:
@@ -764,7 +764,7 @@ class ProxyApp:
         量级，每行 jsonl 一两百字节），所以不用搞缓存或 incremental。
         """
         # 延迟 import，避免 proxy 冷启动时强依赖 dashboard 模块。
-        from stela.scripts.build_savings_dashboard import render_from_usage_log
+        from telos.scripts.build_savings_dashboard import render_from_usage_log
 
         try:
             body = render_from_usage_log(
@@ -780,7 +780,7 @@ class ProxyApp:
         return web.Response(text=body, content_type="text/html")
 
     # ------------------------------------------------------------------
-    # GET /__stela/developer —— 面向开发者的实时 session 结构 / 工具调用统计
+    # GET /__telos/developer —— 面向开发者的实时 session 结构 / 工具调用统计
     # ------------------------------------------------------------------
 
     async def handle_developer(self, request: web.Request) -> web.Response:
@@ -789,7 +789,7 @@ class ProxyApp:
         如果 query 里带 ``?session=<id>``，仅渲染那一个 session 的详情；
         否则渲染概览（session 列表）+ 最近一次 call 的 session 详情。
         """
-        from stela.scripts.build_developer_page import render_developer
+        from telos.scripts.build_developer_page import render_developer
 
         try:
             body = render_developer(
@@ -808,7 +808,7 @@ class ProxyApp:
         return web.Response(text=body, content_type="text/html")
 
     # ------------------------------------------------------------------
-    # GET /__stela/developer.json —— 同样的数据，机器可读
+    # GET /__telos/developer.json —— 同样的数据，机器可读
     # ------------------------------------------------------------------
 
     async def handle_developer_json(self, request: web.Request) -> web.Response:
@@ -901,7 +901,7 @@ class ProxyApp:
     ) -> None:
         """把 upstream 响应的 cache_creation tokens 累加进 session_state。
 
-        这是 STELA 的 ``bridge.absorb_usage`` 在 proxy 路径下的等价物。
+        这是 TELOS 的 ``bridge.absorb_usage`` 在 proxy 路径下的等价物。
         没有这一步，R8 触发条件永远凑不齐 ``cumulative_cache_creation``
         阈值。
         """
@@ -963,7 +963,7 @@ def make_app(
     harness_override: str | None = None,
     strict: bool = False,
     dashboard_refresh: int = 5,
-    mode: StelaMode | None = None,
+    mode: TelosMode | None = None,
     corpus_dir: Path | None = None,
     record: bool = True,
 ) -> web.Application:
@@ -985,9 +985,9 @@ def make_app(
     app = web.Application(client_max_size=1024 ** 3)
     app.router.add_post("/v1/messages", proxy.handle_messages)
     # 必须在 catch-all passthrough 之前注册，否则会被吞掉。
-    app.router.add_get("/__stela/dashboard", proxy.handle_dashboard)
-    app.router.add_get("/__stela/developer", proxy.handle_developer)
-    app.router.add_get("/__stela/developer.json", proxy.handle_developer_json)
+    app.router.add_get("/__telos/dashboard", proxy.handle_dashboard)
+    app.router.add_get("/__telos/developer", proxy.handle_developer)
+    app.router.add_get("/__telos/developer.json", proxy.handle_developer_json)
     app.router.add_route("*", "/{tail:.*}", proxy.handle_passthrough)
     app.on_shutdown.append(proxy.on_shutdown)
     app["proxy"] = proxy
@@ -1003,7 +1003,7 @@ def run(
     harness_override: str | None = None,
     strict: bool = False,
     dashboard_refresh: int = 5,
-    mode: StelaMode | None = None,
+    mode: TelosMode | None = None,
     corpus_dir: Path | None = None,
     record: bool = True,
 ) -> None:
@@ -1012,7 +1012,7 @@ def run(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    mode = mode or StelaMode()
+    mode = mode or TelosMode()
     app = make_app(
         upstream=upstream,
         usage_log=usage_log,
@@ -1023,22 +1023,22 @@ def run(
         corpus_dir=corpus_dir,
         record=record,
     )
-    _log.info("STELA proxy listening on http://%s:%d → %s", host, port, upstream)
-    _log.info("default mode  → %s (stela=%s rtk=%s); 单请求可用 X-Stela-Mode 覆盖",
-              mode.label, mode.stela, mode.rtk)
+    _log.info("TELOS proxy listening on http://%s:%d → %s", host, port, upstream)
+    _log.info("default mode  → %s (telos=%s rtk=%s); 单请求可用 X-Telos-Mode 覆盖",
+              mode.label, mode.telos, mode.rtk)
     if record and corpus_dir is not None:
-        _log.info("session corpus → %s（录原始请求供 stela replay；--no-record 可关）",
+        _log.info("session corpus → %s（录原始请求供 telos replay；--no-record 可关）",
                   corpus_dir)
     if usage_log:
         _log.info("usage log    → %s", usage_log)
-        _log.info("dashboard    → http://%s:%d/__stela/dashboard"
+        _log.info("dashboard    → http://%s:%d/__telos/dashboard"
                   " (refresh=%ds)", host, port, dashboard_refresh)
     else:
-        _log.info("dashboard    → http://%s:%d/__stela/dashboard"
+        _log.info("dashboard    → http://%s:%d/__telos/dashboard"
                   " (no usage_log; will show empty state)", host, port)
-    _log.info("developer    → http://%s:%d/__stela/developer"
-              " (live session inspector; JSON at /__stela/developer.json)",
+    _log.info("developer    → http://%s:%d/__telos/developer"
+              " (live session inspector; JSON at /__telos/developer.json)",
               host, port)
     if strict:
-        _log.info("strict mode ON — STELA failure 返回 500（不降级到 passthrough）")
+        _log.info("strict mode ON — TELOS failure 返回 500（不降级到 passthrough）")
     web.run_app(app, host=host, port=port, print=None, access_log=None)

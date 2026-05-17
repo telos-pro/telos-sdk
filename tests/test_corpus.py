@@ -1,11 +1,11 @@
-"""``stela.corpus`` 单测：录制 / 加载 / 列举会话语料。"""
+"""``telos.corpus`` 单测：录制 / 加载 / 列举会话语料。"""
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
 
-from stela.corpus import list_sessions, load_session, record_call
+from telos.corpus import list_sessions, load_session, record_call
 
 
 def _sample_request(text: str) -> dict:
@@ -79,7 +79,7 @@ def test_load_missing_session_raises() -> None:
 def test_empty_corpus_lists_nothing() -> None:
     with tempfile.TemporaryDirectory() as td:
         assert list_sessions(Path(td)) == []
-    assert list_sessions(Path("/tmp/stela-corpus-does-not-exist-xyz")) == []
+    assert list_sessions(Path("/tmp/telos-corpus-does-not-exist-xyz")) == []
     print("✓ test_empty_corpus_lists_nothing")
 
 

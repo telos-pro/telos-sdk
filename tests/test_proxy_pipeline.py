@@ -1,10 +1,10 @@
-"""``stela.proxy.pipeline`` 的纯函数单测（无网络）。"""
+"""``telos.proxy.pipeline`` 的纯函数单测（无网络）。"""
 
 from __future__ import annotations
 
-from stela.bridge import BridgeSessionState
-from stela.proxy.pipeline import process_anthropic_request
-from stela.scripts.stela_anthropic_transport import _detect_harness
+from telos.bridge import BridgeSessionState
+from telos.proxy.pipeline import process_anthropic_request
+from telos.scripts.telos_anthropic_transport import _detect_harness
 
 
 _OPENCLAW_REQ = {

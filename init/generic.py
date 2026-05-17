@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from stela.init.base import AgentInstaller, InstallResult
+from telos.init.base import AgentInstaller, InstallResult
 
 
 class GenericInstaller(AgentInstaller):

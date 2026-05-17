@@ -1,9 +1,9 @@
-"""``stela replay`` —— 录制 → 重放对照引擎。
+"""``telos replay`` —— 录制 → 重放对照引擎。
 
 原理
 ----
 从语料库取出某个真实会话录下的「请求序列」，对每一种 mode
-（none / stela / rtk / both）把**逐字节相同**的轮次重新跑一遍管线、发到
+（none / telos / rtk / both）把**逐字节相同**的轮次重新跑一遍管线、发到
 上游，只取 usage。因为每个 mode 看到的输入完全一致，唯一变量就是优化
 开关本身 —— 这是受控实验，比「跑两个独立 session」少了 trajectory 分叉
 的混杂。
@@ -20,7 +20,7 @@
   成本」，不是「同一个任务在不同配置下的成本」。捕捉不到二阶效应——比如
   RTK 缩短工具结果后，真实运行里 agent 下一步可能做出不同决策。
 - 跨 mode 的缓存隔离：默认给每个 mode 注入一个唯一的 system 前缀块
-  （``[stela-replay ns=...]``），让 Anthropic 端的前缀缓存各自独立，
+  （``[telos-replay ns=...]``），让 Anthropic 端的前缀缓存各自独立，
   避免「先重放的 mode 把缓存暖好、后重放的 mode 白蹭命中」。这块前缀
   本身只有几个 token、各 mode 等长，不影响相对对照；``cache_isolation=
   False`` 可关。
@@ -35,11 +35,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from stela.bridge import BridgeSessionState
-from stela.output_filter import StelaMode, ToolResultFilter, apply_filter, build_filter
-from stela.proxy.pipeline import process_anthropic_request
+from telos.bridge import BridgeSessionState
+from telos.output_filter import TelosMode, ToolResultFilter, apply_filter, build_filter
+from telos.proxy.pipeline import process_anthropic_request
 
-_log = logging.getLogger("stela.replay")
+_log = logging.getLogger("telos.replay")
 
 # 上游 sender：吃一个 wire dict，返回 Anthropic 风格的 raw usage dict
 # （或 None 表示该轮调用失败）。注入式设计——测试传假 sender，不打网络。
@@ -116,7 +116,7 @@ def _inject_namespace(raw: dict[str, Any], session_id: str, mode_label: str) -> 
     各 mode 的前缀因此互不相同 → Anthropic 端缓存各自独立，重放顺序不再
     污染对照数字。块本身只有 ~10 token、各 mode 等长。
     """
-    tag = {"type": "text", "text": f"[stela-replay ns={session_id}/{mode_label}]"}
+    tag = {"type": "text", "text": f"[telos-replay ns={session_id}/{mode_label}]"}
     system = raw.get("system")
     if system is None:
         raw["system"] = [tag]
@@ -156,7 +156,7 @@ class ReplayResult:
 
 def replay_session(
     turns: list[Mapping[str, Any]],
-    mode: StelaMode,
+    mode: TelosMode,
     *,
     session_id: str,
     compare_group: str,
@@ -196,7 +196,7 @@ def replay_session(
             effective, fstats = apply_filter(raw, flt)
             reduction = fstats.as_dict()
 
-        if mode.stela:
+        if mode.telos:
             try:
                 pr = process_anthropic_request(
                     effective, session_id=replay_sid, session_state=state)

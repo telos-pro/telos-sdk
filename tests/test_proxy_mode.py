@@ -13,9 +13,9 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from stela.corpus import load_session
-from stela.output_filter import StelaMode
-from stela.proxy.server import make_app
+from telos.corpus import load_session
+from telos.output_filter import TelosMode
+from telos.proxy.server import make_app
 
 
 class _MockUpstream:
@@ -47,7 +47,7 @@ async def _start_upstream(mock: _MockUpstream) -> tuple[web.AppRunner, str]:
 
 async def _start_proxy(
     upstream_url: str, *, usage_log: Path | None = None,
-    mode: StelaMode | None = None, corpus_dir: Path | None = None,
+    mode: TelosMode | None = None, corpus_dir: Path | None = None,
     record: bool = True,
 ) -> tuple[web.AppRunner, str]:
     app = make_app(upstream=upstream_url, usage_log=usage_log, mode=mode,
@@ -102,8 +102,8 @@ async def _test_mode_rtk_shrinks_tool_result() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=req,
-                headers={"x-api-key": "k", "x-stela-mode": "rtk",
-                         "x-stela-session": "rtk-test"},
+                headers={"x-api-key": "k", "x-telos-mode": "rtk",
+                         "x-telos-session": "rtk-test"},
             ) as resp:
                 assert resp.status == 200, await resp.text()
 
@@ -129,8 +129,8 @@ async def _test_mode_none_is_byte_identical() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=req,
-                headers={"x-api-key": "k", "x-stela-mode": "none",
-                         "x-stela-session": "none-test"},
+                headers={"x-api-key": "k", "x-telos-mode": "none",
+                         "x-telos-session": "none-test"},
             ) as resp:
                 assert resp.status == 200
 
@@ -141,8 +141,8 @@ async def _test_mode_none_is_byte_identical() -> None:
         await up_runner.cleanup()
 
 
-async def _test_mode_stela_marks_cache_control() -> None:
-    """mode=stela：跑管线打 cache_control，但 tool_result 不被过滤。"""
+async def _test_mode_telos_marks_cache_control() -> None:
+    """mode=telos：跑管线打 cache_control，但 tool_result 不被过滤。"""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -152,17 +152,17 @@ async def _test_mode_stela_marks_cache_control() -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=req,
-                headers={"x-api-key": "k", "x-stela-mode": "stela",
-                         "x-stela-session": "stela-test"},
+                headers={"x-api-key": "k", "x-telos-mode": "telos",
+                         "x-telos-session": "telos-test"},
             ) as resp:
                 assert resp.status == 200
 
         wire = mock.last_body
         blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
-        assert any("cache_control" in b for b in blocks), "mode=stela 应有 cache_control"
-        # STELA 不动 tool_result 文本
+        assert any("cache_control" in b for b in blocks), "mode=telos 应有 cache_control"
+        # TELOS 不动 tool_result 文本
         assert _tool_result_len(wire) == original_len
-        print("✓ test_mode_stela_marks_cache_control")
+        print("✓ test_mode_telos_marks_cache_control")
     finally:
         await px_runner.cleanup()
         await up_runner.cleanup()
@@ -177,9 +177,9 @@ async def _test_compare_group_and_reduction_logged(tmp_log: Path) -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
-                headers={"x-api-key": "k", "x-stela-mode": "both",
-                         "x-stela-session": "cmp-test",
-                         "x-stela-compare-group": "task-42"},
+                headers={"x-api-key": "k", "x-telos-mode": "both",
+                         "x-telos-session": "cmp-test",
+                         "x-telos-compare-group": "task-42"},
             ) as resp:
                 assert resp.status == 200
 
@@ -199,28 +199,28 @@ async def _test_mode_is_sticky_per_session() -> None:
     """首个请求用 header 设 mode=rtk，后续同 session 无 header 仍走 rtk。"""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
-    # proxy 进程默认 mode=stela —— 若 sticky 失效，第二个请求会打 cache_control
-    px_runner, px_url = await _start_proxy(up_url, mode=StelaMode.from_label("stela"))
+    # proxy 进程默认 mode=telos —— 若 sticky 失效，第二个请求会打 cache_control
+    px_runner, px_url = await _start_proxy(up_url, mode=TelosMode.from_label("telos"))
     try:
         async with aiohttp.ClientSession() as client:
             # 第一轮：显式 header rtk
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
-                headers={"x-api-key": "k", "x-stela-mode": "rtk",
-                         "x-stela-session": "sticky-test"},
+                headers={"x-api-key": "k", "x-telos-mode": "rtk",
+                         "x-telos-session": "sticky-test"},
             ) as resp:
                 assert resp.status == 200
             # 第二轮：同 session，无 header
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
-                headers={"x-api-key": "k", "x-stela-session": "sticky-test"},
+                headers={"x-api-key": "k", "x-telos-session": "sticky-test"},
             ) as resp:
                 assert resp.status == 200
 
         wire = mock.last_body
         blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
         assert not any("cache_control" in b for b in blocks), \
-            "sticky 失效：第二个请求退回到了默认 stela mode"
+            "sticky 失效：第二个请求退回到了默认 telos mode"
         print("✓ test_mode_is_sticky_per_session")
     finally:
         await px_runner.cleanup()
@@ -237,8 +237,8 @@ async def _test_proxy_records_corpus(corpus_dir: Path) -> None:
             for _ in range(2):
                 async with client.post(
                     f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
-                    headers={"x-api-key": "k", "x-stela-mode": "both",
-                             "x-stela-session": "corpus-test"},
+                    headers={"x-api-key": "k", "x-telos-mode": "both",
+                             "x-telos-session": "corpus-test"},
                 ) as resp:
                     assert resp.status == 200
 
@@ -262,7 +262,7 @@ async def _test_no_record_disables_corpus(corpus_dir: Path) -> None:
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
-                headers={"x-api-key": "k", "x-stela-session": "norecord-test"},
+                headers={"x-api-key": "k", "x-telos-session": "norecord-test"},
             ) as resp:
                 assert resp.status == 200
         assert not (corpus_dir / "norecord-test.jsonl").exists(), \
@@ -276,7 +276,7 @@ async def _test_no_record_disables_corpus(corpus_dir: Path) -> None:
 async def _run_all(tmp_log: Path, corpus_dir: Path) -> None:
     await _test_mode_rtk_shrinks_tool_result()
     await _test_mode_none_is_byte_identical()
-    await _test_mode_stela_marks_cache_control()
+    await _test_mode_telos_marks_cache_control()
     await _test_compare_group_and_reduction_logged(tmp_log)
     await _test_mode_is_sticky_per_session()
     await _test_proxy_records_corpus(corpus_dir)

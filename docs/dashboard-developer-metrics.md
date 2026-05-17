@@ -1,6 +1,6 @@
 # Developer Dashboard 指标说明
 
-入口：`GET /__stela/developer`（HTML）或 `/__stela/developer.json`（JSON）。
+入口：`GET /__telos/developer`（HTML）或 `/__telos/developer.json`（JSON）。
 源码：[scripts/build_developer_page.py](../scripts/build_developer_page.py) 渲染，
 [proxy/inspector.py](../proxy/inspector.py) 累计内存状态。
 
@@ -93,7 +93,7 @@ delta 来自 [scripts/build_developer_page.py:159-164](../scripts/build_develope
 
 ## 5. "Latest IR · per-message blocks (band · kind · chars)"
 
-最近一次请求的 **StelaIR.messages 快照**，按 message index 顺序铺开。每条 message
+最近一次请求的 **TelosIR.messages 快照**，按 message index 顺序铺开。每条 message
 左边是 `msg[index]`，中间是 `role`（user / assistant），右边是 block pill 序列。
 
 每个 pill 形如 `P·text 1,234c [openclaw/user-query]`：
@@ -168,4 +168,4 @@ assistant 的每个 `tool_use` → `absorb_use(args_chars)`；user 的每个 `to
 
 - `_detect_harness` 仅看 `system` 段文本里有没有 `<system-reminder>` / `<command-message>`，
   但 Claude Code 实际把这些标签注入到 **user message** 里，所以大部分 hermes 流量
-  会被识别成 openclaw。详见 `scripts/stela_anthropic_transport.py` 检测函数的待修复清单。
+  会被识别成 openclaw。详见 `scripts/telos_anthropic_transport.py` 检测函数的待修复清单。

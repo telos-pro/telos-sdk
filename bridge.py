@@ -1,4 +1,4 @@
-"""Bridge：STELA 的策略核心。五个原语 + 一次 canonicalize。
+"""Bridge：TELOS 的策略核心。五个原语 + 一次 canonicalize。
 
 ```
 upstream agent → harness.parse() → IR
@@ -32,23 +32,23 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
-from stela.engine.base import (
+from telos.engine.base import (
     BidirectionalEngineAdapter,
     EmitPlan,
     EngineAdapter,
     ProbeResult,
 )
-from stela.ir import (
+from telos.ir import (
     Band,
-    StelaBlock,
-    StelaIR,
-    StelaInvariantError,
-    StelaMessage,
+    TelosBlock,
+    TelosIR,
+    TelosInvariantError,
+    TelosMessage,
     UsageReport,
     assert_band_order,
     assert_ir_invariants,
 )
-from stela.refpool import RefPool
+from telos.refpool import RefPool
 
 
 # ---------------------------------------------------------------------------
@@ -86,11 +86,11 @@ class BridgeSessionState:
     # hermes 翻转 → source_tag 前缀不一致 → ref-pool slug 失配"。显式
     # 传入 ``harness_name`` 始终覆盖这个字段。
     sticky_harness: str | None = None
-    # 同理：一个 session 第一次见到的 mode（none/stela/rtk/both）被锁定，
+    # 同理：一个 session 第一次见到的 mode（none/telos/rtk/both）被锁定，
     # 后续同 session 的请求复用，避免对比实验里某个 session 中途换挡。
-    # proxy 配置默认值仍可被首个请求的 X-Stela-Mode header 覆盖一次。
+    # proxy 配置默认值仍可被首个请求的 X-Telos-Mode header 覆盖一次。
     sticky_mode: str | None = None
-    # 对比实验分组标签（X-Stela-Compare-Group header）。同一 compare_group
+    # 对比实验分组标签（X-Telos-Compare-Group header）。同一 compare_group
     # 下、mode 不同的多个 session 会在 dashboard 上并排展示。
     compare_group: str | None = None
 
@@ -198,7 +198,7 @@ def _canonicalize_tool_def(payload: Any) -> Any:
     return _canonicalize_payload(payload)
 
 
-def _canonicalize_block(blk: StelaBlock) -> StelaBlock:
+def _canonicalize_block(blk: TelosBlock) -> TelosBlock:
     """规范化单个 block：tool 定义 / tool_use / tool_result 的字段排序。
 
     ``tool_def`` 走 schema-aware 路径（额外规范化 ``required`` 等集合数组）；
@@ -212,7 +212,7 @@ def _canonicalize_block(blk: StelaBlock) -> StelaBlock:
     return blk
 
 
-def _tool_name(blk: StelaBlock) -> str:
+def _tool_name(blk: TelosBlock) -> str:
     """从 tool_def block 提取工具名（Anthropic / OpenAI 两种 shape 都覆盖）。"""
     p = blk.payload
     if isinstance(p, dict):
@@ -227,7 +227,7 @@ def _tool_name(blk: StelaBlock) -> str:
     return blk.id
 
 
-def _tool_sort_key(blk: StelaBlock) -> tuple[int, str, str]:
+def _tool_sort_key(blk: TelosBlock) -> tuple[int, str, str]:
     """工具数组的稳定排序键：``(source_rank, mcp_server, name)``。
 
     - ``source_rank`` : builtin(0) → mcp(1) → user(2) → 未标记(3)
@@ -249,7 +249,7 @@ def _tool_sort_key(blk: StelaBlock) -> tuple[int, str, str]:
     return (rank, str(server or ""), _tool_name(blk))
 
 
-def _canonicalize_ir(ir: StelaIR) -> StelaIR:
+def _canonicalize_ir(ir: TelosIR) -> TelosIR:
     # tools: 每个 block 内部规范化 → 整个数组稳定排序（仍全是 PIN，不破坏 §5）
     canon_tools = sorted(
         (_canonicalize_block(b) for b in ir.tools),
@@ -259,7 +259,7 @@ def _canonicalize_ir(ir: StelaIR) -> StelaIR:
 
     new_system = tuple(_canonicalize_block(b) for b in ir.system)
     new_messages = tuple(
-        StelaMessage(role=m.role, blocks=tuple(_canonicalize_block(b) for b in m.blocks))
+        TelosMessage(role=m.role, blocks=tuple(_canonicalize_block(b) for b in m.blocks))
         for m in ir.messages
     )
     return replace(ir, tools=new_tools, system=new_system, messages=new_messages)
@@ -278,7 +278,7 @@ class Bridge:
 
     def __init__(
         self,
-        ir: StelaIR,
+        ir: TelosIR,
         engine: EngineAdapter,
         *,
         session_state: BridgeSessionState | None = None,
@@ -312,7 +312,7 @@ class Bridge:
     # 五个原语
     # ------------------------------------------------------------------
 
-    def place(self, segment: str, blocks: tuple[StelaBlock, ...]) -> "Bridge":
+    def place(self, segment: str, blocks: tuple[TelosBlock, ...]) -> "Bridge":
         """**Place**：替换某个段（``"tools"`` / ``"system"`` / ``"messages"``）的
         全部 blocks，并立即重新跑 §5 校验。
 
@@ -321,7 +321,7 @@ class Bridge:
         if segment == "tools":
             assert_band_order(blocks, "tools")
             if any(b.band is not Band.PIN for b in blocks):
-                raise StelaInvariantError("tools blocks must all be band=PIN")
+                raise TelosInvariantError("tools blocks must all be band=PIN")
             self._ir = replace(self._ir, tools=blocks)
         elif segment == "system":
             assert_band_order(blocks, "system")
@@ -330,7 +330,7 @@ class Bridge:
             raise ValueError(f"Unknown segment for place(): {segment!r}")
         return self
 
-    def append_message(self, msg: StelaMessage) -> "Bridge":
+    def append_message(self, msg: TelosMessage) -> "Bridge":
         """**Place** 的 message 专用快捷方式：追加一条新 message。
 
         每次追加都校验 message 内部的 §5 顺序——这是修复 Janus C6 的
@@ -347,7 +347,7 @@ class Bridge:
         矛盾，但 Pin 这里指的是"把这段大内容固定在 ref-pool 里、给它
         一个稳定的指针"，不是"band=PIN"）。
         """
-        blk = StelaBlock(
+        blk = TelosBlock(
             id=f"ref:{slug}",
             band=Band.FOLD,
             kind="text",
@@ -393,14 +393,14 @@ class Bridge:
         if message_range is not None:
             start, end = message_range
             if not (0 <= start < end <= len(self._ir.messages)):
-                raise StelaInvariantError(
+                raise TelosInvariantError(
                     f"Invalid message_range {message_range!r} for "
                     f"{len(self._ir.messages)} messages"
                 )
-            placeholder = StelaMessage(
+            placeholder = TelosMessage(
                 role="user",
                 blocks=(
-                    StelaBlock(
+                    TelosBlock(
                         id=f"folded:{start}-{end}",
                         band=Band.FOLD,
                         kind="text",
@@ -553,7 +553,7 @@ class Bridge:
         self._stats.real_requests_since_refresh += 1
         return wire
 
-    def snapshot_ir(self) -> StelaIR:
+    def snapshot_ir(self) -> TelosIR:
         """返回当前 IR 的快照（用于序列化 / 测试）。"""
         return self._ir
 
@@ -561,7 +561,7 @@ class Bridge:
         """打印当前 IR 的 band 分布；调试用。"""
         lines: list[str] = [f"-- session {self._ir.session_id} --"]
 
-        def fmt(blocks: tuple[StelaBlock, ...]) -> str:
+        def fmt(blocks: tuple[TelosBlock, ...]) -> str:
             return " | ".join(f"{b.band.value}:{b.id}" for b in blocks)
 
         lines.append(f"tools  : {fmt(self._ir.tools)}")

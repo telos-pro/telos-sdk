@@ -4,7 +4,7 @@
 - prompt-caching 文档：自动 prefix cache（≥ 1024 token 起 cache）、
   ``prompt_cache_key`` 影响路由、``prompt_cache_retention: "24h"`` 可选
   扩展保留（gpt-5.x / gpt-4.1）。
-- **没有显式 BP / TTL 控制**，STELA 的政策完全靠 layout 与 routing key。
+- **没有显式 BP / TTL 控制**，TELOS 的政策完全靠 layout 与 routing key。
 - 修复 R1：``prompt_cache_key`` 粒度规则反过来——OpenAI 文档明示
   *超过* 15 RPM/key 会 overflow，所以应当让单个 key **不超过** 15 RPM。
   实现策略：把 key 取得"足够细以覆盖前缀差异，但若 RPM 估计过高再加
@@ -18,8 +18,8 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from stela.engine.base import EmitPlan, EngineAdapter, EngineCapabilities
-from stela.ir import Band, StelaIR, UsageReport
+from telos.engine.base import EmitPlan, EngineAdapter, EngineCapabilities
+from telos.ir import Band, TelosIR, UsageReport
 
 
 # 监控到 key 接近这个值时上层应调用 shard()
@@ -42,7 +42,7 @@ class OpenAIAdapter(EngineAdapter):
     # plan_marks：OpenAI 没有 BP，唯一"政策"是 routing key
     # ------------------------------------------------------------------
 
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         return EmitPlan(
             slots=(),
             routing_key=self._derive_cache_key(ir),
@@ -53,8 +53,8 @@ class OpenAIAdapter(EngineAdapter):
     # emit
     # ------------------------------------------------------------------
 
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
-        # OpenAI 没有独立的 system 段配置；把 STELA system 拼成一条
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
+        # OpenAI 没有独立的 system 段配置；把 TELOS system 拼成一条
         # leading system message，DROP 的部分放最后但仍在 system 内
         # （仍占 cache 但 OpenAI 自动 prefix 会跳过尾部 mismatch）。
         system_pieces = [str(b.payload) for b in ir.system if b.band is not Band.DROP]
@@ -105,7 +105,7 @@ class OpenAIAdapter(EngineAdapter):
     # 内部
     # ------------------------------------------------------------------
 
-    def _derive_cache_key(self, ir: StelaIR) -> str:
+    def _derive_cache_key(self, ir: TelosIR) -> str:
         """hash(toolset, system_pin_payload, ref_slug_set) → routing 亲和键。"""
         h = hashlib.sha256()
         for blk in ir.tools:
@@ -117,9 +117,9 @@ class OpenAIAdapter(EngineAdapter):
         for slug in sorted(ir.ref_pool.keys()):
             h.update(b"\x00ref:")
             h.update(slug.encode())
-        return f"stela-{h.hexdigest()[:16]}"
+        return f"telos-{h.hexdigest()[:16]}"
 
-    def _choose_retention(self, ir: StelaIR) -> str | None:
+    def _choose_retention(self, ir: TelosIR) -> str | None:
         """``expected_turns >= 4`` 才开 24h（仅在 docs 列出的支持模型上）。"""
         supported = {
             "gpt-5", "gpt-5-codex", "gpt-5.1", "gpt-5.1-codex",

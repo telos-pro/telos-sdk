@@ -73,6 +73,33 @@ _MAX_CONNECT_RETRIES = 3
 _CONNECT_BACKOFF_BASE = 0.5   # 秒；指数退避 0.5 / 1.0 / 2.0
 
 
+def _wire_tool_result_first(req: Mapping[str, Any]) -> bool:
+    """校验请求体里每条 user message 的 tool_result 块都排在非 tool_result 之前。
+
+    Anthropic 要求 user message 的 tool_result 物理居首，违反会被 upstream 判
+    400。proxy 在发送前用它兜底——STELA 改写若产出非法 wire，退回 passthrough。
+    """
+    messages = req.get("messages")
+    if not isinstance(messages, list):
+        return True
+    for msg in messages:
+        if not isinstance(msg, Mapping) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        seen_non_tool_result = False
+        for blk in content:
+            if not isinstance(blk, Mapping):
+                continue
+            if blk.get("type") == "tool_result":
+                if seen_non_tool_result:
+                    return False
+            else:
+                seen_non_tool_result = True
+    return True
+
+
 # ---------------------------------------------------------------------------
 # 稳定 session-id 派生
 # ---------------------------------------------------------------------------
@@ -418,6 +445,21 @@ class ProxyApp:
         result.compare_group = compare_group
         result.tool_output_reduction = filter_reduction
 
+        # 发送前兜底校验：STELA 改写若产出结构非法的 wire（tool_result 不居首
+        # 等），不能让它打到 upstream 吃 400。退回 passthrough——未改写的
+        # effective_raw 结构合法。与 strict=False「优化层永不破坏正确性」一致。
+        if not _wire_tool_result_first(result.wire):
+            if _wire_tool_result_first(effective_raw):
+                _log.warning(
+                    "STELA wire failed tool_result-order check (call=%d) — "
+                    "falling back to passthrough", call_index)
+                result.wire = dict(effective_raw)
+                result.harness = "passthrough"
+            else:
+                _log.warning(
+                    "tool_result-order issue not introduced by STELA "
+                    "(call=%d) — forwarding request as-is", call_index)
+
         is_streaming = bool(raw.get("stream", False))
         url = f"{self.upstream}/v1/messages"
         headers = self._forward_headers(request)
@@ -470,6 +512,11 @@ class ProxyApp:
                 usage = parsed.get("usage") or {}
             except Exception:  # noqa: BLE001
                 pass
+        elif status >= 400:
+            # 记下 upstream 错误正文——4xx/5xx 的 body 通常直接说明原因
+            # （如 messages.N: tool_result 必须居首），是排查的第一手线索。
+            _log.warning("upstream %d (call=%d): %s", status, call_index,
+                         body[:2000].decode("utf-8", "replace"))
 
         self._accumulate_into_state(session_state, usage)
         latency_s = time.time() - t0
@@ -506,6 +553,9 @@ class ProxyApp:
                 ct = upstream.headers.get("content-type", "application/json")
             finally:
                 upstream.release()
+            if status >= 400:
+                _log.warning("upstream %d (call=%d): %s", status, call_index,
+                             body[:2000].decode("utf-8", "replace"))
             self._log_usage(
                 session_id, result, {}, session_state,
                 latency_s=time.time() - t0,

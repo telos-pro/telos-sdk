@@ -414,7 +414,81 @@ async def _test_502_after_exhausting_retries() -> None:
         await up_runner.cleanup()
 
 
+def test_wire_tool_result_first_helper() -> None:
+    """_wire_tool_result_first：tool_result 居首 → True，殿后 → False。"""
+    from stela.proxy.server import _wire_tool_result_first
+    ok = {"messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": "r"},
+        {"type": "text", "text": "go"}]}]}
+    bad = {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "go"},
+        {"type": "tool_result", "tool_use_id": "t", "content": "r"}]}]}
+    assert _wire_tool_result_first(ok) is True
+    assert _wire_tool_result_first(bad) is False
+    # 纯文本 / 纯 tool_result / 字符串 content 都算合法
+    assert _wire_tool_result_first({"messages": [
+        {"role": "user", "content": "hi"}]}) is True
+    print("✓ test_wire_tool_result_first_helper")
+
+
+async def _test_invalid_wire_falls_back_to_passthrough() -> None:
+    """STELA 产出 tool_result 殿后的非法 wire → proxy 退回 passthrough。"""
+    from stela.proxy import server as srv_mod
+
+    mock = _MockUpstream(sse=False)
+    up_runner, up_url = await _start_upstream(mock)
+    px_runner, px_url = await _start_proxy(up_url)
+
+    real = srv_mod.process_anthropic_request
+
+    def bad_wire(raw, **kw):
+        # 模拟 STELA bug：把每条 user message 的 tool_result 排到最后
+        res = real(raw, **kw)
+        for m in res.wire.get("messages", []):
+            c = m.get("content")
+            if m.get("role") == "user" and isinstance(c, list):
+                tr = [b for b in c if isinstance(b, dict)
+                      and b.get("type") == "tool_result"]
+                rest = [b for b in c if not (isinstance(b, dict)
+                        and b.get("type") == "tool_result")]
+                if tr and rest:
+                    m["content"] = rest + tr
+        return res
+
+    srv_mod.process_anthropic_request = bad_wire
+    try:
+        req = {
+            "model": "claude-opus-4-7", "max_tokens": 16, "stream": False,
+            "system": [{"type": "text", "text": "agent"}],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "do it"}]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu1", "name": "Bash",
+                     "input": {"command": "ls"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1",
+                     "content": "output"},
+                    {"type": "text", "text": "continue"}]},
+            ],
+        }
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{px_url}/v1/messages", json=req,
+                headers={"x-api-key": "k", "x-stela-session": "bad-wire"},
+            ) as resp:
+                assert resp.status == 200, await resp.text()
+        # upstream 收到的是退回 passthrough 的请求 —— tool_result 仍居首
+        last = mock.last_body["messages"][-1]["content"]
+        assert last[0]["type"] == "tool_result", last
+        print("✓ test_invalid_wire_falls_back_to_passthrough")
+    finally:
+        srv_mod.process_anthropic_request = real
+        await px_runner.cleanup()
+        await up_runner.cleanup()
+
+
 async def _run_all(tmp_log: Path) -> None:
+    test_wire_tool_result_first_helper()
     await _test_non_streaming()
     await _test_streaming_sse()
     await _test_usage_log_written(tmp_log)
@@ -423,6 +497,7 @@ async def _run_all(tmp_log: Path) -> None:
     await _test_strict_mode_returns_500_on_pipeline_failure()
     await _test_retries_transient_connect_failure()
     await _test_502_after_exhausting_retries()
+    await _test_invalid_wire_falls_back_to_passthrough()
 
 
 def main() -> None:

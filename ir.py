@@ -13,7 +13,10 @@
 不变量（由 bridge 在每次原语调用前后再校验，详见 ``bridge.py``）
 --------------------------------------------------------------
 **§5 顺序不变量**：在每个段（``tools`` / ``system`` / 每条 ``message``）
-内部，blocks 必须按 ``pin* → fold* → drop*`` 物理顺序排列。
+内部，blocks 必须按 ``pin* → fold* → drop*`` 物理顺序排列。例外：``message``
+段里的 ``tool_result`` 块一律排在最前（``tool_result* → pin* → fold* → drop*``）
+—— Anthropic 要求 user message 的 tool_result 物理居首，这条协议硬约束的
+优先级高于 band 排序。``tools`` / ``system`` 段不含 tool_result，不受影响。
 """
 
 from __future__ import annotations
@@ -89,8 +92,10 @@ class StelaMessage:
     """一条对话 message（user / assistant）。
 
     与一个 OpenAI / Anthropic 的 message 对应，但内部 blocks **必须**
-    按 §5 顺序排列。最常见的场景是 user message 被强制切成
-    ``(pin: 用户提问) + (fold: 历史回声 / [ref:...] 引用) + (drop: harness envelope)``。
+    按 §5 顺序排列：``tool_result*`` 居首（Anthropic 协议要求），其后
+    ``pin* → fold* → drop*``。最常见的场景是 user message 被强制切成
+    ``(tool_result: 上轮工具结果) + (pin: 用户提问) + (fold: 历史回声 /
+    [ref:...] 引用) + (drop: harness envelope)``。
     """
 
     role: Literal["system", "user", "assistant"]
@@ -146,34 +151,52 @@ class StelaInvariantError(ValueError):
     """§5 / canonical 化 / ref-pool 注册任一不变量被破坏时抛出。"""
 
 
+def _order_key(blk: StelaBlock) -> tuple[int, int]:
+    """message 内 block 的物理排序键。
+
+    ``tool_result`` 块必须物理居首 —— 这是 Anthropic 的协议硬约束（user
+    message 里 tool_result 必须排在所有其他内容之前），优先级高于 band 的
+    缓存生命周期排序。其余 block 按 ``pin* → fold* → drop*``。
+    """
+    return (0 if blk.kind == "tool_result" else 1, _BAND_RANK[blk.band])
+
+
 def enforce_band_order(blocks: Iterable[StelaBlock]) -> tuple[StelaBlock, ...]:
-    """把 blocks 按 ``pin* → fold* → drop*`` 稳定排序。
+    """把 blocks 按 ``tool_result* → pin* → fold* → drop*`` 稳定排序。
 
     Harness 在拼装一条 message 时常常会按 ``content[]`` 源顺序遍历，每个
     content item 自己 expand 出 (PIN, FOLD*, DROP*) 子序列；直接 ``extend``
     会让带交错（PIN, DROP, PIN, DROP, ...）违反 §5。Harness 应该在 message
     级别调用一次本函数兜底，再 freeze 成 ``StelaMessage.blocks``。
 
-    保证稳定：同一带内保留传入顺序——这关系到「问题 A 在问题 B 前」的
+    ``tool_result`` 块无论 band 一律排到最前 —— Anthropic 要求 user message
+    的 tool_result 物理居首，排到 text 之后会被 API 判 400。
+
+    保证稳定：同一组内保留传入顺序——这关系到「问题 A 在问题 B 前」的
     语义可读性，不能乱跳。
     """
-    return tuple(sorted(blocks, key=lambda b: _BAND_RANK[b.band]))
+    return tuple(sorted(blocks, key=_order_key))
 
 
 def assert_band_order(blocks: tuple[StelaBlock, ...], where: str) -> None:
-    """断言 blocks 满足 ``pin* → fold* → drop*`` 严格顺序。
+    """断言 blocks 满足 ``tool_result* → pin* → fold* → drop*`` 严格顺序。
 
     复杂度 O(n)，单次扫描；bridge 在每次原语调用前后都会跑一次，开销
     可以忽略——这是整个协议的"安全门"。
+
+    ``tool_result`` 块视作 rank ``-1``：必须排在所有非 tool_result 之前
+    （Anthropic 协议要求），出现在 text 之后即判违规。``tools`` / ``system``
+    段不含 tool_result，校验行为与原先完全一致。
     """
-    last_rank = -1
+    last_rank = -2
     for blk in blocks:
-        rank = _BAND_RANK[blk.band]
+        rank = -1 if blk.kind == "tool_result" else _BAND_RANK[blk.band]
         if rank < last_rank:
             raise StelaInvariantError(
-                f"Band order violated in {where}: block {blk.id!r} has band "
-                f"{blk.band.value!r} after a higher-band block. Required order "
-                f"is pin* -> fold* -> drop*."
+                f"Band order violated in {where}: block {blk.id!r} "
+                f"(kind={blk.kind!r}, band={blk.band.value!r}) appears after a "
+                f"higher-rank block. Required order is "
+                f"tool_result* -> pin* -> fold* -> drop*."
             )
         last_rank = rank
 

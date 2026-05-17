@@ -33,10 +33,11 @@ def _user_with_n_text_blocks(n: int) -> dict:
 
 
 def _assert_band_order(blocks) -> None:
+    """§5 顺序：tool_result* → pin* → fold* → drop*（tool_result 视作 rank -1）。"""
     rank = {Band.PIN: 0, Band.FOLD: 1, Band.DROP: 2}
-    last = -1
+    last = -2
     for b in blocks:
-        r = rank[b.band]
+        r = -1 if b.kind == "tool_result" else rank[b.band]
         assert r >= last, f"violation: {b.id} band={b.band} after rank={last}"
         last = r
 
@@ -75,7 +76,7 @@ def test_pins_preserved_in_source_order() -> None:
 
 
 def test_user_text_then_tool_result_then_text() -> None:
-    """混合 text + tool_result + text：tool_result 是 FOLD，DROP 在最后。"""
+    """混合 text + tool_result + text：tool_result 居首，其余 pin*→fold*→drop*。"""
     req = {
         "model": "claude-opus-4-7",
         "max_tokens": 64,

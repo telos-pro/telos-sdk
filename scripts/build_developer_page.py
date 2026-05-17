@@ -134,6 +134,10 @@ pre.raw { background: #0a0d12; border: 1px solid #21262d; border-radius: 6px;
   padding: 10px 12px; overflow-x: auto; font-size: 11px; color: #c9d1d9;
   margin: 0; max-height: 240px; }
 .refresh-bar { color: #7d8590; font-size: 11px; margin-top: 4px; }
+.raw-preview { font-family: monospace; font-size: 10.5px; color: #8b949e;
+  white-space: pre-wrap; word-break: break-word; margin: 2px 0 0 0;
+  padding: 4px 8px; background: #0a0d12; border-radius: 4px;
+  border-left: 2px solid #21262d; max-height: 120px; overflow-y: auto; }
 """
 
 
@@ -403,7 +407,53 @@ def _render_session_detail(entry, registry: "_SessionRegistry",
 </div>
 """
 
-    return kpis + region_html + calls_html + messages_html + tools_html + api_html
+    # ---- original (pre-STELA) messages ----
+    raw_messages_html = _render_raw_messages(entry)
+
+    return kpis + region_html + raw_messages_html + calls_html + messages_html + tools_html + api_html
+
+
+def _render_raw_messages(entry) -> str:
+    """渲染最近一次 call 的原始（STELA 改写前）messages 摘要。
+
+    每条 message 列出 role + 各 content block 的 type / 字符数 / 文本预览。
+    数据来自 ``calls[-1]["raw_messages"]``（proxy 层在每次 call 时回填）。
+    """
+    last = entry.calls[-1] if entry.calls else None
+    raw_msgs = (last or {}).get("raw_messages") or []
+    rows = []
+    for i, m in enumerate(raw_msgs):
+        blks = []
+        for b in m.get("blocks") or []:
+            btype = b.get("type", "?")
+            chars = int(b.get("chars", 0))
+            extra = b.get("extra") or ""
+            preview = b.get("preview") or ""
+            ell = "…" if b.get("truncated") else ""
+            label = html.escape(str(btype))
+            if extra:
+                label += f' · <span class="muted">{html.escape(str(extra))}</span>'
+            blks.append(
+                f'<div style="margin:3px 0">'
+                f'<span class="blk-pill" style="background:#58a6ff22;color:#79c0ff">'
+                f'{label} <b>{chars:,}c</b></span>'
+                f'<div class="raw-preview">{html.escape(preview)}{ell}</div>'
+                f'</div>'
+            )
+        rows.append(
+            f'<div class="msg-row">'
+            f'<div class="idx">msg[{i}]</div>'
+            f'<div class="role">{html.escape(m.get("role","?"))}</div>'
+            f'<div class="blocks">{"".join(blks) or "<span class=muted>(empty)</span>"}</div>'
+            f'</div>'
+        )
+    ci = (last or {}).get("call_index", "?")
+    return f"""
+<div class="card">
+  <h2>Original messages · pre-STELA raw request (call #{ci})</h2>
+  {''.join(rows) or '<div class="muted">no raw messages captured yet</div>'}
+</div>
+"""
 
 
 def render_developer(

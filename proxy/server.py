@@ -200,6 +200,79 @@ def _anthropic_error(status: int, err_type: str, message: str) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# 原始 message 摘要（developer 页面展示 STELA 改写前的对话原貌）
+# ---------------------------------------------------------------------------
+
+_RAW_MSG_PREVIEW_CHARS = 240
+
+
+def _summarize_raw_block(blk: Mapping[str, Any]) -> dict[str, Any]:
+    """单个 content block → 摘要 dict（type / chars / preview / extra）。
+
+    text → 文本本身；tool_use → input JSON（extra=工具名）；
+    tool_result → content（extra=tool_use_id）；其余 → 整块 JSON。
+    preview 截断到 ``_RAW_MSG_PREVIEW_CHARS``。
+    """
+    btype = str(blk.get("type", "?"))
+    extra = ""
+    if btype == "text":
+        preview = str(blk.get("text") or "")
+    elif btype == "tool_use":
+        preview = json.dumps(blk.get("input") or {}, ensure_ascii=False,
+                             default=str)
+        extra = str(blk.get("name") or "")
+    elif btype == "tool_result":
+        content = blk.get("content")
+        preview = (content if isinstance(content, str)
+                   else json.dumps(content, ensure_ascii=False, default=str))
+        extra = str(blk.get("tool_use_id") or "")
+    else:
+        preview = json.dumps(blk, ensure_ascii=False, default=str)
+    chars = len(preview)
+    return {
+        "type": btype,
+        "chars": chars,
+        "preview": preview[:_RAW_MSG_PREVIEW_CHARS],
+        "truncated": chars > _RAW_MSG_PREVIEW_CHARS,
+        "extra": extra,
+    }
+
+
+def _summarize_raw_messages(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """从原始 ``/v1/messages`` 请求体抽每条 message 的摘要。
+
+    返回 ``[{"role", "blocks": [<block 摘要>...]}, ...]``。content 为 string
+    时归一成单个 text block。出错绝不抛——developer 页面永远要能渲染。
+    """
+    messages = raw.get("messages")
+    if not isinstance(messages, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, Mapping):
+            continue
+        role = str(msg.get("role", "?"))
+        content = msg.get("content")
+        blocks: list[dict[str, Any]] = []
+        if isinstance(content, str):
+            blocks.append(_summarize_raw_block({"type": "text", "text": content}))
+        elif isinstance(content, list):
+            for blk in content:
+                if isinstance(blk, Mapping):
+                    blocks.append(_summarize_raw_block(blk))
+                else:
+                    s = str(blk)
+                    blocks.append({
+                        "type": "?", "chars": len(s),
+                        "preview": s[:_RAW_MSG_PREVIEW_CHARS],
+                        "truncated": len(s) > _RAW_MSG_PREVIEW_CHARS,
+                        "extra": "",
+                    })
+        out.append({"role": role, "blocks": blocks})
+    return out
+
+
+# ---------------------------------------------------------------------------
 # ProxyApp：持有共享 session + 处理 handler
 # ---------------------------------------------------------------------------
 
@@ -448,6 +521,8 @@ class ProxyApp:
         result.mode = mode.label
         result.compare_group = compare_group
         result.tool_output_reduction = filter_reduction
+        # 原始（STELA 改写前）请求的 message 摘要，供 developer 页面展示。
+        result.raw_messages = _summarize_raw_messages(raw)
 
         # 发送前兜底校验：STELA 改写若产出结构非法的 wire（tool_result 不居首
         # 等），不能让它打到 upstream 吃 400。退回 passthrough——未改写的
@@ -781,6 +856,7 @@ class ProxyApp:
                 plan_slots=list(result.plan_slots),
                 tool_uses=list(result.tool_uses),
                 tool_results=list(result.tool_results),
+                raw_messages=list(result.raw_messages),
                 usage_norm=_normalize_usage(dict(usage)),
                 usage_raw=dict(usage),
                 latency_s=latency_s,

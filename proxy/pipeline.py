@@ -60,6 +60,9 @@ class PipelineResult:
     mode: str = "stela"
     compare_group: str | None = None
     tool_output_reduction: dict[str, Any] = field(default_factory=dict)
+    # 原始（STELA 改写前）请求里每条 message 的摘要，供 developer 页面展示。
+    # 由 proxy 层在 handle_messages 里回填；pipeline 本身不设置。
+    raw_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 def process_anthropic_request(

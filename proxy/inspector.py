@@ -83,6 +83,7 @@ class SessionInspectorEntry:
         latency_s: float,
         model: str,
         harness: str,
+        raw_messages: list[dict[str, Any]] | None = None,
     ) -> None:
         """一次 call 完成后，累加 inspector 状态。
 
@@ -121,6 +122,7 @@ class SessionInspectorEntry:
             "n_tool_results": len(tool_results),
             "tool_uses": list(tool_uses),
             "tool_results": list(tool_results),
+            "raw_messages": list(raw_messages or []),
         })
         if len(self.calls) > INSPECTOR_HISTORY:
             del self.calls[: -INSPECTOR_HISTORY]

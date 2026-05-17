@@ -1,6 +1,6 @@
-# STELA: A Three-Layer Protocol for Cache-Friendly Agent Prompts
+# TELOS: A Three-Layer Protocol for Cache-Friendly Agent Prompts
 
-**Name**: **STELA** — *Stable prefix · Tiered bands · Ephemeral tail · Layered adapters · Anchored marks*
+**Name**: **TELOS** — *Stable prefix · Tiered bands · Ephemeral tail · Layered adapters · Anchored marks*
 **Status**: Design v1 (derived from Janus-Prompt v2, simplified)
 **Date**: 2026-05-06
 **Audience**: agent framework integrators (OpenClaw, Hermes / Claude Code), inference-side adapter authors
@@ -8,15 +8,15 @@
 
 ---
 
-## 0. Why "STELA"
+## 0. Why "TELOS"
 
-A *stela* is an upright stone slab carved with a durable inscription at the base and ephemeral notes added above over time. The metaphor maps exactly:
+A *telos* is an upright stone slab carved with a durable inscription at the base and ephemeral notes added above over time. The metaphor maps exactly:
 
-1. **A stable inscription at the base.** The durable prefix (tools + system pin + ref-pool) is carved once and reused across every turn — like the base inscription on a stela that outlives generations of additions.
+1. **A stable inscription at the base.** The durable prefix (tools + system pin + ref-pool) is carved once and reused across every turn — like the base inscription on a telos that outlives generations of additions.
 2. **Ephemeral marks layered above.** Per-turn content (drop band) is added on top, never disturbing the base. Foldable history (fold band) sits in the middle: it can be erased and replaced with a shorter summary without re-cutting the base.
-3. **Anchors at fixed depths.** Cache breakpoints (the "Marks" in *Indexed Span Marking*) are placed at well-known depths that every engine adapter can find — the way a stela's inscription bands are read at fixed rows.
+3. **Anchors at fixed depths.** Cache breakpoints (the "Marks" in *Indexed Span Marking*) are placed at well-known depths that every engine adapter can find — the way a telos's inscription bands are read at fixed rows.
 
-Compared to Janus-Prompt: same physics, ⅓ the surface area. STELA keeps the *ordering invariant* (the only thing that actually wins cache) and drops the parts that mostly explain themselves (TTL philosophy, FAQs, second-round-review-of-second-round-review). Bridge logic that Janus splits across 6 sub-modules collapses into 5 composable primitives.
+Compared to Janus-Prompt: same physics, ⅓ the surface area. TELOS keeps the *ordering invariant* (the only thing that actually wins cache) and drops the parts that mostly explain themselves (TTL philosophy, FAQs, second-round-review-of-second-round-review). Bridge logic that Janus splits across 6 sub-modules collapses into 5 composable primitives.
 
 ---
 
@@ -30,7 +30,7 @@ Compared to Janus-Prompt: same physics, ⅓ the surface area. STELA keeps the *o
 | G4 | Engine adapters degrade gracefully — same IR, weaker guarantees on weaker engines | Pretending DeepSeek has TTL knobs it doesn't |
 | G5 | Verifiable against [CLAUDE.md](../CLAUDE.md)'s four north-star metrics | Cache-hit-ratio as a headline (it's a diagnostic, see §1.1 of Janus doc) |
 
-**Success criteria** (per CLAUDE.md): on the same SWE-bench / Polyglot dataset, with STELA enabled vs. baseline:
+**Success criteria** (per CLAUDE.md): on the same SWE-bench / Polyglot dataset, with TELOS enabled vs. baseline:
 
 - `tokens_per_resolved_task` ↓ by ≥ X%
 - `resolved_rate` does not drop
@@ -48,9 +48,9 @@ Compared to Janus-Prompt: same physics, ⅓ the surface area. STELA keeps the *o
                         ▼               ▼
                 ┌──────────────────────────────┐
    Layer 1      │       HARNESS PLUGIN          │   adapter per upstream
-   (parse)      │  raw request  →  STELA IR     │   stateless, mechanical
+   (parse)      │  raw request  →  TELOS IR     │   stateless, mechanical
                 └──────────────┬────────────────┘
-                               │  STELA IR (tri-banded blocks +
+                               │  TELOS IR (tri-banded blocks +
                                │             ref-pool + session ctx)
                                ▼
                 ┌──────────────────────────────┐
@@ -59,12 +59,12 @@ Compared to Janus-Prompt: same physics, ⅓ the surface area. STELA keeps the *o
                 │   Place · Pin · Mark ·        │   stateful (per session)
                 │   Fold  · Refresh             │
                 └──────────────┬────────────────┘
-                               │  STELA IR (rewritten,
+                               │  TELOS IR (rewritten,
                                │             with Mark/Pin annotations)
                                ▼
                 ┌──────────────────────────────┐
    Layer 3      │       ENGINE ADAPTER          │   one per inference API
-   (emit)       │  STELA IR → wire request      │   stateless, capability-driven
+   (emit)       │  TELOS IR → wire request      │   stateless, capability-driven
                 └──────┬─────────────┬───────┬──┘
                        │             │       │
                        ▼             ▼       ▼
@@ -82,7 +82,7 @@ Layers communicate by **value** (one IR object passed down). No layer reaches up
 
 ---
 
-## 3. The STELA IR (Layer 1 ↔ Layer 2 ↔ Layer 3 contract)
+## 3. The TELOS IR (Layer 1 ↔ Layer 2 ↔ Layer 3 contract)
 
 ```ts
 type Band = "pin" | "fold" | "drop";
@@ -91,7 +91,7 @@ type Band = "pin" | "fold" | "drop";
 //          │       └────────── caches but may be folded on compact (5-min class)
 //          └────────────────── caches and stays (1-hour class; the durable prefix)
 
-interface StelaBlock {
+interface TelosBlock {
   id: string;             // stable within a session
   band: Band;
   kind: "text" | "tool_def" | "tool_use" | "tool_result" | "image" | "thinking";
@@ -100,17 +100,17 @@ interface StelaBlock {
   sourceTag?: string;     // diagnostic: which harness rule produced this band
 }
 
-interface StelaMessage {
+interface TelosMessage {
   role: "system" | "user" | "assistant";
-  blocks: StelaBlock[];   // ordered: must satisfy band ordering invariant (see §5)
+  blocks: TelosBlock[];   // ordered: must satisfy band ordering invariant (see §5)
 }
 
-interface StelaIR {
+interface TelosIR {
   sessionId: string;
-  tools: StelaBlock[];          // all band="pin" by construction
-  system: StelaBlock[];
-  messages: StelaMessage[];
-  refPool: Record<string, StelaBlock>;  // slug → block; rendered into `system` by bridge
+  tools: TelosBlock[];          // all band="pin" by construction
+  system: TelosBlock[];
+  messages: TelosMessage[];
+  refPool: Record<string, TelosBlock>;  // slug → block; rendered into `system` by bridge
   hints: {
     engine: "anthropic" | "openai" | "deepseek";
     model: string;
@@ -119,7 +119,7 @@ interface StelaIR {
 }
 ```
 
-That's the entire vocabulary between layers. Five fields on `StelaBlock`, three on `StelaMessage`, six on `StelaIR`. No span maps, no fold groups, no out-of-band headers.
+That's the entire vocabulary between layers. Five fields on `TelosBlock`, three on `TelosMessage`, six on `TelosIR`. No span maps, no fold groups, no out-of-band headers.
 
 ---
 
@@ -128,7 +128,7 @@ That's the entire vocabulary between layers. Five fields on `StelaBlock`, three 
 Janus's single most useful construct: every large blob (file content, doc, big tool result) lives in a **ref-pool** keyed by a stable slug. Anywhere else in the prompt, it is referenced by slug only.
 
 ```jsonc
-// ref-pool entry (lives in StelaIR.refPool, rendered into system)
+// ref-pool entry (lives in TelosIR.refPool, rendered into system)
 { "id": "ref:login.py", "band": "fold", "refSlug": "login.py",
   "kind": "text", "payload": "<4000 lines>" }
 
@@ -154,7 +154,7 @@ The bridge keeps a frozen `Set<slug>` per session. Emit-time lint scans every te
   pin*   →   fold*   →   drop*
 ```
 
-Every other STELA rule is a corollary of this one. If you violate it:
+Every other TELOS rule is a corollary of this one. If you violate it:
 
 - a `drop` block earlier than a `pin` block poisons the prefix hash → no cache hit ever
 - a `fold` block earlier than a `pin` block means folding it later breaks the durable prefix
@@ -170,7 +170,7 @@ The user-message split rule from Janus §3.2 follows directly: a user message is
 1. **Tools-array stable order.** `ir.tools` is sorted by `(source_rank, mcp_server, name)` where `source_rank` is `builtin(0) → mcp(1) → user(2) → untagged(3)`. This neutralizes two common cache-prefix breakers:
    - MCP discovery races that re-permute the tools list between sessions
    - harnesses that splice "new" tools to the front of the list and silently invalidate every historical session's PIN prefix
-   Source is read from `StelaBlock.extra["source"]` (and optional `extra["mcp_server"]`); harnesses are expected to tag, untagged tools rank last (safe default — costs stability, never correctness).
+   Source is read from `TelosBlock.extra["source"]` (and optional `extra["mcp_server"]`); harnesses are expected to tag, untagged tools rank last (safe default — costs stability, never correctness).
 
 2. **Set-semantic schema arrays sorted.** Inside a `tool_def` block's schema subtree (Anthropic `input_schema`, OpenAI `function.parameters`), arrays whose key is in `_SCHEMA_SET_ARRAY_KEYS = {"required"}` are sorted as strings. Conservative on purpose — `enum` / `examples` / `anyOf` / `oneOf` / `allOf` are *not* sorted because some prompts rely on their order. The set is module-level on `bridge` so a harness with a special tool can monkey-patch.
 
@@ -182,7 +182,7 @@ The wire-side guarantee: shuffling input tool order or shuffling a `required` ar
 
 ## 6. The Five Bridge Primitives
 
-The bridge holds session state and exposes exactly five operations. Each is a pure function `StelaIR → StelaIR` (or `→ EmitPlan` for `Mark`).
+The bridge holds session state and exposes exactly five operations. Each is a pure function `TelosIR → TelosIR` (or `→ EmitPlan` for `Mark`).
 
 | # | Primitive | Signature | What it does |
 |---|---|---|---|
@@ -210,10 +210,10 @@ That's it. Compact = `Fold` over the whole foldable region. TTL refresh = `Refre
 A harness plugin is a stateless function:
 
 ```ts
-function parse(rawAgentRequest: unknown, sessionCtx: SessionCtx): StelaIR
+function parse(rawAgentRequest: unknown, sessionCtx: SessionCtx): TelosIR
 ```
 
-Two reference plugins ship with STELA:
+Two reference plugins ship with TELOS:
 
 ### 7.1 OpenClaw plugin
 
@@ -221,7 +221,7 @@ Input: OpenClaw `/v1/messages`-shaped request (Anthropic-compatible) plus OpenCl
 
 Banding rules (mechanical):
 
-| OpenClaw input | STELA band |
+| OpenClaw input | TELOS band |
 |---|---|
 | `tools[]` | `pin` |
 | `system[]` (top of stack) | `pin` |
@@ -238,7 +238,7 @@ The split of user messages into `(pin, fold, drop)` sub-blocks is the only non-t
 
 Same shape. Differences from OpenClaw:
 
-| Hermes input | STELA band |
+| Hermes input | TELOS band |
 |---|---|
 | `<system-reminder>...</system-reminder>` blocks | `drop` |
 | `<command-message>` / `<command-name>` | `drop` |
@@ -256,8 +256,8 @@ Each adapter implements:
 ```ts
 interface EngineAdapter {
   capabilities: EngineCapabilities;
-  planMarks(ir: StelaIR): EmitPlan;          // bridge.Mark() delegates here
-  emit(ir: StelaIR, plan: EmitPlan): WireRequest;
+  planMarks(ir: TelosIR): EmitPlan;          // bridge.Mark() delegates here
+  emit(ir: TelosIR, plan: EmitPlan): WireRequest;
   refresh(plan: EmitPlan, slot: SlotId): Promise<void> | null;
   parseUsage(wireResponse: unknown): UsageReport;
 }
@@ -278,7 +278,7 @@ Below: how each adapter's `planMarks` and `emit` actually work, grounded in the 
 
 **Capabilities**: explicit breakpoints (≤4 slots), 5m + 1h TTL, `max_tokens:0` prewarm, 20-block lookback, hierarchy `tools → system → messages`, mixed-TTL ordering rule (1h must precede 5m).
 
-**`planMarks`** — derives 4 breakpoints directly from STELA bands:
+**`planMarks`** — derives 4 breakpoints directly from TELOS bands:
 
 | Slot | Position | TTL | Source band |
 |---|---|---|---|
@@ -291,7 +291,7 @@ If `tools` has no boundary distinct from `system`, BP-T is dropped and that slot
 
 The 1h-before-5m ordering invariant is satisfied automatically by §5 (pin precedes fold, system precedes messages).
 
-**`emit`**: STELA IR → standard Anthropic request. Each `drop` block is emitted *after* the last block carrying `cache_control` in its segment, so it never enters any prefix hash. Tool input dicts are key-sorted (Anthropic explicitly calls out Swift/Go-style key randomization as a cache breaker; we canonicalize once at emit).
+**`emit`**: TELOS IR → standard Anthropic request. Each `drop` block is emitted *after* the last block carrying `cache_control` in its segment, so it never enters any prefix hash. Tool input dicts are key-sorted (Anthropic explicitly calls out Swift/Go-style key randomization as a cache breaker; we canonicalize once at emit).
 
 **`refresh`**: fires a `max_tokens: 0` request whose system+tools mirror the live IR up to BP-S (the durable system anchor). Adaptive cadence per Janus §6.3.1: skip the refresh if `recent_real_requests < REFRESH_THRESHOLD`. Refresh requests force `stream=false`, `thinking.type=disabled`, `tool_choice="auto"` (Anthropic's documented `max_tokens:0` constraints).
 
@@ -301,7 +301,7 @@ The 1h-before-5m ordering invariant is satisfied automatically by §5 (pin prece
 
 **Capabilities**: fully automatic prefix cache (1024-token minimum), `prompt_cache_key` for routing affinity, `prompt_cache_retention: "24h"` opt-in extended retention. **No explicit breakpoints, no TTL knob beyond the retention policy**.
 
-**`planMarks`** returns an empty breakpoint list. The "policy" STELA exerts on OpenAI is entirely:
+**`planMarks`** returns an empty breakpoint list. The "policy" TELOS exerts on OpenAI is entirely:
 
 1. **Physical ordering** (§5): pin/fold/drop layout means OpenAI's automatic prefix matcher finds the longest stable prefix at the front, exactly as its docs recommend ("static content at the beginning, variable content at the end").
 2. **`prompt_cache_key` derivation**: hash of `(toolset_id, system_pin_hash, ref_pool_pinned_slugs)`. This routes requests with the same durable prefix to the same machine, which OpenAI's docs identify as the difference between hitting cache and missing it for any given request. Granularity is chosen so each key sees ≥ 15 RPM (their published overflow threshold).
@@ -335,7 +335,7 @@ The 1h-before-5m ordering invariant is satisfied automatically by §5 (pin prece
 
 **Bidirectional ops** (vLLM-specific, beyond what closed APIs allow):
 
-| STELA op → vLLM action | Mechanism |
+| TELOS op → vLLM action | Mechanism |
 |---|---|
 | `Mark(pin)` → server-side **pin** | request extension `cache_policy: {"pin_prefix_until": <block_idx>}`; LRU eviction skipped for pinned blocks |
 | `Refresh` → **prewarm** | `max_tokens: 1, ignore_eos: false` request that touches the BP-bearing prefix; vLLM materializes the KV blocks without serving real output |
@@ -357,7 +357,7 @@ The 1h-before-5m ordering invariant is satisfied automatically by §5 (pin prece
 
 **Bidirectional ops** (a superset of vLLM's, plus cache-aware scheduling):
 
-| STELA op → SGLang action | Mechanism |
+| TELOS op → SGLang action | Mechanism |
 |---|---|
 | `Mark(pin)` → **lock_radix** | request extension `cache_control: {"lock_radix_path": true, "path_hash": <sha>}`; pins the radix path against eviction |
 | `Refresh` → **prewarm** | `max_tokens: 1` plus `cache_control: {"prewarm_only": true}`; SGLang fills the radix path without scheduling generation |
@@ -368,17 +368,17 @@ The 1h-before-5m ordering invariant is satisfied automatically by §5 (pin prece
 
 **`planMarks`**: like vLLM, returns pin/unpin indices. Additionally returns `affinity_key` (hash of toolset + system pin + ref-pool slugs) so the SGLang scheduler can batch sibling requests.
 
-**`emit`**: OpenAI-compatible payload + `cache_control` extension. The `fork_from_path` op for `Fold` is the one place where STELA emits a *non-OpenAI-compatible* request body — because no closed API has anything resembling it. Adapter falls back to vanilla emit if SGLang version doesn't advertise the capability.
+**`emit`**: OpenAI-compatible payload + `cache_control` extension. The `fork_from_path` op for `Fold` is the one place where TELOS emits a *non-OpenAI-compatible* request body — because no closed API has anything resembling it. Adapter falls back to vanilla emit if SGLang version doesn't advertise the capability.
 
 **`refresh`**: real implementation, reuses the prewarm + lookup pair.
 
 **`parseUsage`**: SGLang returns `usage.prompt_tokens`, `usage.cached_tokens`, and (with HiCache) `usage.cache_hierarchy_breakdown: {gpu, cpu, disk}`. We surface the breakdown in `UsageReport.raw` for diagnostics; the headline `cache_read` is the sum.
 
-### 8.6 Why open-source engines unlock the **bidirectional** half of STELA
+### 8.6 Why open-source engines unlock the **bidirectional** half of TELOS
 
-The closed APIs (Anthropic / OpenAI / DeepSeek) are **uni-directional**: STELA emits a request, the engine decides what to cache, STELA reads the receipt in `usage`. There is no way to ask "do you still have my prefix?" or "please drop this span and accept a summary in its place."
+The closed APIs (Anthropic / OpenAI / DeepSeek) are **uni-directional**: TELOS emits a request, the engine decides what to cache, TELOS reads the receipt in `usage`. There is no way to ask "do you still have my prefix?" or "please drop this span and accept a summary in its place."
 
-vLLM and SGLang are **bi-directional**: STELA can both *read* the cache state (probe, hierarchy breakdown) and *write* it (pin, evict-span, fork-and-replace, tier hint). This is what makes the `Fold` primitive a real co-op compact instead of a client-side rewrite — the server keeps the prefix's KV blocks and only re-encodes the (shorter) summary tail.
+vLLM and SGLang are **bi-directional**: TELOS can both *read* the cache state (probe, hierarchy breakdown) and *write* it (pin, evict-span, fork-and-replace, tier hint). This is what makes the `Fold` primitive a real co-op compact instead of a client-side rewrite — the server keeps the prefix's KV blocks and only re-encodes the (shorter) summary tail.
 
 Concretely, three things that are impossible on closed APIs become trivial here:
 
@@ -413,7 +413,7 @@ turn 5, OpenClaw on Claude Sonnet 4.6
 1. OpenClaw POST /v1/messages → harness plugin
      → splits user message into (pin: query, drop: <environment_info>)
      → prior tool_result is fold
-     → returns StelaIR
+     → returns TelosIR
 
 2. Bridge:
      - Place(query, pin) ✓ already
@@ -446,13 +446,13 @@ Same IR re-routed to DeepSeek would skip steps 2's Mark and step 3's `cache_cont
 
 ## 10. Verification
 
-STELA ships with three test suites, all runnable from `agent-janus/bridge`:
+TELOS ships with three test suites, all runnable from `agent-janus/bridge`:
 
 | Suite | What it asserts |
 |---|---|
-| `stela/invariants.spec` | §5 ordering holds after every primitive; ref-pool slugs frozen; `drop` blocks emitted last; tool-input keys sorted |
-| `stela/engine-adapters.spec` | Recorded fixtures for each engine: same IR → byte-stable wire request; usage parsing round-trip |
-| `stela/efficiency.bench` | On `swe-bench-pure-python-sample`, gates: `tokens_per_resolved` ≤ baseline, `resolved_rate` ≥ baseline, `cache_read_total` ≥ baseline (CLAUDE.md north-star) |
+| `telos/invariants.spec` | §5 ordering holds after every primitive; ref-pool slugs frozen; `drop` blocks emitted last; tool-input keys sorted |
+| `telos/engine-adapters.spec` | Recorded fixtures for each engine: same IR → byte-stable wire request; usage parsing round-trip |
+| `telos/efficiency.bench` | On `swe-bench-pure-python-sample`, gates: `tokens_per_resolved` ≤ baseline, `resolved_rate` ≥ baseline, `cache_read_total` ≥ baseline (CLAUDE.md north-star) |
 
 The first suite runs in the type checker for IR-level invariants and in unit tests for runtime checks. The third suite is the only one that gates a release.
 
@@ -460,23 +460,23 @@ The first suite runs in the type checker for IR-level invariants and in unit tes
 
 ## 11. Mapping to Existing Code
 
-| STELA concept | Lives in |
+| TELOS concept | Lives in |
 |---|---|
-| `StelaIR`, `StelaBlock`, bands | new `agent-janus/bridge/src/stela/ir.ts` |
-| 5 primitives | new `agent-janus/bridge/src/stela/bridge.ts` |
+| `TelosIR`, `TelosBlock`, bands | new `agent-janus/bridge/src/telos/ir.ts` |
+| 5 primitives | new `agent-janus/bridge/src/telos/bridge.ts` |
 | Harness plugins | extends `agent-janus/plugins/harness/{anthropic-messages,openai-responses}` |
 | Engine adapters | extends `agent-janus/plugins/engine/{anthropic-passthrough,openai-passthrough}`; new `deepseek-passthrough` |
-| Ref-pool registry | new `agent-janus/bridge/src/stela/ref-pool.ts` |
-| Anthropic Mark planner | new `agent-janus/bridge/src/stela/marks-anthropic.ts` |
+| Ref-pool registry | new `agent-janus/bridge/src/telos/ref-pool.ts` |
+| Anthropic Mark planner | new `agent-janus/bridge/src/telos/marks-anthropic.ts` |
 | User-message splitter (drop envelope) | reuse / extend existing `efficiency/prefix-normalization/system.ts :: stripDynamicFields` |
 
-STELA does **not** require any new files outside `bridge/src/stela/` and the named adapters. The existing `efficiency/` strategy modules from the Janus design (A through F) are not part of STELA's surface area; they remain available as bridge implementation details, but the contract above does not mention them.
+TELOS does **not** require any new files outside `bridge/src/telos/` and the named adapters. The existing `efficiency/` strategy modules from the Janus design (A through F) are not part of TELOS's surface area; they remain available as bridge implementation details, but the contract above does not mention them.
 
 ---
 
-## 12. What STELA Drops From Janus (Deliberately)
+## 12. What TELOS Drops From Janus (Deliberately)
 
-| Janus concept | STELA disposition | Why |
+| Janus concept | TELOS disposition | Why |
 |---|---|---|
 | Tri-color names (`need_cache` / `need_cache_foldable` / `no_cache`) | renamed `pin` / `fold` / `drop` | Shorter, action-verb, harder to confuse |
 | 4 named breakpoints (BP0..BP3) | implicit, derived per emit by `Mark` | Slot management is engine-specific; not a cross-engine concept |
@@ -486,7 +486,7 @@ STELA does **not** require any new files outside `bridge/src/stela/` and the nam
 | Adaptive refresh formula derivation | one sentence in §8.1 | The math is in Janus §6.3.1 for anyone who needs to redo it |
 | Two compact modes (fallback / cooperative) | one mode (Fold), with `coopHint` parameter for forward-compat | Cooperative is a future capability, not a parallel architecture |
 
-The full theoretical treatment, including the cost model and the second-round-review history, stays in [2026-05-06-janus-prompt-architecture.md](2026-05-06-janus-prompt-architecture.md). STELA is the shipping protocol.
+The full theoretical treatment, including the cost model and the second-round-review history, stays in [2026-05-06-janus-prompt-architecture.md](2026-05-06-janus-prompt-architecture.md). TELOS is the shipping protocol.
 
 ---
 
@@ -494,10 +494,10 @@ The full theoretical treatment, including the cost model and the second-round-re
 
 | # | Item | Notes |
 |---|---|---|
-| O1 | DeepSeek's "fixed-token-interval" persistence behavior is undocumented in detail; needs empirical probing to know whether ref-pool placement actually wins | Add to `stela/efficiency.bench` |
-| O2 | Anthropic's automatic-caching mode interacts with explicit BPs by consuming a slot; STELA uses 4 explicit slots and disables automatic. Need to verify no 400 in mixed-mode regressions. | Adapter conformance test |
+| O1 | DeepSeek's "fixed-token-interval" persistence behavior is undocumented in detail; needs empirical probing to know whether ref-pool placement actually wins | Add to `telos/efficiency.bench` |
+| O2 | Anthropic's automatic-caching mode interacts with explicit BPs by consuming a slot; TELOS uses 4 explicit slots and disables automatic. Need to verify no 400 in mixed-mode regressions. | Adapter conformance test |
 | O3 | Hermes subagent IRs: child sessions need their own ref-pool, but file content reused across parent+child should ideally share a slug. Cross-session pool not in v1. | Future |
-| O4 | OpenAI `prompt_cache_key` overflow at 15 RPM: STELA's hash currently uses the toolset+system+ref-slug set, which may be too granular for low-traffic agents. Need a coarsening rule. | Adapter heuristic |
+| O4 | OpenAI `prompt_cache_key` overflow at 15 RPM: TELOS's hash currently uses the toolset+system+ref-slug set, which may be too granular for low-traffic agents. Need a coarsening rule. | Adapter heuristic |
 | O5 | vLLM/SGLang `cache_policy` / `cache_control` extension fields are not yet upstream-stable; each release may rename keys. Adapters should version-gate via a startup capability fetch (`GET /v1/capabilities`) rather than blind-emit. | Adapter conformance test |
 | O6 | SGLang `fork-and-replace` semantics: when the summary length exceeds the original span, the radix path becomes net-longer; bridge should reject `Fold` plans where `len(summary) > 0.5 * len(span)` to keep the op profitable. | Bridge guard |
 
@@ -505,4 +505,4 @@ The full theoretical treatment, including the cost model and the second-round-re
 
 ## 14. One-Line Summary
 
-> **STELA** = three layers (harness · bridge · engine), one IR (tri-banded blocks + ref-pool), one ordering invariant (`pin → fold → drop`), five primitives (`Place · Pin · Mark · Fold · Refresh`), three engine adapters that degrade gracefully from Anthropic's full control to DeepSeek's automatic prefix matching — same IR, same harness code, every engine's cache used to its actual ceiling.
+> **TELOS** = three layers (harness · bridge · engine), one IR (tri-banded blocks + ref-pool), one ordering invariant (`pin → fold → drop`), five primitives (`Place · Pin · Mark · Fold · Refresh`), three engine adapters that degrade gracefully from Anthropic's full control to DeepSeek's automatic prefix matching — same IR, same harness code, every engine's cache used to its actual ceiling.

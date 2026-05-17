@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from stela.engine.base import EmitPlan, EngineAdapter, EngineCapabilities, MarkSlot
-from stela.ir import Band, StelaIR, UsageReport
+from telos.engine.base import EmitPlan, EngineAdapter, EngineCapabilities, MarkSlot
+from telos.ir import Band, TelosIR, UsageReport
 
 
 _LOOKBACK = 20         # Anthropic 文档明示的 lookback 上限
@@ -38,7 +38,7 @@ class AnthropicAdapter(EngineAdapter):
     # plan_marks：4 个 slot 的优先级分配
     # ------------------------------------------------------------------
 
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         candidates: list[MarkSlot] = []
 
         # BP-T：tools 段末尾（仅当有 tools）
@@ -99,7 +99,7 @@ class AnthropicAdapter(EngineAdapter):
     # emit：翻译成 Anthropic /v1/messages 请求
     # ------------------------------------------------------------------
 
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         slot_index = _build_slot_index(plan)
 
         wire_tools = [
@@ -136,7 +136,7 @@ class AnthropicAdapter(EngineAdapter):
     # refresh：max_tokens=0 prewarm
     # ------------------------------------------------------------------
 
-    def refresh(self, ir: StelaIR, plan: EmitPlan) -> None:
+    def refresh(self, ir: TelosIR, plan: EmitPlan) -> None:
         # 真实使用方应 POST 这个 dict；此处仅返回构造好的请求体，
         # 让上层（譬如 benchmark harness）决定如何发送。
         wire = self.emit(ir, plan)

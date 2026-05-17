@@ -9,20 +9,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from stela.harness.base import HarnessPlugin
-    from stela.engine.base import EngineAdapter
+    from telos.harness.base import HarnessPlugin
+    from telos.engine.base import EngineAdapter
 
 
 def load_harness(name: str) -> "HarnessPlugin":
     """按名加载 harness plugin。当前支持：``openclaw``, ``hermes``, ``telos``。"""
     if name == "openclaw":
-        from stela.harness.openclaw import OpenClawPlugin
+        from telos.harness.openclaw import OpenClawPlugin
         return OpenClawPlugin()
     if name == "hermes":
-        from stela.harness.hermes import HermesPlugin
+        from telos.harness.hermes import HermesPlugin
         return HermesPlugin()
     if name == "telos":
-        from stela.harness.telos import TelosPlugin
+        from telos.harness.telos import TelosPlugin
         return TelosPlugin()
     raise ValueError(f"Unknown harness plugin: {name!r}")
 
@@ -35,18 +35,18 @@ def load_engine(name: str) -> "EngineAdapter":
     - 开源推理（双向感知）：``vllm``, ``sglang``
     """
     if name == "anthropic":
-        from stela.engine.anthropic import AnthropicAdapter
+        from telos.engine.anthropic import AnthropicAdapter
         return AnthropicAdapter()
     if name == "openai":
-        from stela.engine.openai import OpenAIAdapter
+        from telos.engine.openai import OpenAIAdapter
         return OpenAIAdapter()
     if name == "deepseek":
-        from stela.engine.deepseek import DeepSeekAdapter
+        from telos.engine.deepseek import DeepSeekAdapter
         return DeepSeekAdapter()
     if name == "vllm":
-        from stela.engine.vllm import VLLMAdapter
+        from telos.engine.vllm import VLLMAdapter
         return VLLMAdapter()
     if name == "sglang":
-        from stela.engine.sglang import SGLangAdapter
+        from telos.engine.sglang import SGLangAdapter
         return SGLangAdapter()
     raise ValueError(f"Unknown engine adapter: {name!r}")

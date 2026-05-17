@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from stela.ir import Band, StelaBlock
+from telos.ir import Band, TelosBlock
 
 
 # DROP 模式：harness 在每轮注入、每轮变化的元数据
@@ -35,10 +35,10 @@ _FOLD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def split_user_text(text: str, *, base_id: str) -> tuple[StelaBlock, ...]:
+def split_user_text(text: str, *, base_id: str) -> tuple[TelosBlock, ...]:
     """把一段 user 文本切成 (PIN: 提问主体) + (FOLD: 引用回声)* + (DROP: envelope)*。
 
-    返回的 blocks 已经按 §5 顺序排列，可以直接喂给 ``StelaMessage(blocks=...)``。
+    返回的 blocks 已经按 §5 顺序排列，可以直接喂给 ``TelosMessage(blocks=...)``。
     """
     drops: list[tuple[str, str]] = []
     folds: list[tuple[str, str]] = []
@@ -56,9 +56,9 @@ def split_user_text(text: str, *, base_id: str) -> tuple[StelaBlock, ...]:
 
     pin_text = remaining.strip()
 
-    blocks: list[StelaBlock] = []
+    blocks: list[TelosBlock] = []
     if pin_text:
-        blocks.append(StelaBlock(
+        blocks.append(TelosBlock(
             id=f"{base_id}/q",
             band=Band.PIN,
             kind="text",
@@ -66,7 +66,7 @@ def split_user_text(text: str, *, base_id: str) -> tuple[StelaBlock, ...]:
             source_tag="harness/user-query",
         ))
     for i, (tag, content) in enumerate(folds):
-        blocks.append(StelaBlock(
+        blocks.append(TelosBlock(
             id=f"{base_id}/fold-{i}",
             band=Band.FOLD,
             kind="text",
@@ -74,7 +74,7 @@ def split_user_text(text: str, *, base_id: str) -> tuple[StelaBlock, ...]:
             source_tag=f"harness/{tag}",
         ))
     for i, (tag, content) in enumerate(drops):
-        blocks.append(StelaBlock(
+        blocks.append(TelosBlock(
             id=f"{base_id}/drop-{i}",
             band=Band.DROP,
             kind="text",

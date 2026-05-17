@@ -21,14 +21,14 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from stela.engine.base import (
+from telos.engine.base import (
     BidirectionalEngineAdapter,
     EmitPlan,
     EngineCapabilities,
     MarkSlot,
     ProbeResult,
 )
-from stela.ir import Band, StelaIR, UsageReport
+from telos.ir import Band, TelosIR, UsageReport
 
 
 _SGLANG_EXT = "cache_control"
@@ -52,7 +52,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
         )
 
     # ------------------------------------------------------------------
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         slots: list[MarkSlot] = []
         last_sys_pin = _last_index(ir.system, Band.PIN)
         if last_sys_pin is not None:
@@ -79,7 +79,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
         )
 
     # ------------------------------------------------------------------
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         wire_messages: list[dict[str, Any]] = []
         sys_text = "\n\n".join(str(b.payload) for b in _band_sorted(ir.system))
         if sys_text:
@@ -134,18 +134,18 @@ class SGLangAdapter(BidirectionalEngineAdapter):
     # ------------------------------------------------------------------
     # 双向操作
     # ------------------------------------------------------------------
-    def probe(self, ir: StelaIR, plan: EmitPlan) -> ProbeResult:
+    def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
         """构造一个 radix lookup 请求；调用方真正发 ``POST /v1/cache/lookup``。"""
         return ProbeResult(hit=False, cached_token_count=0, tier="none")
 
     def evict_span(
-        self, ir: StelaIR, start_block: int, end_block: int,
+        self, ir: TelosIR, start_block: int, end_block: int,
     ) -> Mapping[str, Any]:
         return {"evict_span": [start_block, end_block]}
 
     def fork_and_replace(
         self,
-        ir: StelaIR,
+        ir: TelosIR,
         path_hash: str,
         replace_suffix: Mapping[str, Any],
     ) -> Mapping[str, Any]:
@@ -165,7 +165,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
             "replace_suffix": dict(replace_suffix),
         }
 
-    def refresh(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def refresh(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         """``prewarm_only`` 模式：不调度生成、只填 radix 路径。"""
         body = dict(self.emit(ir, plan))
         ctrl = dict(body.get(_SGLANG_EXT, {}))
@@ -176,7 +176,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
         return body
 
     # ------------------------------------------------------------------
-    def _affinity_key(self, ir: StelaIR) -> str:
+    def _affinity_key(self, ir: TelosIR) -> str:
         h = hashlib.sha256()
         for b in ir.tools:
             h.update(json.dumps(b.payload, sort_keys=True).encode())
@@ -185,7 +185,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
                 h.update(str(b.payload).encode())
         for slug in sorted(ir.ref_pool):
             h.update(slug.encode())
-        return f"stela-sgl-{h.hexdigest()[:16]}"
+        return f"telos-sgl-{h.hexdigest()[:16]}"
 
 
 # ---------------------------------------------------------------------------

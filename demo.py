@@ -1,14 +1,14 @@
-"""端到端 demo：OpenClaw 风格请求 → STELA IR → 三种 engine 各自的 wire 请求。
+"""端到端 demo：OpenClaw 风格请求 → TELOS IR → 三种 engine 各自的 wire 请求。
 
 运行方式：
-    python -m stela.demo
+    python -m telos.demo
 """
 
 from __future__ import annotations
 
 import json
 
-from stela import Bridge, load_engine, load_harness
+from telos import Bridge, load_engine, load_harness
 
 
 # 一个简化的"OpenClaw 风格"请求

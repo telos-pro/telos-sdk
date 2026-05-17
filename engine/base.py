@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
-from stela.ir import StelaIR, UsageReport
+from telos.ir import TelosIR, UsageReport
 
 
 # ---------------------------------------------------------------------------
@@ -83,18 +83,18 @@ class EngineAdapter(ABC):
     def capabilities(self) -> EngineCapabilities: ...
 
     @abstractmethod
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         """根据 IR 决定本次 emit 把锚位放在哪。"""
 
     @abstractmethod
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         """把 IR + plan 翻译成 wire request（dict 形态，调用方自己 POST）。"""
 
     @abstractmethod
     def parse_usage(self, response: Mapping[str, Any]) -> UsageReport:
         """从 engine response 提取 usage，归一为 ``UsageReport``。"""
 
-    def refresh(self, ir: StelaIR, plan: EmitPlan) -> None:
+    def refresh(self, ir: TelosIR, plan: EmitPlan) -> None:
         """可选：发起 keep-alive 请求；默认 no-op。"""
         return None
 
@@ -120,7 +120,7 @@ class BidirectionalEngineAdapter(EngineAdapter):
     所以 bridge 不会误调。
     """
 
-    def probe(self, ir: StelaIR, plan: EmitPlan) -> ProbeResult:
+    def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
         """问 server："你那边还缓存着这个前缀吗？"
 
         默认返回 miss；具体 adapter 覆盖。返回 ``hit=True`` 时 bridge 可以
@@ -128,7 +128,7 @@ class BidirectionalEngineAdapter(EngineAdapter):
         """
         return ProbeResult(hit=False)
 
-    def evict_span(self, ir: StelaIR, start_block: int, end_block: int) -> Mapping[str, Any]:
+    def evict_span(self, ir: TelosIR, start_block: int, end_block: int) -> Mapping[str, Any]:
         """显式淘汰一段 KV 块；返回随下次 emit 一起带的 ``cache_policy`` 片段。
 
         bridge 在做 ``Fold`` 时调用：服务端释放旧 span 的 KV，下次请求只
@@ -137,7 +137,7 @@ class BidirectionalEngineAdapter(EngineAdapter):
 
     def fork_and_replace(
         self,
-        ir: StelaIR,
+        ir: TelosIR,
         path_hash: str,
         replace_suffix: Mapping[str, Any],
     ) -> Mapping[str, Any]:

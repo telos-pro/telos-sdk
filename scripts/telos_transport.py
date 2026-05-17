@@ -1,10 +1,10 @@
-"""StelaOpenAITransport：把 OpenAI-shape 的 chat.completions client 串到 stela。
+"""TelosOpenAITransport：把 OpenAI-shape 的 chat.completions client 串到 telos。
 
 mini_swe_runner（telos vendored hermes）调用：
 
     self.client.chat.completions.create(model=..., messages=[...], tools=[...])
 
-本 transport 实现同样接口，但内部走 ``telos`` harness → STELA Bridge →
+本 transport 实现同样接口，但内部走 ``telos`` harness → TELOS Bridge →
 canonicalize / band-reorder → 转回 chat-completions shape → 真正发到
 OpenRouter 的 ``/v1/chat/completions``。响应回来后用 ``deepseek``
 adapter 归一化 usage（DeepSeek V3+ 在 OpenRouter 的 usage 字段是
@@ -15,7 +15,7 @@ adapter 归一化 usage（DeepSeek V3+ 在 OpenRouter 的 usage 字段是
 - **不破坏 tool_calls 结构**：role=assistant 的 ``tool_calls`` 与 role=tool
   的 ``tool_call_id`` 必须按 OpenAI 协议挂回 wire，不能像 DeepSeek
   adapter 那样直接 inline 成文本——否则 agent 循环拿不到工具结果。
-- **应用 STELA 政策的最小子集**：DROP 段（``<environment_info>`` /
+- **应用 TELOS 政策的最小子集**：DROP 段（``<environment_info>`` /
   ``Current time:`` 等）下沉到每个 user message 文本的尾部；tool 定义
   做 canonicalize（key 排序）；其余按 §5 顺序。这是 cache-命中收益最
   直接的两条规则。
@@ -33,7 +33,8 @@ from os.path import commonprefix
 from pathlib import Path
 from typing import Any, Mapping
 
-from stela import Band, Bridge, load_engine, load_harness
+from telos import Band, Bridge, load_engine, load_harness
+from telos.bridge import BridgeSessionState, _canonicalize_ir
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +238,8 @@ def _wire_text(wire: Mapping[str, Any]) -> str:
 # Transport（鸭子接口：mini_swe_runner 只用到 .chat.completions.create）
 # ---------------------------------------------------------------------------
 
-class StelaOpenAITransport:
-    """OpenAI-鸭子接口的 client，内部走 STELA。
+class TelosOpenAITransport:
+    """OpenAI-鸭子接口的 client，内部走 TELOS。
 
     Args:
         base_url: 底层真实端点，例如 ``https://openrouter.ai/api/v1``。
@@ -259,6 +260,7 @@ class StelaOpenAITransport:
         prompt_trace_log: str | None = None,
         engine_name: str = "deepseek",
         harness_name: str = "telos",
+        session_state: BridgeSessionState | None = None,
     ):
         from openai import OpenAI  # 延迟导入
 
@@ -276,8 +278,17 @@ class StelaOpenAITransport:
         self._prev_wire_text: str = ""
         self._prev_regions: dict[str, Any] | None = None
 
+        # Bridge 跨 turn 状态：transport 一个实例 = 一个 session。
+        self._session_state = (
+            session_state if session_state is not None else BridgeSessionState()
+        )
+
         # 鸭子接口
         self.chat = _ChatNS(self)
+
+    @property
+    def session_state(self) -> BridgeSessionState:
+        return self._session_state
 
     # ------------------------------------------------------------------
     # 内部：执行一次 create
@@ -300,13 +311,15 @@ class StelaOpenAITransport:
         )
         ir_in_summary = _summarize_ir(ir)
 
-        # 2. Bridge：canonicalize + plan
-        bridge = Bridge(ir, self._engine)
+        # 2. Bridge：传 session_state 让 R8 计数器 / cache_creation 跨 turn 累积
+        bridge = Bridge(ir, self._engine, session_state=self._session_state)
         plan = bridge.mark()
         plan_summary = _summarize_plan(plan)
 
-        # 3. 拿规范化后的 IR（snapshot），转回 chat-completions wire
-        ir2 = bridge.snapshot_ir()
+        # 3. 规范化（tools 排序、payload key 排序）—— 不能直接用 ir 的 snapshot，
+        # 必须跑过 _canonicalize_ir 才能保证多轮 prefix 字节稳定。这是 OpenAI
+        # 路径的关键修复：以前直接喂 ir2 给 wire builder，没做这一步。
+        ir2 = _canonicalize_ir(bridge.snapshot_ir())
         ir_out_summary = _summarize_ir(ir2)
         regions = _flatten_regions(ir_out_summary)
         # 增长过程：相对上一次调用的 chars 变动（按 segment & band）
@@ -328,7 +341,7 @@ class StelaOpenAITransport:
                 "total": regions["total"] - prev["total"],
             }
         wire = _ir_to_chat_completions(ir2, model=model)
-        # 4. 透传一些非 stela 关心的字段
+        # 4. 透传一些非 telos 关心的字段
         for k in ("temperature", "top_p", "max_tokens", "stream",
                   "timeout", "tool_choice", "response_format"):
             if k in kwargs and kwargs[k] is not None:
@@ -341,29 +354,50 @@ class StelaOpenAITransport:
         prefix_match_chars = len(commonprefix([self._prev_wire_text, wire_text])) \
             if self._prev_wire_text else 0
 
+        # 真请求即将发出 —— 等同 bridge.emit_with_plan 末尾的 +1，因为这条
+        # OpenAI 路径走自定义 _ir_to_chat_completions 而不是 engine.emit。
+        self._session_state.stats.real_requests_since_refresh += 1
+
         # 5. 真发请求
         t0 = time.time()
         response = self._inner.chat.completions.create(**wire)
         dt = time.time() - t0
 
-        # 6. usage 归一化 + 记录
+        # 6. usage 归一化 + 跨 turn 累积
         usage_obj = getattr(response, "usage", None)
         usage_dict = usage_obj.model_dump() if usage_obj is not None else {}
         normalized = _normalize_usage(usage_dict)
         inp_total = normalized["raw_input"] + normalized["cache_read"]
         cache_share = (normalized["cache_read"] / inp_total) if inp_total else 0.0
 
+        # bridge.absorb_usage：通过 engine.parse_usage 抽出 cache_write 并累加
+        # 进 session_state。DeepSeek/OpenAI 的 cache_write 通常为 0，但调用
+        # 形式与 anthropic transport 对齐，保留 R8 可见性。
+        try:
+            bridge.absorb_usage({"usage": usage_dict})
+        except Exception:  # noqa: BLE001
+            pass
+
         if self._usage_log is not None:
             self._usage_log.parent.mkdir(parents=True, exist_ok=True)
             with self._usage_log.open("a") as f:
                 f.write(json.dumps({
+                    "ts": time.time(),
                     "session_id": self._session_id,
                     "call_index": self._call_count,
                     "model": model,
+                    "harness": self._harness.__class__.__name__.lower().replace("plugin", ""),
                     "latency_s": round(dt, 3),
                     "routing_key": plan.routing_key,
                     "raw_usage": usage_dict,
                     "normalized": normalized,
+                    "cumulative": {
+                        "cache_creation":
+                            self._session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            self._session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(self._session_state.refpool.slugs),
+                    },
                 }, ensure_ascii=False) + "\n")
 
         if self._trace_log is not None:
@@ -398,6 +432,13 @@ class StelaOpenAITransport:
                         "input_total": inp_total,
                         "cache_share": round(cache_share, 4),
                     },
+                    "cumulative": {
+                        "cache_creation":
+                            self._session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            self._session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(self._session_state.refpool.slugs),
+                    },
                 }, ensure_ascii=False) + "\n")
 
         self._prev_wire_text = wire_text
@@ -406,12 +447,12 @@ class StelaOpenAITransport:
 
 
 class _ChatNS:
-    def __init__(self, t: StelaOpenAITransport):
+    def __init__(self, t: TelosOpenAITransport):
         self.completions = _CompletionsNS(t)
 
 
 class _CompletionsNS:
-    def __init__(self, t: StelaOpenAITransport):
+    def __init__(self, t: TelosOpenAITransport):
         self._t = t
 
     def create(self, **kwargs):

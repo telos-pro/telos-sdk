@@ -5,7 +5,7 @@
 - 0.6+ 起暴露 ``cache_salt``（请求级命名空间）和 KV offload（GPU→CPU→disk）。
 - usage 字段 ``prompt_tokens`` + ``cached_tokens``（需 ``--collect-detailed-traces``）。
 
-STELA 在 vLLM 上获得"双向感知"：
+TELOS 在 vLLM 上获得"双向感知"：
 - read：``probe`` 调 ``HEAD /v1/cache/prefix?hash=...``
 - write：``cache_policy.{pin_prefix_until, evict_span}`` 嵌进请求体
 - prewarm：``max_tokens=1`` 真触发 KV 物化
@@ -20,14 +20,14 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from stela.engine.base import (
+from telos.engine.base import (
     BidirectionalEngineAdapter,
     EmitPlan,
     EngineCapabilities,
     MarkSlot,
     ProbeResult,
 )
-from stela.ir import Band, StelaIR, UsageReport
+from telos.ir import Band, TelosIR, UsageReport
 
 
 _VLLM_EXT = "cache_policy"  # vLLM 私有扩展字段名（统一在此）
@@ -53,7 +53,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
     # ------------------------------------------------------------------
     # plan：找到 system 段最后一个 PIN 块作为 pin_until 边界
     # ------------------------------------------------------------------
-    def plan_marks(self, ir: StelaIR) -> EmitPlan:
+    def plan_marks(self, ir: TelosIR) -> EmitPlan:
         slots: list[MarkSlot] = []
         # 锚 1：system 段尾部 PIN 块 → 永久 pin
         last_sys_pin = _last_index(ir.system, Band.PIN)
@@ -75,13 +75,13 @@ class VLLMAdapter(BidirectionalEngineAdapter):
                     break
         return EmitPlan(
             slots=tuple(slots),
-            routing_key=f"stela-vllm-{ir.session_id}",
+            routing_key=f"telos-vllm-{ir.session_id}",
         )
 
     # ------------------------------------------------------------------
     # emit：OpenAI-compatible body + cache_policy / cache_salt 扩展
     # ------------------------------------------------------------------
-    def emit(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         # 复用 OpenAI 风格的扁平 messages 数组
         wire_messages: list[dict[str, Any]] = []
         sys_text = "\n\n".join(
@@ -139,7 +139,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
     # ------------------------------------------------------------------
     # 双向操作
     # ------------------------------------------------------------------
-    def probe(self, ir: StelaIR, plan: EmitPlan) -> ProbeResult:
+    def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
         """构造一个 prefix probe 请求；调用方负责 HTTP 发送。
 
         返回值仅在 demo / 测试里用 fake；真实环境会被 caller 替换为带网
@@ -151,7 +151,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
         return ProbeResult(hit=False, cached_token_count=0, tier="none")
 
     def evict_span(
-        self, ir: StelaIR, start_block: int, end_block: int,
+        self, ir: TelosIR, start_block: int, end_block: int,
     ) -> Mapping[str, Any]:
         """返回一段嵌进下次 emit 的 ``cache_policy`` 片段。
 
@@ -159,7 +159,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
         """
         return {"evict_span": [start_block, end_block]}
 
-    def refresh(self, ir: StelaIR, plan: EmitPlan) -> Mapping[str, Any]:
+    def refresh(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
         """返回 prewarm 请求体；调用方真正 POST。
 
         与 ``EngineAdapter.refresh`` 不同（基类返回 None），这里返回 dict 是
@@ -176,7 +176,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
     # 内部
     # ------------------------------------------------------------------
     def _estimate_block_index(
-        self, ir: StelaIR, segment: str, index: int, message_index: int | None,
+        self, ir: TelosIR, segment: str, index: int, message_index: int | None,
     ) -> int:
         """粗估 token block 边界。vLLM 默认 16 token / block。
 
@@ -205,7 +205,7 @@ class VLLMAdapter(BidirectionalEngineAdapter):
         approx_tokens = char_count // 4
         return approx_tokens // BLOCK
 
-    def _prefix_hash(self, ir: StelaIR) -> str:
+    def _prefix_hash(self, ir: TelosIR) -> str:
         """前缀 hash：给 probe 用。tools + system 的 PIN 段。"""
         h = hashlib.sha256()
         for b in ir.tools:

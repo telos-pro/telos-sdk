@@ -1,4 +1,4 @@
-"""Bridge：STELA 的策略核心。五个原语 + 一次 canonicalize。
+"""Bridge：TELOS 的策略核心。五个原语 + 一次 canonicalize。
 
 ```
 upstream agent → harness.parse() → IR
@@ -32,27 +32,27 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
-from stela.engine.base import (
+from telos.engine.base import (
     BidirectionalEngineAdapter,
     EmitPlan,
     EngineAdapter,
     ProbeResult,
 )
-from stela.ir import (
+from telos.ir import (
     Band,
-    StelaBlock,
-    StelaIR,
-    StelaInvariantError,
-    StelaMessage,
+    TelosBlock,
+    TelosIR,
+    TelosInvariantError,
+    TelosMessage,
     UsageReport,
     assert_band_order,
     assert_ir_invariants,
 )
-from stela.refpool import RefPool
+from telos.refpool import RefPool
 
 
 # ---------------------------------------------------------------------------
-# Bridge 内部状态
+# Bridge 跨 turn 持久化的状态
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -62,6 +62,37 @@ class _SessionStats:
     real_requests_since_refresh: int = 0
     cumulative_cache_creation: int = 0
     last_refresh_at: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class BridgeSessionState:
+    """一个 conversation session 的全部跨 turn 状态。
+
+    设计意图：上游（proxy / SDK transport）可以按 session_id 持有一份
+    ``BridgeSessionState``，每轮请求构造新的 ``Bridge`` 时传进来。这样：
+
+    - ref-pool slug 一次注册、全 session 共享（fold 状态跨轮保持）
+    - R8 自适应 refresh 的请求计数能真累积
+    - cache_creation 累计计数能真累积，触发上游 fold 提示
+
+    缺省（``None``）时 Bridge 自己 new 一个，行为退化到"每轮独立"——与
+    之前完全等价，保证不破坏现有调用方。
+    """
+
+    refpool: RefPool = field(default_factory=RefPool)
+    stats: _SessionStats = field(default_factory=_SessionStats)
+    # 一旦某个 session 的 harness 被识别出来（hermes / openclaw），后续
+    # 同 session 的请求直接复用，避免每条 call 重新探测带来的"openclaw ↔
+    # hermes 翻转 → source_tag 前缀不一致 → ref-pool slug 失配"。显式
+    # 传入 ``harness_name`` 始终覆盖这个字段。
+    sticky_harness: str | None = None
+    # 同理：一个 session 第一次见到的 mode（none/telos/rtk/both）被锁定，
+    # 后续同 session 的请求复用，避免对比实验里某个 session 中途换挡。
+    # proxy 配置默认值仍可被首个请求的 X-Telos-Mode header 覆盖一次。
+    sticky_mode: str | None = None
+    # 对比实验分组标签（X-Telos-Compare-Group header）。同一 compare_group
+    # 下、mode 不同的多个 session 会在 dashboard 上并排展示。
+    compare_group: str | None = None
 
 
 REFRESH_THRESHOLD = 11  # Janus §6.3.1：每续期间至少 11 次真实请求才回本
@@ -167,7 +198,7 @@ def _canonicalize_tool_def(payload: Any) -> Any:
     return _canonicalize_payload(payload)
 
 
-def _canonicalize_block(blk: StelaBlock) -> StelaBlock:
+def _canonicalize_block(blk: TelosBlock) -> TelosBlock:
     """规范化单个 block：tool 定义 / tool_use / tool_result 的字段排序。
 
     ``tool_def`` 走 schema-aware 路径（额外规范化 ``required`` 等集合数组）；
@@ -181,7 +212,7 @@ def _canonicalize_block(blk: StelaBlock) -> StelaBlock:
     return blk
 
 
-def _tool_name(blk: StelaBlock) -> str:
+def _tool_name(blk: TelosBlock) -> str:
     """从 tool_def block 提取工具名（Anthropic / OpenAI 两种 shape 都覆盖）。"""
     p = blk.payload
     if isinstance(p, dict):
@@ -196,7 +227,7 @@ def _tool_name(blk: StelaBlock) -> str:
     return blk.id
 
 
-def _tool_sort_key(blk: StelaBlock) -> tuple[int, str, str]:
+def _tool_sort_key(blk: TelosBlock) -> tuple[int, str, str]:
     """工具数组的稳定排序键：``(source_rank, mcp_server, name)``。
 
     - ``source_rank`` : builtin(0) → mcp(1) → user(2) → 未标记(3)
@@ -218,7 +249,7 @@ def _tool_sort_key(blk: StelaBlock) -> tuple[int, str, str]:
     return (rank, str(server or ""), _tool_name(blk))
 
 
-def _canonicalize_ir(ir: StelaIR) -> StelaIR:
+def _canonicalize_ir(ir: TelosIR) -> TelosIR:
     # tools: 每个 block 内部规范化 → 整个数组稳定排序（仍全是 PIN，不破坏 §5）
     canon_tools = sorted(
         (_canonicalize_block(b) for b in ir.tools),
@@ -228,7 +259,7 @@ def _canonicalize_ir(ir: StelaIR) -> StelaIR:
 
     new_system = tuple(_canonicalize_block(b) for b in ir.system)
     new_messages = tuple(
-        StelaMessage(role=m.role, blocks=tuple(_canonicalize_block(b) for b in m.blocks))
+        TelosMessage(role=m.role, blocks=tuple(_canonicalize_block(b) for b in m.blocks))
         for m in ir.messages
     )
     return replace(ir, tools=new_tools, system=new_system, messages=new_messages)
@@ -239,24 +270,49 @@ def _canonicalize_ir(ir: StelaIR) -> StelaIR:
 # ---------------------------------------------------------------------------
 
 class Bridge:
-    """每个 session 一个实例。线程不安全（同一 session 通常顺序处理）。"""
+    """每个 session 一个实例。线程不安全（同一 session 通常顺序处理）。
 
-    def __init__(self, ir: StelaIR, engine: EngineAdapter):
+    跨 turn 状态外置：传入 ``session_state`` 让 ref-pool + R8 计数器跨调用
+    累积；不传则每个 Bridge 独立持有状态（与早期版本行为等价）。
+    """
+
+    def __init__(
+        self,
+        ir: TelosIR,
+        engine: EngineAdapter,
+        *,
+        session_state: BridgeSessionState | None = None,
+    ):
         self._ir = ir
         self._engine = engine
-        self._refpool = RefPool()
-        # 把初始 IR 里的 ref_pool 同步到内部 RefPool
+        self._state = session_state if session_state is not None else BridgeSessionState()
+        # 把当前 IR 里的 ref_pool 同步进 state.refpool。
+        # 用 register_or_skip：第二次起，已注册的 slug（可能已被 fold 改成
+        # 占位符）不会被新一轮的完整 payload 覆盖回去。
         for slug, blk in ir.ref_pool.items():
-            self._refpool.register(slug, blk)
-        self._stats = _SessionStats()
+            self._state.refpool.register_or_skip(slug, blk)
         # 初始 IR 也走一遍 §5 校验，避免 harness plugin 偷懒
         assert_ir_invariants(self._ir)
+
+    @property
+    def session_state(self) -> BridgeSessionState:
+        """暴露外置状态。上游可读 ``cumulative_cache_creation`` 等做诊断。"""
+        return self._state
+
+    # 后向兼容：旧代码可能直接读这些字段。保留 property 读路径。
+    @property
+    def _refpool(self) -> RefPool:  # type: ignore[override]
+        return self._state.refpool
+
+    @property
+    def _stats(self) -> _SessionStats:  # type: ignore[override]
+        return self._state.stats
 
     # ------------------------------------------------------------------
     # 五个原语
     # ------------------------------------------------------------------
 
-    def place(self, segment: str, blocks: tuple[StelaBlock, ...]) -> "Bridge":
+    def place(self, segment: str, blocks: tuple[TelosBlock, ...]) -> "Bridge":
         """**Place**：替换某个段（``"tools"`` / ``"system"`` / ``"messages"``）的
         全部 blocks，并立即重新跑 §5 校验。
 
@@ -265,7 +321,7 @@ class Bridge:
         if segment == "tools":
             assert_band_order(blocks, "tools")
             if any(b.band is not Band.PIN for b in blocks):
-                raise StelaInvariantError("tools blocks must all be band=PIN")
+                raise TelosInvariantError("tools blocks must all be band=PIN")
             self._ir = replace(self._ir, tools=blocks)
         elif segment == "system":
             assert_band_order(blocks, "system")
@@ -274,7 +330,7 @@ class Bridge:
             raise ValueError(f"Unknown segment for place(): {segment!r}")
         return self
 
-    def append_message(self, msg: StelaMessage) -> "Bridge":
+    def append_message(self, msg: TelosMessage) -> "Bridge":
         """**Place** 的 message 专用快捷方式：追加一条新 message。
 
         每次追加都校验 message 内部的 §5 顺序——这是修复 Janus C6 的
@@ -291,7 +347,7 @@ class Bridge:
         矛盾，但 Pin 这里指的是"把这段大内容固定在 ref-pool 里、给它
         一个稳定的指针"，不是"band=PIN"）。
         """
-        blk = StelaBlock(
+        blk = TelosBlock(
             id=f"ref:{slug}",
             band=Band.FOLD,
             kind="text",
@@ -337,14 +393,14 @@ class Bridge:
         if message_range is not None:
             start, end = message_range
             if not (0 <= start < end <= len(self._ir.messages)):
-                raise StelaInvariantError(
+                raise TelosInvariantError(
                     f"Invalid message_range {message_range!r} for "
                     f"{len(self._ir.messages)} messages"
                 )
-            placeholder = StelaMessage(
+            placeholder = TelosMessage(
                 role="user",
                 blocks=(
-                    StelaBlock(
+                    TelosBlock(
                         id=f"folded:{start}-{end}",
                         band=Band.FOLD,
                         kind="text",
@@ -382,17 +438,26 @@ class Bridge:
 
     def emit(self) -> Mapping[str, Any]:
         """规范化 → 校验 → 委托 engine.emit() 出 wire 请求。"""
+        wire, _ = self.emit_with_plan()
+        return wire
+
+    def emit_with_plan(self) -> tuple[Mapping[str, Any], EmitPlan]:
+        """``emit()`` 的二元返回版：同时拿到 wire 和当次使用的 EmitPlan。
+
+        proxy / transport 想记 plan 诊断（slot 名、routing_key 等）的时候用
+        这个，避免它们自己重复跑 canonicalize + plan_marks。
+        """
         canon = _canonicalize_ir(self._ir)
         # 渲染前再做一次完整 §5 校验（修改 IR 的入口很多，最后一道防线）
         assert_ir_invariants(canon)
         # ref-pool lint：扫描所有文本 block 内的 [ref:...] 引用
-        self._refpool.lint_blocks(canon.system, "system")
+        self._state.refpool.lint_blocks(canon.system, "system")
         for i, m in enumerate(canon.messages):
-            self._refpool.lint_blocks(m.blocks, f"messages[{i}]")
+            self._state.refpool.lint_blocks(m.blocks, f"messages[{i}]")
         plan = self._engine.plan_marks(canon)
         wire = self._engine.emit(canon, plan)
-        self._stats.real_requests_since_refresh += 1
-        return wire
+        self._state.stats.real_requests_since_refresh += 1
+        return wire, plan
 
     def absorb_usage(self, raw_response: Mapping[str, Any]) -> UsageReport:
         """解析 engine response，更新 cache_creation 累计计数。"""
@@ -488,7 +553,7 @@ class Bridge:
         self._stats.real_requests_since_refresh += 1
         return wire
 
-    def snapshot_ir(self) -> StelaIR:
+    def snapshot_ir(self) -> TelosIR:
         """返回当前 IR 的快照（用于序列化 / 测试）。"""
         return self._ir
 
@@ -496,7 +561,7 @@ class Bridge:
         """打印当前 IR 的 band 分布；调试用。"""
         lines: list[str] = [f"-- session {self._ir.session_id} --"]
 
-        def fmt(blocks: tuple[StelaBlock, ...]) -> str:
+        def fmt(blocks: tuple[TelosBlock, ...]) -> str:
             return " | ".join(f"{b.band.value}:{b.id}" for b in blocks)
 
         lines.append(f"tools  : {fmt(self._ir.tools)}")

@@ -3,7 +3,7 @@
 输入约定：OpenClaw 的请求体形如 Anthropic ``/v1/messages``，外加可选的
 ``metadata.openclaw`` 字段。
 
-带类规则（与 STELA 协议 §7.1 一致）：
+带类规则（与 TELOS 协议 §7.1 一致）：
 - ``tools[]``                                 → PIN
 - ``system[]`` 元素                            → PIN
 - 大文档 / 大文件内容（>2KB 文本）               → FOLD，搬到 ref-pool
@@ -16,14 +16,15 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from stela.harness._user_split import split_user_text
-from stela.harness.base import HarnessPlugin
-from stela.ir import (
+from telos.harness._user_split import split_user_text
+from telos.harness.base import HarnessPlugin
+from telos.ir import (
     Band,
-    StelaBlock,
-    StelaHints,
-    StelaIR,
-    StelaMessage,
+    TelosBlock,
+    TelosHints,
+    TelosIR,
+    TelosMessage,
+    enforce_band_order,
 )
 
 
@@ -39,7 +40,7 @@ _ANTHROPIC_BUILTIN_TYPE_PREFIXES = (
 
 
 def _classify_anthropic_tool(t: Mapping[str, Any]) -> tuple[str, str | None]:
-    """返回 ``(source, mcp_server)`` —— 用于 ``StelaBlock.extra``。
+    """返回 ``(source, mcp_server)`` —— 用于 ``TelosBlock.extra``。
 
     优先级：
     1. 上游 ``metadata.source`` 显式覆盖（``"builtin"|"mcp"|"user"``）
@@ -74,16 +75,16 @@ class OpenClawPlugin(HarnessPlugin):
         engine: str,
         model: str = "",
         expected_turns: int = 0,
-    ) -> StelaIR:
-        ref_pool: dict[str, StelaBlock] = {}
+    ) -> TelosIR:
+        ref_pool: dict[str, TelosBlock] = {}
 
         # ---- tools ----
-        def _build_tool(i: int, t: Mapping[str, Any]) -> StelaBlock:
+        def _build_tool(i: int, t: Mapping[str, Any]) -> TelosBlock:
             source, mcp_server = _classify_anthropic_tool(t)
             extra: dict[str, Any] = {"source": source}
             if mcp_server:
                 extra["mcp_server"] = mcp_server
-            return StelaBlock(
+            return TelosBlock(
                 id=f"tool:{t.get('name', i)}",
                 band=Band.PIN,
                 kind="tool_def",
@@ -98,7 +99,7 @@ class OpenClawPlugin(HarnessPlugin):
         )
 
         # ---- system ----
-        system_blocks: list[StelaBlock] = []
+        system_blocks: list[TelosBlock] = []
         raw_system = raw_request.get("system", [])
         if isinstance(raw_system, str):
             raw_system = [{"type": "text", "text": raw_system}]
@@ -106,7 +107,7 @@ class OpenClawPlugin(HarnessPlugin):
             text = item.get("text", "") if isinstance(item, dict) else str(item)
             if len(text) > _REFPOOL_THRESHOLD:
                 slug = f"system-doc-{i}"
-                ref_pool[slug] = StelaBlock(
+                ref_pool[slug] = TelosBlock(
                     id=f"ref:{slug}",
                     band=Band.FOLD,
                     kind="text",
@@ -115,7 +116,7 @@ class OpenClawPlugin(HarnessPlugin):
                     source_tag="openclaw/system-large",
                 )
                 # 在 system 段留一个 PIN 引用
-                system_blocks.append(StelaBlock(
+                system_blocks.append(TelosBlock(
                     id=f"system/{i}-ref",
                     band=Band.PIN,
                     kind="text",
@@ -123,7 +124,7 @@ class OpenClawPlugin(HarnessPlugin):
                     source_tag="openclaw/system-ref-stub",
                 ))
             else:
-                system_blocks.append(StelaBlock(
+                system_blocks.append(TelosBlock(
                     id=f"system/{i}",
                     band=Band.PIN,
                     kind="text",
@@ -132,13 +133,13 @@ class OpenClawPlugin(HarnessPlugin):
                 ))
 
         # ---- messages ----
-        messages: list[StelaMessage] = []
+        messages: list[TelosMessage] = []
         for mi, msg in enumerate(raw_request.get("messages", [])):
             role = msg.get("role")
             content = msg.get("content", [])
             if isinstance(content, str):
                 content = [{"type": "text", "text": content}]
-            blocks: list[StelaBlock] = []
+            blocks: list[TelosBlock] = []
             for ci, item in enumerate(content):
                 t = item.get("type")
                 if role == "user" and t == "text":
@@ -146,7 +147,7 @@ class OpenClawPlugin(HarnessPlugin):
                         item.get("text", ""), base_id=f"msg{mi}/blk{ci}",
                     ))
                 elif role == "user" and t == "tool_result":
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/tr{ci}",
                         band=Band.FOLD,
                         kind="tool_result",
@@ -154,7 +155,7 @@ class OpenClawPlugin(HarnessPlugin):
                         source_tag="openclaw/tool-result",
                     ))
                 elif role == "assistant" and t == "text":
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/at{ci}",
                         band=Band.FOLD,
                         kind="text",
@@ -162,7 +163,7 @@ class OpenClawPlugin(HarnessPlugin):
                         source_tag="openclaw/assistant-text",
                     ))
                 elif role == "assistant" and t == "tool_use":
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/au{ci}",
                         band=Band.FOLD,
                         kind="tool_use",
@@ -170,22 +171,24 @@ class OpenClawPlugin(HarnessPlugin):
                         source_tag="openclaw/assistant-tool-use",
                     ))
                 else:
-                    blocks.append(StelaBlock(
+                    blocks.append(TelosBlock(
                         id=f"msg{mi}/x{ci}",
                         band=Band.FOLD,
                         kind=t or "text",
                         payload=item,
                         source_tag="openclaw/other",
                     ))
-            messages.append(StelaMessage(role=role, blocks=tuple(blocks)))
+            # 修复：多 content block 拼接会让 (PIN,DROP,PIN,DROP,...) 违反 §5。
+            # 在 message 级别按 band 稳定排序，恢复 pin* → fold* → drop*。
+            messages.append(TelosMessage(role=role, blocks=enforce_band_order(blocks)))
 
-        return StelaIR(
+        return TelosIR(
             session_id=session_id,
             tools=tools,
             system=tuple(system_blocks),
             messages=tuple(messages),
             ref_pool=ref_pool,
-            hints=StelaHints(
+            hints=TelosHints(
                 engine=engine,  # type: ignore[arg-type]
                 model=model,
                 expected_turns=expected_turns,

@@ -1,4 +1,4 @@
-"""STELA IR：三层之间唯一通过的数据结构。
+"""TELOS IR：三层之间唯一通过的数据结构。
 
 设计原则
 --------
@@ -13,14 +13,17 @@
 不变量（由 bridge 在每次原语调用前后再校验，详见 ``bridge.py``）
 --------------------------------------------------------------
 **§5 顺序不变量**：在每个段（``tools`` / ``system`` / 每条 ``message``）
-内部，blocks 必须按 ``pin* → fold* → drop*`` 物理顺序排列。
+内部，blocks 必须按 ``pin* → fold* → drop*`` 物理顺序排列。例外：``message``
+段里的 ``tool_result`` 块一律排在最前（``tool_result* → pin* → fold* → drop*``）
+—— Anthropic 要求 user message 的 tool_result 物理居首，这条协议硬约束的
+优先级高于 band 排序。``tools`` / ``system`` 段不含 tool_result，不受影响。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +64,8 @@ BlockKind = Literal[
 
 
 @dataclass(frozen=True)
-class StelaBlock:
-    """STELA 中最小的内容单元。
+class TelosBlock:
+    """TELOS 中最小的内容单元。
 
     一个 block 等价于一段 "engine 看作不可拆的 cache 计算粒度"。这与
     Anthropic 的 content block、OpenAI 的 message-piece 在大多数情况下
@@ -85,32 +88,34 @@ class StelaBlock:
 
 
 @dataclass(frozen=True)
-class StelaMessage:
+class TelosMessage:
     """一条对话 message（user / assistant）。
 
     与一个 OpenAI / Anthropic 的 message 对应，但内部 blocks **必须**
-    按 §5 顺序排列。最常见的场景是 user message 被强制切成
-    ``(pin: 用户提问) + (fold: 历史回声 / [ref:...] 引用) + (drop: harness envelope)``。
+    按 §5 顺序排列：``tool_result*`` 居首（Anthropic 协议要求），其后
+    ``pin* → fold* → drop*``。最常见的场景是 user message 被强制切成
+    ``(tool_result: 上轮工具结果) + (pin: 用户提问) + (fold: 历史回声 /
+    [ref:...] 引用) + (drop: harness envelope)``。
     """
 
     role: Literal["system", "user", "assistant"]
-    blocks: tuple[StelaBlock, ...]
+    blocks: tuple[TelosBlock, ...]
 
 
 @dataclass(frozen=True)
-class StelaIR:
+class TelosIR:
     """harness → bridge → engine 之间唯一的传输对象。"""
 
     session_id: str
-    tools: tuple[StelaBlock, ...]                  #: 全部 band=PIN（schema 不变）
-    system: tuple[StelaBlock, ...]                 #: pin* → fold*（fold 部分含 ref-pool）→ drop*
-    messages: tuple[StelaMessage, ...]
-    ref_pool: Mapping[str, StelaBlock]             #: slug → block
-    hints: "StelaHints" = field(default_factory=lambda: StelaHints())
+    tools: tuple[TelosBlock, ...]                  #: 全部 band=PIN（schema 不变）
+    system: tuple[TelosBlock, ...]                 #: pin* → fold*（fold 部分含 ref-pool）→ drop*
+    messages: tuple[TelosMessage, ...]
+    ref_pool: Mapping[str, TelosBlock]             #: slug → block
+    hints: "TelosHints" = field(default_factory=lambda: TelosHints())
 
 
 @dataclass(frozen=True)
-class StelaHints:
+class TelosHints:
     """非强制的元信息，engine adapter 用来做 plan 决策。"""
 
     engine: Literal["anthropic", "openai", "deepseek"] = "anthropic"
@@ -142,33 +147,65 @@ class UsageReport:
 # §5 顺序不变量校验
 # ---------------------------------------------------------------------------
 
-class StelaInvariantError(ValueError):
+class TelosInvariantError(ValueError):
     """§5 / canonical 化 / ref-pool 注册任一不变量被破坏时抛出。"""
 
 
-def assert_band_order(blocks: tuple[StelaBlock, ...], where: str) -> None:
-    """断言 blocks 满足 ``pin* → fold* → drop*`` 严格顺序。
+def _order_key(blk: TelosBlock) -> tuple[int, int]:
+    """message 内 block 的物理排序键。
+
+    ``tool_result`` 块必须物理居首 —— 这是 Anthropic 的协议硬约束（user
+    message 里 tool_result 必须排在所有其他内容之前），优先级高于 band 的
+    缓存生命周期排序。其余 block 按 ``pin* → fold* → drop*``。
+    """
+    return (0 if blk.kind == "tool_result" else 1, _BAND_RANK[blk.band])
+
+
+def enforce_band_order(blocks: Iterable[TelosBlock]) -> tuple[TelosBlock, ...]:
+    """把 blocks 按 ``tool_result* → pin* → fold* → drop*`` 稳定排序。
+
+    Harness 在拼装一条 message 时常常会按 ``content[]`` 源顺序遍历，每个
+    content item 自己 expand 出 (PIN, FOLD*, DROP*) 子序列；直接 ``extend``
+    会让带交错（PIN, DROP, PIN, DROP, ...）违反 §5。Harness 应该在 message
+    级别调用一次本函数兜底，再 freeze 成 ``TelosMessage.blocks``。
+
+    ``tool_result`` 块无论 band 一律排到最前 —— Anthropic 要求 user message
+    的 tool_result 物理居首，排到 text 之后会被 API 判 400。
+
+    保证稳定：同一组内保留传入顺序——这关系到「问题 A 在问题 B 前」的
+    语义可读性，不能乱跳。
+    """
+    return tuple(sorted(blocks, key=_order_key))
+
+
+def assert_band_order(blocks: tuple[TelosBlock, ...], where: str) -> None:
+    """断言 blocks 满足 ``tool_result* → pin* → fold* → drop*`` 严格顺序。
 
     复杂度 O(n)，单次扫描；bridge 在每次原语调用前后都会跑一次，开销
     可以忽略——这是整个协议的"安全门"。
+
+    ``tool_result`` 块视作 rank ``-1``：必须排在所有非 tool_result 之前
+    （Anthropic 协议要求），出现在 text 之后即判违规。``tools`` / ``system``
+    段不含 tool_result，校验行为与原先完全一致。
     """
-    last_rank = -1
+    last_rank = -2
     for blk in blocks:
-        rank = _BAND_RANK[blk.band]
+        rank = -1 if blk.kind == "tool_result" else _BAND_RANK[blk.band]
         if rank < last_rank:
-            raise StelaInvariantError(
-                f"Band order violated in {where}: block {blk.id!r} has band "
-                f"{blk.band.value!r} after a higher-band block. Required order "
-                f"is pin* -> fold* -> drop*."
+            raise TelosInvariantError(
+                f"Band order violated in {where}: block {blk.id!r} "
+                f"(kind={blk.kind!r}, band={blk.band.value!r}) appears after a "
+                f"higher-rank block. Required order is "
+                f"tool_result* -> pin* -> fold* -> drop*."
             )
         last_rank = rank
 
 
-def assert_ir_invariants(ir: StelaIR) -> None:
+def assert_ir_invariants(ir: TelosIR) -> None:
     """对整份 IR 跑一次完整的 §5 校验。"""
     assert_band_order(ir.tools, "tools")
     if any(b.band is not Band.PIN for b in ir.tools):
-        raise StelaInvariantError("All blocks in `tools` must have band=PIN")
+        raise TelosInvariantError("All blocks in `tools` must have band=PIN")
     assert_band_order(ir.system, "system")
     for i, msg in enumerate(ir.messages):
         assert_band_order(msg.blocks, f"messages[{i}] (role={msg.role})")
@@ -178,10 +215,10 @@ def assert_ir_invariants(ir: StelaIR) -> None:
 # 便利构造器（harness plugin 常用，所以放进 IR 模块本体）
 # ---------------------------------------------------------------------------
 
-def with_messages(ir: StelaIR, messages: tuple[StelaMessage, ...]) -> StelaIR:
+def with_messages(ir: TelosIR, messages: tuple[TelosMessage, ...]) -> TelosIR:
     """返回替换 ``messages`` 后的新 IR；方便函数式风格的 bridge 操作。"""
     return replace(ir, messages=messages)
 
 
-def with_ref_pool(ir: StelaIR, ref_pool: Mapping[str, StelaBlock]) -> StelaIR:
+def with_ref_pool(ir: TelosIR, ref_pool: Mapping[str, TelosBlock]) -> TelosIR:
     return replace(ir, ref_pool=dict(ref_pool))

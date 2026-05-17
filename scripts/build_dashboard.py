@@ -3,10 +3,10 @@
 
 用法::
 
-    python -m stela.scripts.build_dashboard \\
-        --results-dir /tmp/stela-telos-runs \\
+    python -m telos.scripts.build_dashboard \\
+        --results-dir /tmp/telos-telos-runs \\
         [--instance pallets__flask-5014]... \\
-        [--out /tmp/stela-telos-runs/benchmark/dashboard.html]
+        [--out /tmp/telos-telos-runs/benchmark/dashboard.html]
 
 默认扫描 ``<results-dir>/telos-*.prompt_trace.jsonl``，同名配件
 ``.usage.jsonl / .result.json / .eval.json`` 会被自动带入。输出一个
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from stela.scripts.show_prompt_trace import classify_status
+from telos.scripts.show_prompt_trace import classify_status
 
 
 BANDS = ("PIN", "FOLD", "DROP")
@@ -633,10 +633,10 @@ def render_dashboard(instances: list[dict[str, Any]]) -> str:
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>STELA × Telos · prompt-cache dashboard</title>
+<title>TELOS × Telos · prompt-cache dashboard</title>
 <style>{CSS}</style>
 </head><body>
-<h1>STELA × Telos — prompt &amp; cache dashboard</h1>
+<h1>TELOS × Telos — prompt &amp; cache dashboard</h1>
 <div class="sub">{n} instance(s) · generated {ts}</div>
 
 <div class="kpis">
@@ -682,7 +682,7 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--results-dir", default="/tmp/stela-telos-runs",
+    ap.add_argument("--results-dir", default="/tmp/telos-telos-runs",
                     help="扫描该目录下的 telos-*.prompt_trace.jsonl")
     ap.add_argument("--out", default=None,
                     help="输出 HTML 路径（默认 <results-dir>/benchmark/dashboard.html）")

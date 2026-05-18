@@ -1,10 +1,10 @@
 # TELOS: A Three-Layer Protocol for Cache-Friendly Agent Prompts
 
 **Name**: **TELOS** — *Stable prefix · Tiered bands · Ephemeral tail · Layered adapters · Anchored marks*
-**Status**: Design v1 (derived from Janus-Prompt v2, simplified)
+**Status**: Design v1 (shipping protocol)
 **Date**: 2026-05-06
 **Audience**: agent framework integrators (OpenClaw, Hermes / Claude Code), inference-side adapter authors
-**Related**: [2026-05-06-janus-prompt-architecture.md](2026-05-06-janus-prompt-architecture.md) (the full theoretical treatment), [agent-janus/PLAN_AND_PROGRESS.md](../agent-janus/PLAN_AND_PROGRESS.md)
+**Related**: [ARCHITECTURE.md](ARCHITECTURE.md) (code-level reference), [playbook.md](playbook.md) (operator guide)
 
 ---
 
@@ -483,10 +483,10 @@ TELOS does **not** require any new files outside `bridge/src/telos/` and the nam
 | `X-Janus-Marking` headers, `X-Janus-Span-Map` | dropped | No engine accepts them. Co-op compact moves to a future capability bit. |
 | `/v1/cache/fold` endpoint design | dropped from v1 | Speculative until vLLM/SGLang patches land. Re-added when there's a server to talk to. |
 | 11 invariants (I1..I11) | one (§5) plus 3 cheap asserts | The other 10 are corollaries or implementation details, not contract |
-| Adaptive refresh formula derivation | one sentence in §8.1 | The math is in Janus §6.3.1 for anyone who needs to redo it |
+| Adaptive refresh formula derivation | one sentence in §8.1 | Detailed derivation is intentionally elided; redo from first principles if needed |
 | Two compact modes (fallback / cooperative) | one mode (Fold), with `coopHint` parameter for forward-compat | Cooperative is a future capability, not a parallel architecture |
 
-The full theoretical treatment, including the cost model and the second-round-review history, stays in [2026-05-06-janus-prompt-architecture.md](2026-05-06-janus-prompt-architecture.md). TELOS is the shipping protocol.
+The Janus-Prompt v2 design notes (cost-model derivation, multi-round review history) are no longer maintained — they have been folded into this document and into [ARCHITECTURE.md](ARCHITECTURE.md). TELOS is the only shipping protocol.
 
 ---
 

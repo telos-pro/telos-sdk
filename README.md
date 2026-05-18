@@ -1,103 +1,27 @@
-# TELOS —— Stable prefix · Tiered bands · Ephemeral tail · Layered adapters · Anchored marks
+<div align="center">
 
-> 三层 cache-友好 prompt 协议的 Python 参考实现。
->
-> - **想直接用**：看 [`docs/User-guide.md`](docs/User-guide.md)（安装、接入路径、CLI、故障排查）
-> - **想看改动历史**：看 [`CHANGELOG.md`](CHANGELOG.md)
-> - **想理解协议**：看 [`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md)
-> - **本 README**：核心概念速览（协议简介、不变量、5 原语、capability 矩阵）
+<img src="branding/logo.svg" alt="TELOS — Portable Agent Context" width="420"/>
 
-**TELOS**（"石碑"）取意：石碑底座的铭文（durable prefix）刻一次用一辈子；
-上方按时间累加的题字（每轮 user/assistant 内容）随时可擦改，但不会动到底座。
-KV cache 的全部价值就是把"底座"留住——这正是协议的核心。
+### A portable, cache-friendly protocol for LLM agent context.
 
-TELOS 是 Janus-Prompt v2（[`docs/2026-05-06-janus-prompt-architecture.md`](../docs/2026-05-06-janus-prompt-architecture.md)）的精简、独立、可移植版本。
-保留唯一真正赢 KV cache 的东西——**带顺序不变量**——把其余复杂度全部砍掉。
+<sub>One canonical IR — your tools, system, turns, and memory — runs unchanged across Anthropic, OpenAI, DeepSeek, vLLM, and SGLang, with KV-cache hits preserved across turns and cost reported in absolute dollars.</sub>
 
----
+<br/>
 
-## 1. 协议简介
+[![Core](https://img.shields.io/badge/core-Apache%202.0-2C5F66?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-4FB3BF?style=flat-square)](pyproject.toml)
+[![Status](https://img.shields.io/badge/status-Beta-d8851f?style=flat-square)](CHANGELOG.md)
+[![Protocol](https://img.shields.io/badge/protocol-TELOS%20IR-7FD8E0?style=flat-square)](docs/2026-05-06-telos-protocol.md)
 
-```
-agent harness ──► TELOS Bridge ──► engine adapter ──► LLM 服务
-   (parse)          (5 原语)         (capability-aware)
-```
+[**Quickstart**](#-30-second-start) · [**Engines**](#-engines--one-ir-five-backends) · [**Why**](#-why-telos-exists--stop-being-a-tenant-in-someone-elses-agent) · [**Three things**](#-one-representation-three-things) · [**Protocol**](docs/2026-05-06-telos-protocol.md) · [**User Guide**](docs/User-guide.md)
 
-- **harness 插件**：把上游 agent (OpenClaw / Hermes/Claude Code) 的原始请求翻译成 `TelosIR`。
-- **bridge**：纯 Python，5 个原语 + 1 条不变量，不依赖任何 LLM SDK。
-- **engine adapter**：根据 capability 矩阵把 IR 翻译成 Anthropic / OpenAI / DeepSeek 的 wire 请求；并把 usage 归一化成 `UsageReport`。
+<sub>📖 &nbsp;**English** · [简体中文](README.zh-CN.md)</sub>
+
+</div>
 
 ---
 
-## 2. 三层架构
-
-| 层 | 文件 | 职责 |
-|---|---|---|
-| harness | `telos/harness/openclaw.py`、`hermes.py` | envelope 切分、大文档进 ref-pool、生成 `TelosIR` |
-| bridge | `telos/bridge.py`、`telos/ir.py`、`telos/refpool.py` | 5 原语、不变量校验、ref-pool 冻结 slug、canonicalize |
-| engine | `telos/engine/anthropic.py`、`openai.py`、`deepseek.py` | capability-aware Mark、wire 序列化、usage 解析 |
-
----
-
-## 3. 五个原语（`Bridge` 方法）
-
-| 原语 | 作用 | 协议节 |
-|---|---|---|
-| `place(segment, blocks)` | 把 block 放进 tools / system / 当前 message | §6.1 |
-| `pin(slug, payload)` | 在 system 段写一个 PIN 块 | §6.2 |
-| `mark()` | 让 engine 给出本轮的 BP / routing-key 计划 | §6.3 |
-| `fold(slugs= or message_range=, summary=)` | 把旧轮折叠成 ref-pool 引用 | §6.4 |
-| `refresh(plan)` | 满足节流后发 `max_tokens=0` prewarm（仅 Anthropic） | §6.5 |
-
----
-
-## 4. 顺序不变量（§5）
-
-每个 segment（tools / system / 单条 message）内：
-
-```
-PIN*  →  FOLD*  →  DROP*
-```
-
-违反就抛 `TelosInvariantError`。这是协议唯一的硬约束——其他都是软建议。
-
----
-
-## 5. ref-pool（§4）
-
-- slug 一旦 `register()` 就**冻结**：内容可以变（`fold()`），slug 不能变。
-- 文本里的 `[ref:slug]` 引用，必须能在 ref-pool 里找到，否则 `lint_blocks` 报错。
-- ref-pool 渲染时按 slug 字典序排，保证字节稳定。
-
----
-
-## 6. Engine capability 对照表
-
-| 能力 | Anthropic 4.6+ | OpenAI 4+ / 5.x | DeepSeek V3+ | **vLLM** | **SGLang** |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 显式 BP / 锚位 | ✓（最多 4） | ✗ | ✗ | ✓（pin index） | ✓（radix lock） |
-| TTL 控制 | 5m / 1h | 24h（部分模型） | 无 | pin / unpinned | pin + tier |
-| 显式 prewarm | ✓（`max_tokens:0`） | ✗ | ✗ | ✓ | ✓（`prewarm_only`） |
-| 路由 key | ✗ | `prompt_cache_key` | ✗ | `cache_salt` | `affinity_key` (CASS) |
-| **缓存查询（read）** | ✗ | ✗ | ✗ | ✓ | ✓ |
-| **段淘汰（write）** | ✗ | ✗ | ✗ | ✓ | ✓ |
-| **fork-and-replace** | ✗ | ✗ | ✗ | 部分 | ✓ |
-| **HiCache 层级提示** | ✗ | ✗ | ✗ | ✗ | ✓ |
-| usage 字段 | `cache_creation_input_tokens` / `cache_read_input_tokens` | `prompt_tokens_details.cached_tokens` | `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` | `prompt_tokens` + `cached_tokens` | 同左 + `cache_hierarchy_breakdown` |
-
-**双向能力**（`BidirectionalEngineAdapter` mixin）只在开源推理引擎上实现：
-
-- `bridge.probe_cache()` —— 问 server "前缀还在缓存里吗？"，闭源 API 返回 `hit=False`。
-- `bridge.cooperative_fold(message_range=..., summary=...)` —— 折叠 IR + 拿到服务端 cache 指令片段（`evict_span` / `fork_from_path`）。
-- `bridge.emit_with_extras(ctrl)` —— 把上一步的指令合并进 wire 请求。
-
-vLLM 走 `cache_policy.{pin_prefix_until_block, evict_span}` + `cache_salt`；SGLang 走 `cache_control.{lock_radix_path, fork_from_path, replace_suffix, prefer_tier, affinity_key}`。
-
-> **核心收益**：闭源 API 的 `Fold` 是客户端 rewrite，每次 fold 都要 server 重新 prefill 整段；vLLM/SGLang 的 `cooperative_fold` 让 server 保留前缀 KV 不动、只重算摘要尾段——这是闭源 API 完全做不到的。
-
----
-
-## 7. 用法示例
+## ⬢ &nbsp;30-second start
 
 ```python
 from telos import Bridge, load_engine, load_harness
@@ -110,114 +34,222 @@ ir = harness.parse(raw_request, session_id="task-001",
                    expected_turns=20)
 
 bridge = Bridge(ir, engine)
-plan   = bridge.mark()        # 让 engine 决定 BP / routing-key
-wire   = bridge.emit()        # 拿到可发的 wire 请求
+plan   = bridge.mark()        # let the engine decide BP / routing-key
+wire   = bridge.emit()        # get the wire request, ready to send
 
-response = call_llm(wire)     # 你自己的 HTTP 客户端
+response = call_llm(wire)     # your own HTTP client
 report   = bridge.absorb_usage(response)
 print(report.cache_read, report.raw_input)
 ```
 
-完整端到端跑通见 [`telos/demo.py`](demo.py)：
-
-```bash
-python -m telos.demo
-python -m telos.tests.test_smoke
-```
+Full end-to-end run: [`telos/demo.py`](demo.py) — `python -m telos.demo`.
 
 ---
 
-## 8. 与 CLAUDE.md 北极星指标对接
+## ⬢ &nbsp;What it looks like
 
-`UsageReport` 字段直接对齐 [`benchmark/scripts/compute-metrics.py`](../benchmark/scripts/compute-metrics.py) 的 schema：
+<div align="center">
 
-```
-input_total = raw_input + cache_read + cache_write
-```
+<img src="branding/dashboard.png" alt="TELOS savings dashboard — absolute dollars saved across harness, model, and session" width="820"/>
 
-四个北极星指标都是绝对量，不是比例：
+<sub>Every call's normalized usage lands in a jsonl log, aggregated into a single-file HTML dashboard.<br/>It counts <strong>absolute dollars saved</strong> — not ratios you can game by shrinking the denominator.</sub>
 
-1. resolved rate
-2. input tokens / task
-3. cache_read total
-4. tokens per resolved
-
-TELOS 不去优化"比例"——比例可以靠缩小分母作弊。它只优化**绝对的 cache_read 增量**和**绝对的 raw_input 减量**。
+</div>
 
 ---
 
-## 9. R1–R8 修复在代码中的位置
+## ⬢ &nbsp;Engines — one IR, five backends
 
-review 阶段发现协议设计有 8 个隐患（R1–R8）。Python 实现里全部修掉了：
+TELOS is normative: it defines how context *should* be represented, and engines align by capability. One `TelosIR` landing on different engines is degraded **deterministically** by the adapter — never silently, never lossily in meaning.
 
-| 编号 | 问题 | 修复位置 |
+| Capability | Anthropic 4.6+ | OpenAI 4+/5.x | DeepSeek V3+ | vLLM | SGLang |
+|---|:---:|:---:|:---:|:---:|:---:|
+| explicit BP / anchors | ✓ (≤4) | ✗ | ✗ | ✓ | ✓ |
+| explicit prewarm | ✓ | ✗ | ✗ | ✓ | ✓ |
+| routing key | ✗ | `prompt_cache_key` | ✗ | `cache_salt` | `affinity_key` |
+| cache probe / segment evict | ✗ | ✗ | ✗ | ✓ | ✓ |
+| fork-and-replace | ✗ | ✗ | ✗ | partial | ✓ |
+
+> **Bidirectional capability** (`BidirectionalEngineAdapter`, only on open-source inference engines): `cooperative_fold()` lets the server keep the prefix KV untouched and recompute only the summary tail — a closed API's `fold` is a client-side rewrite that forces the server to re-prefill the whole span every time. Full matrix in [protocol §6](docs/2026-05-06-telos-protocol.md).
+
+---
+
+## ⬢ &nbsp;Why TELOS exists — stop being a tenant in someone else's agent
+
+<p align="center">
+  <em>Every team putting agents into production hits the same four walls.<br/>
+  TELOS is the single answer to all four — one canonical representation of agent context.</em>
+</p>
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🔒 &nbsp;Context no longer locked to one vendor
+
+> *"Switch models to run the same task, and you start from scratch."*
+
+`TelosIR` is an **engine-agnostic, serializable, portable** representation of context. An Anthropic session moves verbatim to DeepSeek, to your own vLLM — adapters degrade deterministically, without losing meaning.
+
+<sub>📁 [`telos/ir.py`](ir.py) · [`telos/engine/`](engine/)</sub>
+
+</td>
+<td width="50%" valign="top">
+
+### 💸 &nbsp;Stop paying twice for the same prefix
+
+> *"Twenty turns in, every turn re-prefills the identical prefix."*
+
+Three-color bands — **PIN · FOLD · DROP** — plus one ordering invariant keep the "base" resident in the KV cache. Memory is pulled on demand, not stuffed whole into every prompt.
+
+<sub>📁 [`telos/bridge.py`](bridge.py) · [`telos/refpool.py`](refpool.py)</sub>
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧾 &nbsp;Cost you can see, counted in absolute $
+
+> *"All you get is a ratio, diluted by whatever denominator."*
+
+Every call's normalized usage lands in a jsonl log, aggregated into a single-file HTML dashboard. It counts **absolutes**: cache_read, cost saved — ratios can be gamed by shrinking the denominator; absolute $ cannot.
+
+<sub>📁 [`scripts/build_savings_dashboard.py`](scripts/build_savings_dashboard.py)</sub>
+
+</td>
+<td width="50%" valign="top">
+
+### 🎛 &nbsp;You hold the controller
+
+> *"Handing a task to the agent that's better at it — can't be done."*
+
+Because context is portable, you genuinely hold the controller: one task dispatched across harnesses, taking the best of each. **TELOS provides mechanism, never policy** — it never decides for you, never burns an LLM call on routing.
+
+<sub>📁 [`telos/harness/`](harness/)</sub>
+
+</td>
+</tr>
+</table>
+
+<p align="center">
+  <strong>In one sentence:</strong> TELOS is the canonical representation of the only durable asset<br/>
+  in the agent stack — context. Your context; harnesses are just hired help.
+</p>
+
+---
+
+## ⬢ &nbsp;One representation, three things
+
+**TELOS** — Greek τέλος, "purpose, end"; also read as "stone tablet." The inscription on a tablet's base is carved once and lasts a lifetime; the lines added turn by turn above can be wiped anytime, but never touch the base. And the tablet means a second thing — **the tablet is yours**: it can be carried to any scribe (harness), any printing house (engine).
+
+```
+③ Sovereignty   You hold the controller — any task, hire any harness, any model, no cage
+                      ▲  made possible only by
+① Portability   Context / memory is an engine-agnostic, serializable, portable asset
+                      ▼  and the same representation also delivers
+② Efficiency    Extreme KV-cache hits + on-demand memory; cost in absolute $, visible
+```
+
+> **③ is the purpose, ① the mechanism, ② the payoff and the wedge.** Not parallel — a stack. The iron rule: TELOS provides mechanism, never policy — the moment it decides for you, it has taken the controller back.
+
+---
+
+## ⬢ &nbsp;Architecture
+
+```
+agent harness ──► TELOS Bridge ──► engine adapter ──► LLM service
+   (parse)          (5 primitives)   (capability-aware)
+```
+
+| Layer | Files | Responsibility |
 |---|---|---|
-| R1 | OpenAI `prompt_cache_key` 单 key ≥15 RPM 才会扩槽位，TELOS 反向写错 | `telos/engine/openai.py :: KEY_RPM_SOFT_CAP = 12` + `shard()` |
-| R2 | Anthropic 4 BP 只覆盖 head + tail，中间 20+ 轮的稳定段落空 | `telos/engine/anthropic.py :: _MID_ANCHOR_STRIDE = 19` 的 BP-mid |
-| R3 | 子 agent IR 与父 IR 的 session_id 混用 | `telos/harness/hermes.py` 注释明示子 IR 独立 parse |
-| R4 | `fold()` 后 Mark slot 落在已折叠区，需重 plan | `telos/bridge.py :: fold()` docstring 说明，需调 `mark()` 重生成 |
-| R5 | tool_def / tool_use / tool_result 的字段顺序 canonicalize 漏在 adapter；tools 数组顺序 / `required` 数组顺序未稳 | `telos/bridge.py :: _canonicalize_ir()` 在 emit 前统一做：dict key 排序 + tools 数组按 `(source, mcp_server, name)` 稳定排 + tool_def schema 子树里 `required` 集合排序（详见协议 §5.1） |
-| R6 | thinking 块跨非 tool_result 调用会失效 | `telos/engine/base.py :: thinking_preserved_across_non_tool_result` 能力位 |
-| R7 | Anthropic BP 候选数 > 4 时没有显式优先级 | `telos/engine/anthropic.py :: plan_marks` 的优先级字典 + 截断 |
-| R8 | refresh 频率没节流，可能反向打满 quota | `telos/bridge.py :: REFRESH_THRESHOLD = 11` 的自适应门控 |
+| harness | [`harness/openclaw.py`](harness/) `hermes.py` | split envelope, large docs into ref-pool, produce `TelosIR` |
+| bridge | [`bridge.py`](bridge.py) [`ir.py`](ir.py) [`refpool.py`](refpool.py) | 5 primitives, invariant checks, frozen ref-pool slugs, canonicalize |
+| engine | [`engine/anthropic.py`](engine/) `openai.py` `deepseek.py` | capability-aware Mark, wire serialization, usage parsing |
+
+The bridge is pure Python with no LLM SDK dependency. `TelosIR` is the single data structure that passes between all three layers — frozen, narrow-fielded, engine-agnostic.
 
 ---
 
-## 10. Savings dashboard（看你省了多少）
+## ⬢ &nbsp;One invariant
 
-任何 TELOS 入口（proxy / SDK transport）都会把每次 call 的 normalized usage
-按行追加到 `usage_log` jsonl。`telos dashboard` 把它聚合成单文件 HTML——
-零 JS、inline SVG，离线可开。
+The whole protocol has exactly one hard constraint. Within each segment (`tools` / `system` / a single `message`), blocks must be in physical order:
+
+```
+PIN*  →  FOLD*  →  DROP*
+```
+
+<sub>(In a `message`, `tool_result` blocks always come first — required by the Anthropic protocol.)</sub>
+
+| Band | Meaning | Typical content |
+|---|---|---|
+| **PIN** | long-lived stable segment | tool definitions, system prompt, the user's current question |
+| **FOLD** | cacheable but droppable on compact | assistant replies, tool_result, large ref-pool docs |
+| **DROP** | never enters the cache hash | timestamp, cwd, git status, envelope |
+
+Violate it and `TelosInvariantError` is raised. Everything else is a soft suggestion.
+
+### Five primitives &nbsp;<sub>(`Bridge` methods)</sub>
+
+| Primitive | Purpose |
+|---|---|
+| `place(segment, blocks)` | put blocks into tools / system / the current message |
+| `pin(slug, payload)` | write a PIN block into the system segment |
+| `mark()` | let the engine produce this turn's BP / routing-key plan |
+| `fold(slugs= / message_range=, summary=)` | fold old turns into ref-pool references |
+| `refresh(plan)` | once throttling allows, send a `max_tokens=0` prewarm (Anthropic only) |
+
+### ref-pool — a "pointer table" for context
+
+A slug is **frozen** the moment `register()` is called: content can change (`fold()`), the slug cannot. `fold()` swaps the payload, not the slug → every `[ref:slug]` reference stays byte-identical → BPs still hit after a fold. This is "portable context" realized in the protocol: **stable pointers, flowing content.**
+
+---
+
+## ⬢ &nbsp;Cost you can see · savings dashboard
+
+Every TELOS entry point (proxy / SDK transport) appends each call's normalized usage to a `usage_log` jsonl, aggregated into a single-file HTML page (zero JS, opens offline):
 
 ```bash
-# 单个 log
 telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html
-open savings.html
 
-# 多个 log / glob 一起来
-telos dashboard --usage-log '/tmp/runs/*.usage.jsonl' \
-                --usage-log ~/.telos/usage.jsonl
-```
-
-看板内容：
-
-- **tokens saved**：累计 cache_read（命中缓存的 token）
-- **cost saved**：cache_read × (input_price − cache_read_price)，按 [scripts/build_savings_dashboard.py](scripts/build_savings_dashboard.py) 里的 2026 公开价表估
-- token mix 分段条 / 按小时的活跃度时间线
-- 按 harness / model / session 三种维度分别拆 saved $
-
-未识别 model 走 Sonnet 价位做兜底估算；金额仅供"省了多少"参考，不是结账数。
-
-### 10.1 Live dashboard（proxy 内嵌，自动刷新）
-
-`telos proxy` 启动时会顺带挂一个只读 endpoint：
-
-```
-GET http://<host>:<port>/__telos/dashboard
-```
-
-每次请求都重新读 `--usage-log` 文件 → 重新聚合 → 返回带
-`<meta http-equiv="refresh">` 的 HTML，浏览器自己每 N 秒刷一次（零 JS）。
-
-```bash
+# auto-refreshing dashboard embedded in the proxy
 telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl
-# 浏览器打开：
 open http://127.0.0.1:7171/__telos/dashboard
-
-# 默认 5 秒刷一次；改成 2 秒：
-telos proxy --usage-log ~/.telos/usage.jsonl --dashboard-refresh 2
-# 关掉 auto-refresh（手动 reload 才更新）：
-telos proxy --usage-log ~/.telos/usage.jsonl --dashboard-refresh 0
 ```
 
-没设 `--usage-log` 也能访问，会显示一个空 stub（仍带 refresh 标签，等
-你重启 proxy 配上 log 后页面会自动接上）。
+The dashboard counts **absolutes**: cumulative cache_read, cost saved = cache_read × (input_price − cache_read_price), token mix, broken down across harness / model / session.
 
 ---
 
-## 11. 不做什么
+## ⬢ &nbsp;Appendix: R1–R8 protocol-hazard fixes
 
-- ❌ 不做 token 计数（让 engine 自己回 usage）。
-- ❌ 不做 retry / backoff（属于 HTTP 客户端的事）。
-- ❌ 不做 KV-cache 物理实现（这是服务侧的事；TELOS 只决定**喂什么、按什么顺序喂**）。
-- ❌ 不做 streaming SSE 解析（`absorb_usage` 接受最终 response object）。
+Review surfaced 8 design hazards in the protocol; the Python implementation fixes all of them:
+
+| ID | Problem | Fix location |
+|---|---|---|
+| R1 | OpenAI `prompt_cache_key` only widens slots at ≥15 RPM per key | `engine/openai.py :: KEY_RPM_SOFT_CAP = 12` + `shard()` |
+| R2 | Anthropic's 4 BPs cover only head + tail, leaving mid turns uncached | `engine/anthropic.py :: _MID_ANCHOR_STRIDE = 19` |
+| R3 | sub-agent IR and parent IR sharing a `session_id` | `harness/hermes.py` — sub-IR parsed independently |
+| R4 | after `fold()`, a Mark slot can land in a folded span | `bridge.py :: fold()` — re-run `mark()` |
+| R5 | tool field / array order not stably canonicalized | `bridge.py :: _canonicalize_ir()` |
+| R6 | thinking blocks lost across non-tool_result calls | `engine/base.py :: thinking_preserved_across_non_tool_result` |
+| R7 | no explicit priority when Anthropic BP candidates > 4 | `engine/anthropic.py :: plan_marks` priority + truncation |
+| R8 | refresh unthrottled, can saturate quota in reverse | `bridge.py :: REFRESH_THRESHOLD = 11` adaptive gate |
+
+---
+
+## ⬢ &nbsp;Going deeper
+
+| What you want | Where |
+|---|---|
+| Get started (install, integration, CLI, troubleshooting) | [`docs/User-guide.md`](docs/User-guide.md) |
+| Understand the protocol | [`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md) |
+| See the architecture | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| See the change history | [`CHANGELOG.md`](CHANGELOG.md) |
+
+---
+
+## ⬢ &nbsp;License
+
+Apache-2.0 — the protocol core is open source, forever. See [LICENSE](LICENSE).

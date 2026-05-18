@@ -8,10 +8,7 @@
 > - 想看协议规范 → [2026-05-06-telos-protocol.md](2026-05-06-telos-protocol.md)
 > - 想看改动史 → [../CHANGELOG.md](../CHANGELOG.md)
 >
-> 注：`docs/ARCHITECTURE_AND_GUIDE.md` 描述的是更早的 TypeScript `agent-janus/`
-> 布局，**已过时**，以本文为准。
->
-> 最后更新：2026-05-16
+> 最后更新：2026-05-18
 
 ---
 

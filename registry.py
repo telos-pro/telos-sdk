@@ -19,13 +19,22 @@ _HARNESS_ALIASES: dict[str, str] = {
 }
 
 
+def canonical_harness(name: str) -> str:
+    """把 harness 别名解析成 canonical 名（``claude-code`` → ``hermes``）。
+
+    非别名原样返回。用于让 usage log / dashboard 不论调用方传别名还是
+    canonical 名都显示一致的 harness。
+    """
+    return _HARNESS_ALIASES.get(name, name)
+
+
 def load_harness(name: str) -> "HarnessPlugin":
     """按名加载 harness plugin。
 
     支持：``openclaw``, ``hermes``, ``telos``
     别名：``claude-code`` → hermes, ``deepseek-cli`` → telos
     """
-    canonical = _HARNESS_ALIASES.get(name, name)
+    canonical = canonical_harness(name)
     if canonical == "openclaw":
         from telos.harness.openclaw import OpenClawPlugin
         return OpenClawPlugin()

@@ -26,8 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--usage-log", type=Path, default=None,
                         help="每次调用写一行 jsonl 到此路径")
     parser.add_argument("--harness", default=None,
-                        choices=["openclaw", "hermes"],
-                        help="强制使用某个 harness（默认自动检测）")
+                        choices=["openclaw", "hermes", "claude-code"],
+                        help="强制使用某个 harness（默认自动检测）。"
+                             "claude-code 是 hermes 的别名。")
     parser.add_argument("--mode", default="telos", choices=list(MODE_LABELS),
                         help="默认优化开关：none=纯透传 / telos=只前缀缓存 / "
                              "rtk=只过滤工具输出 / both=两者都开（默认 telos）。"

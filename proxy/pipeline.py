@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from telos import Bridge, load_engine, load_harness
 from telos.bridge import BridgeSessionState
 from telos.ir import Band, TelosIR
+from telos.registry import canonical_harness
 from telos.scripts.telos_anthropic_transport import _detect_harness
 
 
@@ -96,6 +97,9 @@ def process_anthropic_request(
         name = _detect_harness(raw)
         if session_state is not None:
             session_state.sticky_harness = name
+    # 别名（claude-code → hermes）统一成 canonical 名，让 usage log /
+    # dashboard 不论调用方传别名还是 canonical 名都一致。
+    name = canonical_harness(name)
     harness = load_harness(name)
     engine = load_engine(engine_name)
 

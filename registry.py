@@ -13,15 +13,26 @@ if TYPE_CHECKING:
     from telos.engine.base import EngineAdapter
 
 
+_HARNESS_ALIASES: dict[str, str] = {
+    "claude-code": "hermes",
+    "deepseek-cli": "telos",
+}
+
+
 def load_harness(name: str) -> "HarnessPlugin":
-    """按名加载 harness plugin。当前支持：``openclaw``, ``hermes``, ``telos``。"""
-    if name == "openclaw":
+    """按名加载 harness plugin。
+
+    支持：``openclaw``, ``hermes``, ``telos``
+    别名：``claude-code`` → hermes, ``deepseek-cli`` → telos
+    """
+    canonical = _HARNESS_ALIASES.get(name, name)
+    if canonical == "openclaw":
         from telos.harness.openclaw import OpenClawPlugin
         return OpenClawPlugin()
-    if name == "hermes":
+    if canonical == "hermes":
         from telos.harness.hermes import HermesPlugin
         return HermesPlugin()
-    if name == "telos":
+    if canonical == "telos":
         from telos.harness.telos import TelosPlugin
         return TelosPlugin()
     raise ValueError(f"Unknown harness plugin: {name!r}")

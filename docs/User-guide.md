@@ -166,6 +166,16 @@ usage log → /Users/.../usage.jsonl
 
 代理路径接受所有 Anthropic 协议路径；`/v1/messages` 经 TELOS 改写，其他原样 passthrough。
 
+> **接 Claude Code 时建议加 `--harness claude-code`**：
+> ```bash
+> telos proxy --port 7171 --harness claude-code --usage-log ~/.telos/usage.jsonl
+> ```
+> Claude Code 除主对话外，还会用 Haiku 发一批辅助请求（对话标题生成、新话题检测等）。
+> 这些请求**没有工具、也没有 `<system-reminder>` 信封标签**，`_detect_harness` 的内容
+> 检测无从识别，会落到兜底的 `openclaw` —— dashboard 上就会看到本该是 Claude Code 的
+> 流量一部分显示成 `openclaw`。显式 `--harness claude-code` 跳过自动检测，所有请求
+> 一律按 Claude Code（hermes）解析，dashboard 显示稳定一致。
+
 ### 4.2 接入 Claude Code（一行命令）
 
 ```bash

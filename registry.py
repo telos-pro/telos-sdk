@@ -28,6 +28,26 @@ def canonical_harness(name: str) -> str:
     return _HARNESS_ALIASES.get(name, name)
 
 
+# canonical harness 名 → 面板/报表上给人看的展示名。
+# 内部代号（hermes）对用户不直观——dashboard 一律显示这里的名字。
+_HARNESS_DISPLAY_NAMES: dict[str, str] = {
+    "openclaw": "OpenClaw",
+    "hermes": "Claude Code",
+    "telos": "Telos",
+}
+
+
+def harness_display_name(name: str) -> str:
+    """把 harness 名（canonical 或别名）映射成 dashboard 展示名。
+
+    ``hermes`` / ``claude-code`` → ``"Claude Code"``。未知名（如
+    ``passthrough`` / ``rtk-only`` / ``?``）原样返回。
+    """
+    if not name:
+        return name
+    return _HARNESS_DISPLAY_NAMES.get(canonical_harness(name), name)
+
+
 def load_harness(name: str) -> "HarnessPlugin":
     """按名加载 harness plugin。
 

@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from telos.registry import harness_display_name
+
 
 # ---------------------------------------------------------------------------
 # 价格表（USD / 1M tokens，2026 年 Anthropic / OpenAI / DeepSeek 公开价）
@@ -342,7 +344,8 @@ def aggregate(records: Iterable[dict[str, Any]]) -> Summary:
         n_dict["_w5"] = w5
         n_dict["_w1"] = w1
         model = rec.get("model") or ""
-        harness = rec.get("harness") or "?"
+        # "Breakdown by harness" 按展示名归组：hermes → "Claude Code"。
+        harness = harness_display_name(rec.get("harness") or "?")
         session = rec.get("session_id") or "(no-session)"
         mode = rec.get("mode") or "telos"
         compare_group = rec.get("compare_group")

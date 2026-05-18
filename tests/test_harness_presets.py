@@ -15,7 +15,7 @@ from telos.harness.hermes import HermesPlugin
 from telos.harness.openclaw import OpenClawPlugin
 from telos.harness.telos import TelosPlugin
 from telos.proxy.pipeline import process_anthropic_request
-from telos.registry import canonical_harness, load_harness
+from telos.registry import canonical_harness, harness_display_name, load_harness
 
 
 _HERMES_REQ = {
@@ -43,6 +43,22 @@ def test_load_harness_accepts_aliases() -> None:
     assert isinstance(load_harness("deepseek-cli"), TelosPlugin)
     assert isinstance(load_harness("openclaw"), OpenClawPlugin)
     print("✓ test_load_harness_accepts_aliases")
+
+
+def test_harness_display_name() -> None:
+    # canonical 名 → 友好展示名
+    assert harness_display_name("hermes") == "Claude Code"
+    assert harness_display_name("openclaw") == "OpenClaw"
+    assert harness_display_name("telos") == "Telos"
+    # 别名先归一化再映射
+    assert harness_display_name("claude-code") == "Claude Code"
+    assert harness_display_name("deepseek-cli") == "Telos"
+    # 非 harness 名（proxy 的伪 harness）原样返回
+    assert harness_display_name("passthrough") == "passthrough"
+    assert harness_display_name("rtk-only") == "rtk-only"
+    assert harness_display_name("?") == "?"
+    assert harness_display_name("") == ""
+    print("✓ test_harness_display_name")
 
 
 def test_presets_cover_all_harnesses() -> None:
@@ -95,6 +111,7 @@ def test_pipeline_canonicalizes_alias_override() -> None:
 if __name__ == "__main__":
     test_canonical_harness_resolves_aliases()
     test_load_harness_accepts_aliases()
+    test_harness_display_name()
     test_presets_cover_all_harnesses()
     test_transport_for_harness_builds_each_preset()
     test_transport_for_harness_rejects_unknown()

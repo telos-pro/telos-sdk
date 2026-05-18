@@ -27,6 +27,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
+from telos.registry import harness_display_name
+
 if TYPE_CHECKING:
     from telos.proxy.inspector import SessionInspector
     from telos.proxy.server import _SessionRegistry
@@ -215,7 +217,7 @@ def _render_overview(inspector: "_SessionInspector",
             f'<td class="left"><a href="?session={html.escape(sid)}">'
             f'{html.escape(sid)}</a></td>'
             f'<td class="left">{html.escape(e.last_model or "")}</td>'
-            f'<td class="left">{html.escape(e.last_harness or "")}</td>'
+            f'<td class="left">{html.escape(harness_display_name(e.last_harness or ""))}</td>'
             f'<td>{len(e.calls)}</td>'
             f'<td>{tool_invocations}</td>'
             f'<td>{n_tools}</td>'
@@ -266,7 +268,7 @@ def _render_session_detail(entry, registry: "_SessionRegistry",
   <div class="kpi"><div class="label">model</div>
     <div class="value" style="font-size:13px">{html.escape(entry.last_model or "—")}</div></div>
   <div class="kpi"><div class="label">harness</div>
-    <div class="value" style="font-size:13px">{html.escape(entry.last_harness or "—")}</div></div>
+    <div class="value" style="font-size:13px">{html.escape(harness_display_name(entry.last_harness) or "—")}</div></div>
   <div class="kpi"><div class="label">calls seen</div>
     <div class="value">{len(entry.calls)}</div></div>
   <div class="kpi"><div class="label">plan slots</div>

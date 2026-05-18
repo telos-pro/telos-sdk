@@ -50,6 +50,8 @@ from telos.proxy.inspector import (
     entry_to_json as _inspector_entry_to_json,
 )
 from telos.proxy.pipeline import PipelineResult, process_anthropic_request
+from telos.registry import canonical_harness
+from telos.scripts.telos_anthropic_transport import _detect_harness_signal
 
 
 _DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -320,6 +322,41 @@ class ProxyApp:
         self._pipeline_failures = 0
         self._registry = _SessionRegistry(max_size=max_sessions)
         self._inspector = _SessionInspector(max_size=max_sessions)
+        # per-client harness 记忆：key = _client_identity(headers)。一旦某个
+        # client 被任一条请求确信识别（HTTP 头 / 富内容），就记住——后续它发
+        # 的 tool-less 辅助请求（Haiku 标题生成 / 话题检测等）没有任何 harness
+        # 特征，靠这份记忆继承，不会误判成 openclaw。每个 API key 一条，体量极小。
+        self._client_harness: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # harness 解析
+    # ------------------------------------------------------------------
+
+    def _resolve_harness(self, request: web.Request,
+                         raw: Mapping[str, Any]) -> str:
+        """决定本次请求按哪个 harness 解析。
+
+        优先级：显式 ``--harness`` 覆盖 > 本次请求的确信信号 > 该 client
+        之前的确信记忆 > 兜底 ``openclaw``。确信信号（HTTP 头 / 富内容）会
+        被 pin 到 ``self._client_harness``，供该 client 后续无信号请求继承。
+        """
+        if self.harness_override:
+            return canonical_harness(self.harness_override)
+        client = _client_identity(request.headers)
+        signal = _detect_harness_signal(raw, request.headers)
+        if signal is not None:
+            if self._client_harness.get(client) != signal:
+                self._client_harness[client] = signal
+                _log.info("harness pinned: client=%s -> %s (User-Agent=%r)",
+                          client or "(anon)", signal,
+                          request.headers.get("user-agent", ""))
+            return signal
+        # 本次请求无确信信号——继承该 client 之前确信识别出的 harness。
+        remembered = self._client_harness.get(client)
+        if remembered is not None:
+            return remembered
+        return "openclaw"
+
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -479,12 +516,15 @@ class ProxyApp:
 
         # ---- 1. TELOS 管线（仅 mode.telos）----
         if mode.telos:
+            # harness 在 proxy 层解析：HTTP 头 / per-client 记忆都在这一层，
+            # 内容检测看不到。解析结果显式传给管线，覆盖管线内部的内容检测。
+            resolved_harness = self._resolve_harness(request, raw)
             try:
                 result = process_anthropic_request(
                     effective_raw,
                     session_id=session_id,
                     session_state=session_state,
-                    harness_name=self.harness_override,
+                    harness_name=resolved_harness,
                 )
             except Exception as e:  # noqa: BLE001
                 self._pipeline_failures += 1

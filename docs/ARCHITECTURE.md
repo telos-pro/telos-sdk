@@ -395,6 +395,10 @@ bridge 的 `_tool_sort_key`，保护 PIN 前缀稳定。
 对 Anthropic 形状的流量在 `hermes` / `openclaw` 之间二选一。检测顺序
 （首个命中即返回）：
 
+0. **HTTP 头指纹** —— `User-Agent` 含 `claude-cli` 或 `x-app: cli` → `hermes`。
+   仅 proxy 路径有请求头。这是内容检测拿不到、却对每条请求都可靠的
+   per-client 信号：Claude Code 用 Haiku 发的辅助请求（标题生成 / 话题检测）
+   既无工具也无标签，下面 1–3 全 miss，只有头指纹能正确识别。
 1. **Envelope 标签** —— 在 system 文本**和每条 user 文本块**里跑成对
    开/闭正则（`system-reminder` / `command-message` / `command-name`）。
    成对匹配避免用户只是在散文里讨论标签而误判。命中 → `hermes`。
@@ -404,8 +408,14 @@ bridge 的 `_tool_sort_key`，保护 PIN 前缀稳定。
    捕捉首轮（还没注入 reminder）的请求。
 4. 兜底 → `openclaw`。
 
-结果在 session 内 sticky（写进 `BridgeSessionState.sticky_harness`），避免
-逐 call 重新探测导致 harness 翻转、前缀失稳。
+`_detect_harness_signal` 返回**确信信号**（命中 0–3）或 `None`（只会兜底）。
+proxy 用它做 **per-client harness 记忆**（`ProxyApp._client_harness`，按
+`_client_identity` keyed）：某 client 被任一条请求确信识别后就记住，它后续
+无信号的请求（如 tool-less 辅助请求）直接继承，不会误判成 `openclaw`。
+
+SDK transport 路径没有 HTTP 头，检测结果在 session 内 sticky（写进
+`BridgeSessionState.sticky_harness`），避免逐 call 重新探测导致 harness
+翻转、前缀失稳。
 
 ---
 

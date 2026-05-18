@@ -53,6 +53,13 @@ from telos.bridge import BridgeSessionState
 #   3) 增加 `<command-name>`（slash 命令面板会单独注入此标签）
 #   4) 兜底：assistant 已有 `thinking` 块
 #   5) 兜底：tools 列表命中 Claude Code 固有工具集合 ≥ 3 个
+#
+# 但内容检测有个理论盲区：Claude Code 用 Haiku 发的辅助请求（对话标题生成 /
+# 话题检测等）既无工具、也无 envelope 标签，上面 5 条全 miss → 误判 openclaw。
+# 这类请求本身不携带任何 harness 特征，内容检测无解。
+#   6) 最高优先级 —— HTTP 头指纹：同一 agent 进程用同一 HTTP client，
+#      `User-Agent` / `x-app` 在主对话和辅助请求上完全一致，是内容检测拿不到、
+#      却对每条请求都稳定可靠的 per-client 信号。proxy 路径会把请求头传进来。
 
 _HERMES_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(rf"<{tag}>.*?</{tag}>", re.DOTALL)
@@ -128,7 +135,47 @@ def _tool_fingerprint_matches_hermes(raw_request: Mapping[str, Any]) -> bool:
     return len(names & _HERMES_TOOL_FINGERPRINT) >= _HERMES_TOOL_HITS_REQUIRED
 
 
-def _detect_harness(raw_request: Mapping[str, Any]) -> str:
+# Claude Code 官方 CLI 的 HTTP 头指纹。同一个 agent 进程用同一个 HTTP client，
+# 这些头在主对话和辅助请求（Haiku 标题生成 / 话题检测等）上完全一致——这正是
+# 内容检测拿不到、却对每条请求都稳定可靠的 per-client 信号。
+_HERMES_USER_AGENT_SUBSTR = "claude-cli"   # User-Agent 形如 claude-cli/1.x.x ...
+_HERMES_X_APP_VALUE = "cli"                # Claude Code 设 x-app: cli
+
+
+def _detect_harness_from_headers(headers: Mapping[str, str]) -> str | None:
+    """从 HTTP 请求头识别 harness。命中 Claude Code → ``"hermes"``，否则 ``None``。
+
+    headers 的 key 大小写不敏感（HTTP 规范）；这里统一小写后再查，兼容
+    aiohttp 的 ``CIMultiDict`` 和单元测试传入的普通 dict。
+    """
+    if not headers:
+        return None
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    ua = lowered.get("user-agent", "").lower()
+    if _HERMES_USER_AGENT_SUBSTR in ua:
+        return "hermes"
+    if lowered.get("x-app", "").lower() == _HERMES_X_APP_VALUE:
+        return "hermes"
+    return None
+
+
+def _detect_harness_signal(
+    raw_request: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+) -> str | None:
+    """返回**确信识别**出的 harness，识别不出则 ``None``。
+
+    与 ``_detect_harness`` 的区别：这里把"什么信号都没命中"如实返回 ``None``，
+    不混进 ``openclaw`` 兜底。proxy 用它做 per-client 记忆——只有确信信号才
+    能 pin 一个 client，否则首个请求恰好是 tool-less 辅助请求的 Claude Code
+    client 会被永久错钉成 openclaw。
+    """
+    # 0) HTTP 头指纹——最高优先级，对每条请求都可靠（含 tool-less 辅助请求）
+    if headers is not None:
+        from_headers = _detect_harness_from_headers(headers)
+        if from_headers is not None:
+            return from_headers
+
     # 1) envelope 标签（system 段 + 所有 user message text）
     if _has_hermes_marker(_flatten_system_text(raw_request)):
         return "hermes"
@@ -144,7 +191,20 @@ def _detect_harness(raw_request: Mapping[str, Any]) -> str:
     if _tool_fingerprint_matches_hermes(raw_request):
         return "hermes"
 
-    return "openclaw"
+    return None
+
+
+def _detect_harness(
+    raw_request: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+) -> str:
+    """识别 harness；识别不出时兜底 ``openclaw``。
+
+    ``headers`` 可选——proxy 路径会传 HTTP 请求头，SDK transport / replay /
+    直接测试调用没有头就只走内容检测。签名向后兼容。
+    """
+    return _detect_harness_signal(raw_request, headers) or "openclaw"
+
 
 
 # ---------------------------------------------------------------------------

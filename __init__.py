@@ -32,6 +32,7 @@ from telos.engine.base import (
     ProbeResult,
 )
 from telos.registry import load_engine, load_harness
+from telos.scripts.transport import TelosTransport, HarnessPreset, PRESETS
 
 __all__ = [
     "Band",
@@ -48,4 +49,7 @@ __all__ = [
     "ProbeResult",
     "load_harness",
     "load_engine",
+    "TelosTransport",
+    "HarnessPreset",
+    "PRESETS",
 ]

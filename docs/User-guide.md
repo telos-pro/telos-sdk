@@ -216,8 +216,8 @@ telos proxy [options]
   --port PORT          监听端口（默认 7171）
   --upstream URL       真实 Anthropic API endpoint（默认 https://api.anthropic.com）
   --usage-log PATH     每次调用追加一行 jsonl
-  --harness {openclaw,hermes}
-                       强制 harness（默认按内容自动检测）
+  --harness {openclaw,hermes,claude-code}
+                       强制 harness（默认按内容自动检测）；claude-code 是 hermes 的别名
   --strict             TELOS 失败时返 500，而不是降级到 passthrough
 
 telos init [options]

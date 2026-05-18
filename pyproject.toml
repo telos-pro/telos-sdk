@@ -1,16 +1,50 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "telos-sdk"
 version = "0.1.0"
+description = "TELOS — cache-friendly prompt protocol: stable prefix, tiered bands, ephemeral tail, layered adapters, anchored marks."
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "george", email = "george.qiyi@gmail.com" },
+]
+keywords = [
+    "llm",
+    "prompt",
+    "prompt-caching",
+    "anthropic",
+    "openai",
+    "proxy",
+    "agent",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "anthropic>=0.49",
     "openai>=1.72",
     "aiohttp>=3.10",
 ]
+
+[project.urls]
+Homepage = "https://github.com/telos-pro/telos-sdk"
+Repository = "https://github.com/telos-pro/telos-sdk"
+Issues = "https://github.com/telos-pro/telos-sdk/issues"
+Changelog = "https://github.com/telos-pro/telos-sdk/blob/main/CHANGELOG.md"
 
 [project.scripts]
 telos = "telos.cli:main"

@@ -13,7 +13,6 @@ import os
 from telos import PRESETS, HarnessPreset, TelosTransport
 from telos.harness.hermes import HermesPlugin
 from telos.harness.openclaw import OpenClawPlugin
-from telos.harness.telos import TelosPlugin
 from telos.proxy.pipeline import process_anthropic_request
 from telos.registry import canonical_harness, harness_display_name, load_harness
 
@@ -31,16 +30,15 @@ _HERMES_REQ = {
 
 def test_canonical_harness_resolves_aliases() -> None:
     assert canonical_harness("claude-code") == "hermes"
-    assert canonical_harness("deepseek-cli") == "telos"
     # 非别名原样返回
     assert canonical_harness("openclaw") == "openclaw"
     assert canonical_harness("hermes") == "hermes"
+    assert canonical_harness("telos") == "telos"
     print("✓ test_canonical_harness_resolves_aliases")
 
 
 def test_load_harness_accepts_aliases() -> None:
     assert isinstance(load_harness("claude-code"), HermesPlugin)
-    assert isinstance(load_harness("deepseek-cli"), TelosPlugin)
     assert isinstance(load_harness("openclaw"), OpenClawPlugin)
     print("✓ test_load_harness_accepts_aliases")
 
@@ -52,7 +50,6 @@ def test_harness_display_name() -> None:
     assert harness_display_name("telos") == "Telos"
     # 别名先归一化再映射
     assert harness_display_name("claude-code") == "Claude Code"
-    assert harness_display_name("deepseek-cli") == "Telos"
     # 非 harness 名（proxy 的伪 harness）原样返回
     assert harness_display_name("passthrough") == "passthrough"
     assert harness_display_name("rtk-only") == "rtk-only"
@@ -62,10 +59,10 @@ def test_harness_display_name() -> None:
 
 
 def test_presets_cover_all_harnesses() -> None:
-    assert set(PRESETS) == {"openclaw", "hermes", "claude-code", "deepseek-cli"}
+    assert set(PRESETS) == {"openclaw", "hermes", "claude-code"}
     for name, preset in PRESETS.items():
         assert isinstance(preset, HarnessPreset)
-        assert preset.wire_protocol in ("anthropic", "openai")
+        assert preset.wire_protocol == "anthropic"
         assert preset.description
     # claude-code 是 hermes 的别名 preset
     assert PRESETS["claude-code"].harness_name == "hermes"
@@ -75,16 +72,11 @@ def test_presets_cover_all_harnesses() -> None:
 def test_transport_for_harness_builds_each_preset() -> None:
     # 不发网络请求，只验证构造路径 + 鸭子接口挂载正确。
     os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
-    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 
     for name in ("openclaw", "hermes", "claude-code"):
         t = TelosTransport.for_harness(name)
         assert hasattr(t, "messages"), f"{name} 应暴露 Anthropic 接口"
         assert t.preset.wire_protocol == "anthropic"
-
-    t = TelosTransport.for_harness("deepseek-cli")
-    assert hasattr(t, "chat"), "deepseek-cli 应暴露 OpenAI 接口"
-    assert t.preset.wire_protocol == "openai"
     print("✓ test_transport_for_harness_builds_each_preset")
 
 

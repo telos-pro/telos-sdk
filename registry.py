@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 _HARNESS_ALIASES: dict[str, str] = {
     "claude-code": "hermes",
-    "deepseek-cli": "telos",
 }
 
 
@@ -52,7 +51,7 @@ def load_harness(name: str) -> "HarnessPlugin":
     """按名加载 harness plugin。
 
     支持：``openclaw``, ``hermes``, ``telos``
-    别名：``claude-code`` → hermes, ``deepseek-cli`` → telos
+    别名：``claude-code`` → hermes
     """
     canonical = canonical_harness(name)
     if canonical == "openclaw":

@@ -6,7 +6,7 @@ Subcommands:
 - ``telos <harness>``     directly enter a harness (claude-code / codex / openclaw / hermes)
 - ``telos init``          auto-detect harnesses → inject → start gateway in background → print dashboard
 - ``telos gateway``       start / stop / view the gateway
-- ``telos dashboard``     open the dashboard in a browser
+- ``telos dashboard``     open the dashboard in a browser (``restart`` cycles the gateway serving it)
 - ``telos mode``          switch the optimization mode (hot-updates the running gateway)
 - ``telos alias``         set the harness the bare ``telos`` enters by default
 - ``telos replay``        replay a recorded session across multiple modes for comparison
@@ -160,12 +160,26 @@ def _cmd_launch_harness(name: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _cmd_dashboard(rest: list[str]) -> int:
-    """gateway running → open the live dashboard; otherwise build static HTML and open it."""
-    no_open = "--no-open" in rest
-    force_static = "--static" in rest
+    """``telos dashboard [restart]``.
+
+    Bare: gateway running → open the live dashboard; otherwise build static HTML.
+    ``restart``: restart the gateway that serves the dashboard, then reopen it.
+    """
+    verb = rest[0] if rest and not rest[0].startswith("-") else None
+    flags = rest[1:] if verb else rest
+    no_open = "--no-open" in flags
+    force_static = "--static" in flags
+
+    if verb is not None and verb != "restart":
+        print(f"error: unknown dashboard verb {verb!r}; expected 'restart'",
+              file=sys.stderr)
+        return 2
 
     from telos.config import load_config
     from telos.gateway import control, daemon
+
+    if verb == "restart":
+        return _cmd_dashboard_restart(no_open=no_open)
 
     state = daemon.read_state()
     if state is not None and not force_static:
@@ -193,6 +207,37 @@ def _cmd_dashboard(rest: list[str]) -> int:
     print(f"dashboard → file://{out}")
     if not no_open:
         webbrowser.open(f"file://{out}")
+    return 0
+
+
+def _cmd_dashboard_restart(*, no_open: bool) -> int:
+    """Restart the gateway process that serves the dashboard, then reopen it.
+
+    The dashboard is an endpoint of the gateway server, so "restarting the
+    dashboard" means cycling the gateway: it picks up the latest code, config,
+    and usage log, and serves a fresh page.
+    """
+    from telos.config import load_config
+    from telos.gateway import daemon
+
+    cfg = load_config()
+    running = daemon.read_state() is not None
+    try:
+        if running:
+            state = daemon.restart(config=cfg)
+            print(f"✓ gateway restarted → {state.base_url()}  (mode={state.mode})")
+        else:
+            state = daemon.start_detached(config=cfg)
+            print(f"✓ gateway was not running — started → {state.base_url()}  "
+                  f"(mode={state.mode})")
+    except RuntimeError as e:
+        print(f"error: failed to restart gateway: {e}", file=sys.stderr)
+        return 1
+
+    url = state.dashboard_url()
+    print(f"dashboard → {url}")
+    if not no_open:
+        webbrowser.open(url)
     return 0
 
 
@@ -288,7 +333,7 @@ def _print_usage() -> None:
         "  <harness>   directly enter a harness (claude-code / codex / openclaw / hermes)\n"
         "  init        auto-detect harnesses, inject config, start the gateway\n"
         "  gateway     start / stop / view the gateway (start|stop|status|restart)\n"
-        "  dashboard   open the saved-token / saved-$ dashboard in a browser\n"
+        "  dashboard   open the saved-token / saved-$ dashboard in a browser (dashboard restart restarts it)\n"
         "  mode        switch the optimization mode (none|telos|rtk|both), hot-updates the running gateway\n"
         "  alias       set the harness the bare telos enters by default\n"
         "  replay      replay a recorded session across multiple modes for a controlled A/B comparison\n"
@@ -300,6 +345,7 @@ def _print_usage() -> None:
         "  telos alias claude-code\n"
         "  telos                       # enter the favorite harness\n"
         "  telos dashboard\n"
+        "  telos dashboard restart\n"
     )
 
 

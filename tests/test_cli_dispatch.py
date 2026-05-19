@@ -73,6 +73,14 @@ def test_mode_rejects_bad_label() -> None:
     print("✓ test_mode_rejects_bad_label")
 
 
+def test_dashboard_rejects_bad_verb() -> None:
+    _iso_home()
+    rc, out = _run(["dashboard", "bogus"])
+    assert rc == 2
+    assert "unknown dashboard verb" in out
+    print("✓ test_dashboard_rejects_bad_verb")
+
+
 def main() -> None:
     test_help_omits_proxy()
     test_unknown_subcommand()
@@ -80,6 +88,7 @@ def main() -> None:
     test_alias_rejects_unknown()
     test_mode_persists_without_gateway()
     test_mode_rejects_bad_label()
+    test_dashboard_rejects_bad_verb()
     print("\nall cli dispatch tests passed.")
 
 

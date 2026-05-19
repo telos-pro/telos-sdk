@@ -484,12 +484,23 @@ body {
 
 header { margin-bottom: 32px; }
 header h1 { margin: 0 0 6px 0; font-size: 28px; font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.01em; display: flex; align-items: center; gap: 12px;
+  flex-wrap: wrap;
+}
+header h1 .grad {
   background: linear-gradient(120deg, #79c0ff 0%, #d2a8ff 100%);
   -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 header .sub { color: #7d8590; font-size: 13px; }
+
+/* ---- mode badge ---- */
+.mode-badge {
+  -webkit-text-fill-color: initial;
+  font-family: monospace; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.04em; padding: 4px 12px; border-radius: 999px;
+  border: 1px solid transparent; text-transform: lowercase;
+}
 
 /* ---- hero stats ---- */
 .hero {
@@ -529,8 +540,9 @@ header .sub { color: #7d8590; font-size: 13px; }
 }
 .kpi {
   background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-  padding: 14px 16px;
+  padding: 14px 16px; transition: border-color .15s ease, transform .15s ease;
 }
+.kpi:hover { border-color: #3d4654; transform: translateY(-2px); }
 .kpi .label { color: #7d8590; font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.06em; margin-bottom: 4px; }
 .kpi .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums;
@@ -541,7 +553,9 @@ header .sub { color: #7d8590; font-size: 13px; }
 .card {
   background: #0f141c; border: 1px solid #21262d; border-radius: 12px;
   padding: 22px 24px; margin-bottom: 18px;
+  transition: border-color .15s ease;
 }
+.card:hover { border-color: #2d3340; }
 .card h2 {
   margin: 0 0 14px 0; font-size: 14px; font-family: monospace;
   color: #7d8590; text-transform: uppercase; letter-spacing: 0.06em;
@@ -718,144 +732,17 @@ def _mode_color(mode: str) -> str:
     return _MODE_META.get(mode, ("#79c0ff", ""))[0]
 
 
-def _render_mode_table(by_mode: dict[str, _Agg]) -> str:
-    """Toggle-dimension breakdown: one row per mode, showing the two savings paths TELOS / RTK."""
-    if not by_mode:
-        return ""
-    order = {"both": 0, "telos": 1, "rtk": 2, "rtk-only": 2, "none": 3,
-             "passthrough": 4}
-    rows_sorted = sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9))
-    max_combined = max((a.combined_saved_usd for _, a in rows_sorted), default=0.0)
+def _dominant_mode(by_mode: dict[str, _Agg]) -> tuple[str, int]:
+    """The mode that ran the most calls, plus how many *other* modes appear.
 
-    rows = []
-    for mode, a in rows_sorted:
-        color = _mode_color(mode)
-        desc = _MODE_META.get(mode, ("", ""))[1]
-        bar_pct = (100 * a.combined_saved_usd / max_combined) if max_combined > 0 else 0.0
-        # RTK never ran under this mode → explicitly mark the two RTK columns as
-        # not enabled, rather than showing 0 just like "ran but saved nothing".
-        if a.rtk_status == "disabled":
-            rtk_cells = ('<td class="muted" colspan="2" '
-                         'style="text-align:center">RTK not enabled</td>')
-        else:
-            rtk_cells = (f'<td class="gold">{_fmt_tokens(a.tool_saved_tokens)}</td>'
-                         f'<td class="gold">{_fmt_usd(a.tool_saved_usd)}</td>')
-        rows.append(
-            f"<tr>"
-            f'<td class="left"><b style="color:{color}">{html.escape(mode)}</b>'
-            f'<br><span class="muted" style="font-size:10px">{html.escape(desc)}</span></td>'
-            f"<td>{_fmt_int(a.calls)}</td>"
-            f'<td class="green">{_fmt_usd(a.saved_usd)}</td>'
-            f"{rtk_cells}"
-            f'<td class="bar-cell">'
-            f'<span class="fill" style="width:{bar_pct:.1f}%"></span>'
-            f'<span class="label-overlay">{_fmt_usd(a.combined_saved_usd)}</span>'
-            f"</td>"
-            f"</tr>"
-        )
-    return f"""
-<div class="card">
-  <h2>Breakdown by mode (toggle comparison)</h2>
-  <table>
-    <thead><tr>
-      <th class="left">mode</th>
-      <th>calls</th>
-      <th>TELOS saved $</th>
-      <th>RTK tokens removed</th>
-      <th>RTK saved $ (est)</th>
-      <th class="left">combined saved $</th>
-    </tr></thead>
-    <tbody>{''.join(rows)}</tbody>
-  </table>
-  <p class="muted" style="font-size:11px;margin-top:8px">
-    TELOS saved $ = money saved by prefix caching relative to "cache_control off";
-    RTK saved $ = tokens removed by tool-output filtering (estimated against the
-    real text at filter time) × the cache-hit-rate weighted marginal price
-    (hit → cache_read price, miss → input price).
-    The two paths summed = combined.
-  </p>
-</div>
-"""
-
-
-def _render_compare_section(compare_groups: dict[str, dict[str, _Agg]],
-                             replay_groups: set[str] | None = None) -> str:
-    """Comparison experiment: sessions of different modes under the same
-    compare_group, shown side by side.
-
-    One card per group, with one cell per mode inside the card; automatically
-    highlights the mode with the highest combined saved $. Used for A/B
-    comparison of "same task, same user input, different toggles".
-
-    Groups in ``replay_groups`` come from `telos replay` (controlled replay);
-    their card title gets a ``replay`` badge. The rest come from real dual
-    sessions and get a ``live A/B`` badge.
+    Used for the header badge: a savings dashboard is almost always a single
+    mode, but a usage_log can mix several — the badge shows the dominant one
+    and a ``+N more`` hint when it does.
     """
-    if not compare_groups:
-        return ""
-    replay_groups = replay_groups or set()
-    cards = []
-    for group, by_mode in sorted(compare_groups.items()):
-        if not by_mode:
-            continue
-        is_replay = group in replay_groups
-        _badge_base = ("display:inline-block;margin-left:8px;padding:2px 9px;"
-                       "border-radius:999px;font-size:10px;vertical-align:middle;"
-                       "font-family:sans-serif;letter-spacing:0")
-        src_badge = (
-            f'<span style="{_badge_base};background:#2d2150;color:#d2a8ff">replay</span>'
-            if is_replay else
-            f'<span style="{_badge_base};background:#1f3a4d;color:#79c0ff">live A/B</span>'
-        )
-        best_mode = max(by_mode.items(),
-                        key=lambda kv: kv[1].combined_saved_usd)[0]
-        # Most expensive baseline: the highest-cost mode, used to compute how much each mode saved
-        max_cost = max((a.cost_usd for a in by_mode.values()), default=0.0)
-        cells = []
-        order = {"both": 0, "telos": 1, "rtk": 2, "rtk-only": 2, "none": 3,
-                 "passthrough": 4}
-        for mode, a in sorted(by_mode.items(), key=lambda kv: order.get(kv[0], 9)):
-            color = _mode_color(mode)
-            is_best = mode == best_mode
-            delta = max_cost - a.cost_usd
-            delta_html = (
-                f'<div class="row"><span>vs most expensive mode</span>'
-                f'<b class="green">−{_fmt_usd(delta)}</b></div>'
-                if delta > 0 else
-                '<div class="row"><span>vs most expensive mode</span><b class="muted">baseline</b></div>'
-            )
-            prompt_tokens = a.raw_input + a.cache_read + a.cache_write
-            hit = (a.cache_read / prompt_tokens) if prompt_tokens else 0.0
-            badge = ('<span class="pill" style="background:#1a4d2e;color:#56d364">'
-                     'best</span>') if is_best else ""
-            rtk_removed = ('<b class="muted">not enabled</b>'
-                           if a.rtk_status == "disabled"
-                           else f'<b class="gold">{_fmt_tokens(a.tool_saved_tokens)}</b>')
-            cells.append(f"""
-    <div class="compare-cell" style="border-color:{color}55">
-      <h3><b style="color:{color}">{html.escape(mode)}</b> {badge}</h3>
-      <div class="big" style="color:{color}">{_fmt_usd(a.cost_usd)}</div>
-      <div class="row"><span>calls</span><b>{_fmt_int(a.calls)}</b></div>
-      <div class="row"><span>cache hit%</span><b>{_fmt_pct(hit)}</b></div>
-      <div class="row"><span>TELOS saved $</span><b class="green">{_fmt_usd(a.saved_usd)}</b></div>
-      <div class="row"><span>RTK tokens removed</span>{rtk_removed}</div>
-      <div class="row"><span>combined saved $</span><b class="lilac">{_fmt_usd(a.combined_saved_usd)}</b></div>
-      {delta_html}
-    </div>""")
-        n_cols = min(len(cells), 4)
-        cards.append(f"""
-<div class="card">
-  <h2>Compare group · {html.escape(group)} {src_badge}</h2>
-  <div class="compare-grid" style="grid-template-columns:repeat({n_cols},1fr)">
-    {''.join(cells)}
-  </div>
-</div>""")
-    if not cards:
-        return ""
-    return ("""
-<div class="card" style="background:transparent;border:none;padding:0;margin-bottom:6px">
-  <h2 style="color:#d2a8ff">A/B comparison · same task, different toggles</h2>
-</div>""" + "".join(cards))
+    if not by_mode:
+        return "telos", 0
+    ranked = sorted(by_mode.items(), key=lambda kv: -kv[1].calls)
+    return ranked[0][0], len(ranked) - 1
 
 
 def _render_timeline_svg(timeline: dict[str, dict[str, float]]) -> str:
@@ -955,34 +842,24 @@ def render_dashboard(
     # "total prompt tokens" = the sum of all three)
     prompt_tokens_total = total.raw_input + total.cache_read + total.cache_write
     hit_rate = total.cache_read / prompt_tokens_total if prompt_tokens_total else 0.0
-    # Counterfactual cost: directly accumulate each call's estimated total price
-    # (with cache_control turned off). The old implementation used ``cost + saved``,
-    # which undercounts in cache_write-premium scenarios; changed to accumulate
-    # the per-call values from _counterfactual_cost_usd.
+    # Counterfactual cost is the denominator for "% saved" only — it is the
+    # estimated total price with cache_control turned off, accumulated per call
+    # from _counterfactual_cost_usd. It is no longer surfaced as its own view.
     counterfactual_cost = total.counterfactual_usd or (total.cost_usd + total.saved_usd)
     saved_share = total.saved_usd / counterfactual_cost if counterfactual_cost else 0.0
-    # Combined basis: TELOS + RTK. RTK's counterfactual cost = actually paid +
-    # money RTK saved, so combined counterfactual = TELOS counterfactual + RTK savings.
-    combined_saved = total.combined_saved_usd
-    combined_counterfactual = counterfactual_cost + total.tool_saved_usd
-    combined_share = (combined_saved / combined_counterfactual
-                      if combined_counterfactual else 0.0)
 
-    # RTK status: split out "$0" — RTK not enabled vs enabled but saved nothing are two different things.
-    rtk_status = total.rtk_status
-    if rtk_status == "disabled":
-        rtk_hero = '<b class="muted">RTK not enabled</b>'
-        rtk_kpi_value = '<span class="muted" style="font-size:16px">not enabled</span>'
-        rtk_kpi_sub = "proxy mode does not include rtk — enable with --mode both"
-    elif rtk_status == "idle":
-        rtk_hero = f'RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>'
-        rtk_kpi_value = f'<span class="gold">{_fmt_usd(total.tool_saved_usd)}</span>'
-        rtk_kpi_sub = "enabled · no tool output to filter yet"
-    else:  # nosave / active
-        rtk_hero = f'RTK <b class="gold">{_fmt_usd(total.tool_saved_usd)}</b>'
-        rtk_kpi_value = f'<span class="gold">{_fmt_usd(total.tool_saved_usd)}</span>'
-        rtk_kpi_sub = ("tool output filtering · hit-rate weighted pricing" if rtk_status == "active"
-                       else "ran · nothing to save in this batch")
+    # Current optimization mode — shown as a header badge instead of a per-mode
+    # breakdown table.
+    mode, extra_modes = _dominant_mode(summary.by_mode)
+    mode_color = _mode_color(mode)
+    mode_desc = _MODE_META.get(mode, ("", ""))[1]
+    mode_extra = (f'<span class="muted" style="font-size:11px;margin-left:6px">'
+                  f'+{extra_modes} more</span>') if extra_modes else ""
+    mode_badge = (
+        f'<span class="mode-badge" title="{html.escape(mode_desc)}" '
+        f'style="color:{mode_color};border-color:{mode_color}66;'
+        f'background:{mode_color}1a">{html.escape(mode)}</span>{mode_extra}'
+    )
 
     if summary.first_ts and summary.last_ts:
         span = summary.last_ts - summary.first_ts
@@ -1003,17 +880,12 @@ def render_dashboard(
     ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sources_html = "<br>".join(f"<code>{html.escape(str(s))}</code>" for s in sources)
 
-    # —— token mix for the "with TELOS" view (actual values) ——
+    # —— token mix (actual values) ——
     seg_bar_with = _render_seg_bar([
         ("raw_input",   total.raw_input,   "raw_input"),
         ("cache_read",  total.cache_read,  "cache_read"),
         ("cache_write", total.cache_write, "cache_write"),
         ("output",      total.output,      "output"),
-    ])
-    # —— "without TELOS" view: all prompt tokens fall into the raw_input bucket ——
-    seg_bar_without = _render_seg_bar([
-        ("raw_input",   prompt_tokens_total, "raw_input (counterfactual)"),
-        ("output",      total.output,        "output"),
     ])
 
     by_harness = _render_breakdown_table(
@@ -1026,9 +898,6 @@ def render_dashboard(
         "Top sessions by saved $", summary.by_session,
         key_label="session_id", max_rows=15
     )
-    by_mode = _render_mode_table(summary.by_mode)
-    compare_section = _render_compare_section(summary.compare_groups,
-                                              summary.replay_groups)
 
     timeline_svg = _render_timeline_svg(summary.timeline)
 
@@ -1036,12 +905,6 @@ def render_dashboard(
     # raw_usage.cache_creation.* split is available; otherwise everything counts as 5m fallback)
     w5_total = total.cache_write_5m
     w1_total = total.cache_write_1h
-    write_breakdown_note = (
-        f"cache_write split: 5m <b class='gold'>{_fmt_tokens(w5_total)}</b>"
-        f" · 1h <b class='gold'>{_fmt_tokens(w1_total)}</b>"
-    ) if (w5_total + w1_total) else (
-        "cache_write lacks a 5m/1h split → estimated at the 5m price as a fallback"
-    )
 
     refresh_tag = (
         f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
@@ -1052,97 +915,24 @@ def render_dashboard(
         if refresh_seconds and refresh_seconds > 0 else ""
     )
 
-    # Numbers needed in comparison mode (with TELOS off, all tokens use the input price)
-    without_input_value = _fmt_tokens(prompt_tokens_total)
-    without_cost = _fmt_usd(counterfactual_cost)
-    with_cost = _fmt_usd(total.cost_usd)
-    delta_cost = _fmt_usd(total.saved_usd)
-    delta_share = _fmt_pct(saved_share)
-
-    toggle_css = """
-.toggle-wrap { display: inline-flex; gap: 0; background: #161b22; border-radius: 999px;
-  padding: 4px; margin: 0 0 14px 0; border: 1px solid #30363d; }
-.toggle-wrap button { all: unset; cursor: pointer; padding: 7px 18px; border-radius: 999px;
-  font-size: 12px; font-weight: 600; color: #8b949e; transition: all .15s ease; }
-.toggle-wrap button.active { background: linear-gradient(120deg, #d2a8ff 0%, #79c0ff 100%);
-  color: #0a0d12; }
-.toggle-wrap button:hover:not(.active) { color: #e6edf3; }
-[data-mode='without'] .with-only { display: none; }
-[data-mode='with'] .without-only { display: none; }
-[data-mode='_compare'] .with-only,
-[data-mode='_compare'] .without-only { display: none; }
-.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
-.compare-cell { background: #0f141c; border: 1px solid #21262d; border-radius: 10px;
-  padding: 18px 20px; }
-.compare-cell h3 { margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase;
-  letter-spacing: 0.06em; color: #7d8590; font-weight: 600; }
-.compare-cell h3 .pill { display: inline-block; margin-left: 8px; padding: 2px 8px;
-  border-radius: 999px; font-size: 10px; vertical-align: middle; }
-.compare-cell.actual h3 .pill   { background: #1a4d2e; color: #56d364; }
-.compare-cell.counter h3 .pill  { background: #4d2a1a; color: #f0883e; }
-.compare-cell .row { font-size: 13px; color: #c9d1d9; margin: 4px 0; display: flex;
-  justify-content: space-between; }
-.compare-cell .row b { font-variant-numeric: tabular-nums; }
-.compare-cell .big { font-size: 24px; font-weight: 700; margin: 4px 0 8px 0;
-  letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
-.compare-cell.actual .big   { color: #56d364; }
-.compare-cell.counter .big  { color: #f0883e; }
-.compare-cell .small { font-size: 11px; color: #7d8590; margin-top: 6px; }
-.savings-arrow { font-size: 13px; color: #d2a8ff; margin: 10px 0 0 0; text-align: center; }
-.savings-arrow b { font-size: 18px; }
-"""
-
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 {refresh_tag}
 <title>TELOS · Token Savings Dashboard</title>
 <style>{CSS}</style>
-<style>{toggle_css}</style>
-</head><body data-mode="with">
+</head><body>
 <div class="wrap">
 
 <header>
-  <h1>TELOS · Token Savings</h1>
+  <h1><span class="grad">TELOS · Token Savings</span> {mode_badge}</h1>
   <div class="sub">
     {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
     · generated {ts_now}{refresh_note}
   </div>
 </header>
 
-<!-- ===== View switch: with TELOS vs. without TELOS ===== -->
-<div class="toggle-wrap" role="tablist">
-  <button id="btn-with"    class="active" onclick="setMode('with')">Actual (TELOS on)</button>
-  <button id="btn-without" onclick="setMode('without')">Counterfactual (TELOS off)</button>
-  <button id="btn-compare" onclick="setMode('compare')">Side by side</button>
-</div>
-
-<!-- side-by-side panel for the compare view -->
-<section id="compare-view" style="display:none; margin-bottom: 18px;">
-  <div class="compare-grid">
-    <div class="compare-cell counter">
-      <h3>without TELOS <span class="pill">counterfactual</span></h3>
-      <div class="big">{without_cost}</div>
-      <div class="row"><span>prompt tokens (input price)</span><b>{without_input_value}</b></div>
-      <div class="row"><span>output tokens</span><b>{_fmt_tokens(total.output)}</b></div>
-      <div class="small">All prompt tokens billed at the base input price; no cache_read discount, no cache_write premium.</div>
-    </div>
-    <div class="compare-cell actual">
-      <h3>with TELOS <span class="pill">actual</span></h3>
-      <div class="big">{with_cost}</div>
-      <div class="row"><span>raw_input · @input</span><b>{_fmt_tokens(total.raw_input)}</b></div>
-      <div class="row"><span>cache_read · @0.1×input</span><b class="green">{_fmt_tokens(total.cache_read)}</b></div>
-      <div class="row"><span>cache_write · @1.25–2×input</span><b class="gold">{_fmt_tokens(total.cache_write)}</b></div>
-      <div class="row"><span>output · @output</span><b>{_fmt_tokens(total.output)}</b></div>
-      <div class="small">{write_breakdown_note}</div>
-    </div>
-  </div>
-  <div class="savings-arrow">
-    Net savings: <b>{delta_cost}</b> &nbsp;·&nbsp; <b>{delta_share}</b> off counterfactual
-  </div>
-</section>
-
-<section class="hero with-only">
+<section class="hero">
   <div class="hero-card green">
     <div class="label">tokens saved (cache hits)</div>
     <div class="value">{_fmt_tokens(total.cache_read)}</div>
@@ -1153,31 +943,10 @@ def render_dashboard(
   </div>
   <div class="hero-card purple">
     <div class="label">total cost saved (estimated)</div>
-    <div class="value">{_fmt_usd(combined_saved)}</div>
+    <div class="value">{_fmt_usd(total.saved_usd)}</div>
     <div class="sub">
-      TELOS <b class="green">{_fmt_usd(total.saved_usd)}</b>
-      &nbsp;·&nbsp; {rtk_hero}
-      &nbsp;·&nbsp; <b class="lilac">{_fmt_pct(combined_share)}</b> of total counterfactual cost
-    </div>
-  </div>
-</section>
-
-<section class="hero without-only">
-  <div class="hero-card green" style="opacity:.65">
-    <div class="label">prompt tokens (no cache)</div>
-    <div class="value">{without_input_value}</div>
-    <div class="sub">
-      Counterfactual view: all raw_input + cache_read + cache_write are billed
-      at the base input price ·
-      output <code>{_fmt_int(total.output)}</code>
-    </div>
-  </div>
-  <div class="hero-card purple" style="opacity:.85">
-    <div class="label">cost (no TELOS)</div>
-    <div class="value">{without_cost}</div>
-    <div class="sub">
-      With TELOS enabled you actually pay only <b>{with_cost}</b>
-      · saving <b class="lilac">{delta_cost}</b> (<b class="lilac">{delta_share}</b>)
+      TELOS prefix cache · <b class="lilac">{_fmt_pct(saved_share)}</b>
+      off counterfactual cost
     </div>
   </div>
 </section>
@@ -1199,19 +968,10 @@ def render_dashboard(
   <div class="kpi"><div class="label">output</div>
     <div class="value blue">{_fmt_tokens(total.output)}</div>
     <div class="sub">{_fmt_int(total.output)}</div></div>
-  <div class="kpi"><div class="label">RTK tool output removed</div>
-    <div class="value gold">{_fmt_tokens(total.tool_saved_tokens)}</div>
-    <div class="sub">{_fmt_int(total.tool_blocks_filtered)} blocks · ~{_fmt_usd(total.tool_saved_usd)}</div></div>
-  <div class="kpi"><div class="label">TELOS saved $</div>
-    <div class="value green">{_fmt_usd(total.saved_usd)}</div>
-    <div class="sub">prefix cache vs cache_control off</div></div>
-  <div class="kpi"><div class="label">RTK saved $</div>
-    <div class="value gold">{rtk_kpi_value}</div>
-    <div class="sub">{rtk_kpi_sub}</div></div>
 </div>
 
-<div class="card with-only">
-  <h2>Token mix (with TELOS · actual)</h2>
+<div class="card">
+  <h2>Token mix</h2>
   {seg_bar_with}
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · {_fmt_tokens(total.raw_input)}</span>
@@ -1221,27 +981,11 @@ def render_dashboard(
   </div>
 </div>
 
-<div class="card without-only">
-  <h2>Token mix (without TELOS · counterfactual)</h2>
-  {seg_bar_without}
-  <div class="seg-legend">
-    <span><span class="sw" style="background:#f0883e"></span>raw_input · {without_input_value}</span>
-    <span><span class="sw" style="background:#79c0ff"></span>output · {_fmt_tokens(total.output)}</span>
-  </div>
-  <p class="muted" style="font-size:11px;margin-top:8px">
-    Counterfactual assumption: keep the prompt content unchanged but remove ``cache_control``,
-    bill the full prompt token volume at the base input price → from a billing perspective all
-    cache_read and cache_write "collapse" into raw_input.
-  </p>
-</div>
-
 <div class="card timeline">
   <h2>Activity over time (aggregated by hour)</h2>
   {timeline_svg}
 </div>
 
-{compare_section}
-{by_mode}
 {by_harness}
 {by_model}
 {by_session}
@@ -1253,33 +997,9 @@ def render_dashboard(
 </div>
 
 </div>
-
-<script>
-function setMode(m) {{
-  var body = document.body;
-  var compareView = document.getElementById('compare-view');
-  ['with','without','compare'].forEach(function(k){{
-    var b = document.getElementById('btn-' + k);
-    if (b) b.classList.toggle('active', k === m);
-  }});
-  if (m === 'compare') {{
-    // compare mode: hide the with/without dedicated panels, show only side by side
-    body.setAttribute('data-mode', '_compare');
-    compareView.style.display = 'block';
-  }} else {{
-    body.setAttribute('data-mode', m);
-    compareView.style.display = 'none';
-  }}
-  try {{ localStorage.setItem('telos.dashboard.mode', m); }} catch(e) {{}}
-}}
-// restore the previous selection
-try {{
-  var saved = localStorage.getItem('telos.dashboard.mode');
-  if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);
-}} catch(e) {{}}
-</script>
 </body></html>
 """
+
 
 
 def render_from_usage_log(

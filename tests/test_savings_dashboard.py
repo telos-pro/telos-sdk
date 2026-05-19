@@ -73,13 +73,11 @@ def test_cache_hit_weights_down_rtk_savings() -> None:
 
 
 def test_render_shows_total_cost_saved() -> None:
-    """The rendered output contains the combined-basis hero card and the TELOS/RTK breakdown KPIs."""
+    """The rendered output contains the total-cost-saved hero card and the TELOS KPI."""
     tool = {"original_tokens": 8000, "filtered_tokens": 2000, "saved_tokens": 6000}
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, tool=tool)])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
     assert "total cost saved" in html_doc
-    assert "TELOS saved $" in html_doc
-    assert "RTK saved $" in html_doc
     print("✓ test_render_shows_total_cost_saved")
 
 
@@ -108,12 +106,13 @@ def test_rtk_status_distinguishes_disabled_from_zero_save() -> None:
     print("✓ test_rtk_status_distinguishes_disabled_from_zero_save")
 
 
-def test_render_marks_rtk_not_enabled() -> None:
-    """When RTK was never enabled, the rendered output explicitly marks "not enabled" rather than conflating it with $0 saved."""
+def test_render_shows_mode_badge() -> None:
+    """The header carries a mode badge reflecting the dominant mode in the log."""
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, mode="telos")])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
-    assert "not enabled" in html_doc
-    print("✓ test_render_marks_rtk_not_enabled")
+    assert "mode-badge" in html_doc
+    assert ">telos<" in html_doc
+    print("✓ test_render_shows_mode_badge")
 
 
 def main() -> None:
@@ -123,7 +122,7 @@ def main() -> None:
     test_cache_hit_weights_down_rtk_savings()
     test_render_shows_total_cost_saved()
     test_rtk_status_distinguishes_disabled_from_zero_save()
-    test_render_marks_rtk_not_enabled()
+    test_render_shows_mode_badge()
     print("\nall savings_dashboard tests passed.")
 
 

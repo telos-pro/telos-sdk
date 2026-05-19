@@ -483,10 +483,26 @@ body {
 .wrap { max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; }
 
 header { margin-bottom: 32px; }
+.header-row {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+}
 header h1 { margin: 0 0 6px 0; font-size: 28px; font-weight: 700;
   letter-spacing: -0.01em; display: flex; align-items: center; gap: 12px;
   flex-wrap: wrap;
 }
+
+/* ---- reset / 清零 button ---- */
+.reset-btn {
+  flex: none; cursor: pointer; font: inherit; font-size: 12.5px;
+  font-weight: 600; color: #adb6c2;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 8px 14px; transition: all .15s ease; white-space: nowrap;
+}
+.reset-btn:hover:not(:disabled) {
+  color: #f85149; border-color: #f8514966; background: #f8514912;
+}
+.reset-btn:disabled { opacity: 0.55; cursor: progress; }
 header h1 .grad {
   background: linear-gradient(120deg, #79c0ff 0%, #d2a8ff 100%);
   -webkit-background-clip: text; background-clip: text;
@@ -621,6 +637,115 @@ tr:hover td { background: #131822; }
 .lilac { color: #d2a8ff; }
 
 .footer { margin-top: 40px; color: #4f5862; font-size: 11px; text-align: center; }
+
+/* ---- welcome / empty state ------------------------------------------- */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes orb-pulse {
+  0%, 100% { transform: scale(1);    box-shadow: 0 0 0 0 #79c0ff55; }
+  50%      { transform: scale(1.06); box-shadow: 0 0 0 22px #79c0ff00; }
+}
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+@keyframes dots {
+  0%, 20%  { content: '·'; }
+  40%      { content: '··'; }
+  60%, 100%{ content: '···'; }
+}
+@keyframes sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.welcome {
+  max-width: 620px; margin: 7vh auto 0; text-align: center;
+}
+.welcome > * { animation: fade-up .6s ease both; }
+.welcome > :nth-child(2) { animation-delay: .12s; }
+.welcome > :nth-child(3) { animation-delay: .24s; }
+.welcome > :nth-child(4) { animation-delay: .36s; }
+.welcome > :nth-child(5) { animation-delay: .48s; }
+
+.orb {
+  width: 92px; height: 92px; margin: 0 auto 26px;
+  border-radius: 50%; position: relative;
+  background: radial-gradient(circle at 32% 30%, #add2ff 0%, #79c0ff 38%, #6f4bd8 100%);
+  animation: orb-pulse 2.6s ease-in-out infinite;
+}
+.orb::before {
+  content: ''; position: absolute; inset: -9px; border-radius: 50%;
+  border: 1.5px solid transparent; border-top-color: #d2a8ff;
+  border-right-color: #79c0ff66;
+  animation: orb-spin 3.4s linear infinite;
+}
+.orb::after {
+  content: 'T'; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 40px; font-weight: 800; color: #0a0d12;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.welcome h1 {
+  font-size: 30px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 10px;
+}
+.welcome h1 .grad {
+  background: linear-gradient(120deg, #79c0ff 0%, #d2a8ff 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.welcome .intro {
+  color: #adb6c2; font-size: 14.5px; line-height: 1.65; margin: 0 0 26px;
+}
+.welcome .intro b { color: #e6edf3; font-weight: 600; }
+
+.feature-row {
+  display: flex; gap: 12px; justify-content: center; margin-bottom: 28px;
+  flex-wrap: wrap;
+}
+.feature {
+  flex: 1 1 150px; max-width: 180px;
+  background: #0f141c; border: 1px solid #21262d; border-radius: 12px;
+  padding: 16px 14px;
+}
+.feature .ico { font-size: 22px; }
+.feature .ft  { font-size: 12.5px; font-weight: 600; color: #e6edf3;
+  margin: 8px 0 3px; }
+.feature .fd  { font-size: 11.5px; color: #7d8590; line-height: 1.45; }
+
+.status-card {
+  background: linear-gradient(140deg, #1a2436 0%, #131822 100%);
+  border: 1px solid #2a3346; border-radius: 14px;
+  padding: 20px 24px; position: relative; overflow: hidden;
+}
+.status-card::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, #79c0ff, transparent);
+  animation: sweep 1.8s ease-in-out infinite;
+}
+.status-card .status-title {
+  font-size: 15px; font-weight: 600; color: #e6edf3;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.status-card .status-title .pip {
+  width: 8px; height: 8px; border-radius: 50%; background: #56d364;
+  animation: orb-pulse 1.8s ease-in-out infinite;
+}
+.status-card .status-title .pip-idle {
+  background: #d29922; animation: none;
+}
+.status-card .status-title .dots::after {
+  content: '···'; animation: dots 1.4s steps(1) infinite;
+  display: inline-block; width: 1.4em; text-align: left;
+}
+.status-card .status-body {
+  color: #8b949e; font-size: 12.5px; margin-top: 8px; line-height: 1.6;
+}
+.status-card code {
+  background: #0a0d12; border: 1px solid #21262d; border-radius: 4px;
+  padding: 1px 6px; font-size: 11.5px; color: #adb6c2;
+}
+.welcome .hint { color: #4f5862; font-size: 11px; margin-top: 20px; }
 """
 
 
@@ -925,10 +1050,18 @@ def render_dashboard(
 <div class="wrap">
 
 <header>
-  <h1><span class="grad">TELOS · Token Savings</span> {mode_badge}</h1>
-  <div class="sub">
-    {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
-    · generated {ts_now}{refresh_note}
+  <div class="header-row">
+    <div>
+      <h1><span class="grad">TELOS · Token Savings</span> {mode_badge}</h1>
+      <div class="sub">
+        {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
+        · generated {ts_now}{refresh_note}
+      </div>
+    </div>
+    <button class="reset-btn" type="button" onclick="telosReset(this)"
+            title="Clear the usage log and zero this dashboard">
+      ⟲ Reset · 清零
+    </button>
   </div>
 </header>
 
@@ -997,6 +1130,29 @@ def render_dashboard(
 </div>
 
 </div>
+<script>
+function telosReset(btn) {{
+  if (!confirm('Clear the usage log and zero this dashboard?\\n\\n'
+      + 'The current log is rotated to a timestamped .bak file, '
+      + 'so the data stays recoverable.')) return;
+  var label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Resetting…';
+  fetch('/__telos/control/reset', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: '{{}}'
+  }})
+  .then(function (r) {{ return r.json().then(function (j) {{
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      return j;
+  }}); }})
+  .then(function () {{ location.reload(); }})
+  .catch(function (e) {{
+    btn.disabled = false; btn.textContent = label;
+    alert('Reset failed: ' + e.message);
+  }});
+}}
+</script>
 </body></html>
 """
 
@@ -1033,11 +1189,25 @@ def render_from_usage_log(
 
 def _render_empty(title: str, body: str, *,
                    refresh_seconds: int | None) -> str:
-    """Empty-state HTML stub — keeps auto-refresh, waits for data to arrive."""
+    """Welcome / empty-state HTML — a friendly intro shown before any data
+    has arrived. Keeps auto-refresh so the page swaps itself for the real
+    dashboard as soon as the first request flows through the proxy."""
     refresh_tag = (
         f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
         if refresh_seconds and refresh_seconds > 0 else ""
     )
+    refresh_hint = (
+        f"This page refreshes itself every {int(refresh_seconds)}s — "
+        "leave it open and it will fill in on its own."
+        if refresh_seconds and refresh_seconds > 0 else
+        "Reload this page once traffic has flowed through the proxy."
+    )
+    # `title` is a short status line; `body` may contain inline HTML (e.g. <code>).
+    # A trailing ellipsis means "in progress" → swap it for animated dots.
+    waiting = title.rstrip().endswith(("…", "..."))
+    title_text = title.rstrip().rstrip("…").rstrip(".").rstrip() if waiting else title
+    dots = '<span class="dots"></span>' if waiting else ''
+    pip_cls = "pip" if waiting else "pip pip-idle"
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -1045,12 +1215,46 @@ def _render_empty(title: str, body: str, *,
 <title>TELOS · Token Savings</title>
 <style>{CSS}</style>
 </head><body><div class="wrap">
-<header><h1>TELOS · Token Savings</h1></header>
-<div class="card">
-  <h2>{html.escape(title)}</h2>
-  <p class="muted">{body}</p>
-</div>
-</div></body></html>
+<div class="welcome">
+
+  <div class="orb" role="img" aria-label="TELOS"></div>
+
+  <h1>Welcome to <span class="grad">TELOS</span></h1>
+
+  <p class="intro">
+    I sit in front of your LLM proxy and quietly <b>reshape every prompt</b>
+    so the model re-reads as little as possible. This dashboard is where
+    I'll show you <b>how many tokens — and how much money — that saves</b>.
+  </p>
+
+  <div class="feature-row">
+    <div class="feature">
+      <div class="ico">🧩</div>
+      <div class="ft">Prompt caching</div>
+      <div class="fd">Stable prefixes get reused instead of re-sent.</div>
+    </div>
+    <div class="feature">
+      <div class="ico">✂️</div>
+      <div class="ft">Tool trimming</div>
+      <div class="fd">Idle tool schemas are folded out of the wire.</div>
+    </div>
+    <div class="feature">
+      <div class="ico">📊</div>
+      <div class="ft">Live savings</div>
+      <div class="fd">Every call tallied into real-dollar totals.</div>
+    </div>
+  </div>
+
+  <div class="status-card">
+    <div class="status-title">
+      <span class="{pip_cls}"></span>{html.escape(title_text)}{dots}
+    </div>
+    <div class="status-body">{body}</div>
+  </div>
+
+  <p class="hint">{refresh_hint}</p>
+
+</div></div></body></html>
 """
 
 

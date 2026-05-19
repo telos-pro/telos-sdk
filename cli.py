@@ -160,18 +160,19 @@ def _cmd_launch_harness(name: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _cmd_dashboard(rest: list[str]) -> int:
-    """``telos dashboard [restart]``.
+    """``telos dashboard [restart|reset]``.
 
     Bare: gateway running → open the live dashboard; otherwise build static HTML.
     ``restart``: restart the gateway that serves the dashboard, then reopen it.
+    ``reset``:   clear the usage log → zero the dashboard (``--hard`` skips backup).
     """
     verb = rest[0] if rest and not rest[0].startswith("-") else None
     flags = rest[1:] if verb else rest
     no_open = "--no-open" in flags
     force_static = "--static" in flags
 
-    if verb is not None and verb != "restart":
-        print(f"error: unknown dashboard verb {verb!r}; expected 'restart'",
+    if verb is not None and verb not in ("restart", "reset"):
+        print(f"error: unknown dashboard verb {verb!r}; expected 'restart' or 'reset'",
               file=sys.stderr)
         return 2
 
@@ -180,6 +181,8 @@ def _cmd_dashboard(rest: list[str]) -> int:
 
     if verb == "restart":
         return _cmd_dashboard_restart(no_open=no_open)
+    if verb == "reset":
+        return _cmd_dashboard_reset(hard="--hard" in flags)
 
     state = daemon.read_state()
     if state is not None and not force_static:
@@ -238,6 +241,88 @@ def _cmd_dashboard_restart(*, no_open: bool) -> int:
     print(f"dashboard → {url}")
     if not no_open:
         webbrowser.open(url)
+    return 0
+
+
+def _cmd_dashboard_reset(*, hard: bool) -> int:
+    """``telos dashboard reset [--hard]`` — clear the usage log → zero the dashboard.
+
+    Gateway running → hot-reset over the loopback control endpoint (no restart).
+    Gateway stopped, or the control endpoint does not answer → rotate the
+    usage-log file on disk directly.
+
+    By default the old log is rotated to a timestamped ``.bak`` sibling so the
+    data stays recoverable; ``--hard`` deletes it outright.
+    """
+    from telos.cli_menu import confirm, is_interactive
+    from telos.config import load_config
+    from telos.gateway import control, daemon
+
+    if is_interactive() and not confirm(
+        "clear the usage log and zero the dashboard?", default=False
+    ):
+        print("aborted.")
+        return 0
+
+    state = daemon.read_state()
+    if state is not None:
+        try:
+            res = control.post_reset(state.host, state.port,
+                                     keep_backup=not hard)
+        except RuntimeError as e:
+            # Gateway is registered but its control endpoint did not answer
+            # (commonly: a gateway started before the reset route existed).
+            # Fall back to rotating the log file directly.
+            print(f"warning: {e}", file=sys.stderr)
+            print("falling back to clearing the usage-log file directly…",
+                  file=sys.stderr)
+            return _reset_usage_log_file(load_config(), hard=hard,
+                                         restart_hint=True)
+        status = res.get("status", "reset")
+        cleared = res.get("lines_cleared", 0)
+        backup = res.get("backup")
+        if status == "already empty":
+            print("✓ usage log is already empty — nothing to reset.")
+        else:
+            print(f"✓ dashboard reset — {cleared} line(s) cleared "
+                  f"(gateway hot-reset, no restart needed).")
+        if backup:
+            print(f"  previous log backed up → {backup}")
+        return 0
+
+    # gateway not running: rotate the usage-log file directly.
+    return _reset_usage_log_file(load_config(), hard=hard, restart_hint=False)
+
+
+def _reset_usage_log_file(cfg, *, hard: bool, restart_hint: bool) -> int:
+    """Rotate (or delete) the usage-log file on disk → zero the dashboard."""
+    import time
+
+    usage_log = cfg.gateway.resolved_usage_log()
+    if not usage_log.exists() or usage_log.stat().st_size == 0:
+        print(f"✓ usage log is already empty — nothing to reset: {usage_log}")
+        return 0
+
+    lines = sum(1 for _ in usage_log.open())
+    backup_path = None
+    try:
+        if hard:
+            usage_log.unlink()
+        else:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            backup_path = usage_log.with_name(f"{usage_log.name}.{stamp}.bak")
+            usage_log.replace(backup_path)
+        usage_log.touch()
+    except OSError as e:
+        print(f"error: failed to reset usage log: {e}", file=sys.stderr)
+        return 1
+
+    print(f"✓ dashboard reset — {lines} line(s) cleared.")
+    if backup_path is not None:
+        print(f"  previous log backed up → {backup_path}")
+    if restart_hint:
+        print("  note: run 'telos gateway restart' so the gateway picks up "
+              "the change and the new control endpoint.")
     return 0
 
 
@@ -333,7 +418,7 @@ def _print_usage() -> None:
         "  <harness>   directly enter a harness (claude-code / codex / openclaw / hermes)\n"
         "  init        auto-detect harnesses, inject config, start the gateway\n"
         "  gateway     start / stop / view the gateway (start|stop|status|restart)\n"
-        "  dashboard   open the saved-token / saved-$ dashboard in a browser (dashboard restart restarts it)\n"
+        "  dashboard   open the saved-token / saved-$ dashboard in a browser (dashboard restart restarts it; dashboard reset zeroes it)\n"
         "  mode        switch the optimization mode (none|telos|rtk|both), hot-updates the running gateway\n"
         "  alias       set the harness the bare telos enters by default\n"
         "  replay      replay a recorded session across multiple modes for a controlled A/B comparison\n"
@@ -346,6 +431,7 @@ def _print_usage() -> None:
         "  telos                       # enter the favorite harness\n"
         "  telos dashboard\n"
         "  telos dashboard restart\n"
+        "  telos dashboard reset\n"
     )
 
 

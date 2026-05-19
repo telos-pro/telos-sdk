@@ -903,6 +903,66 @@ class ProxyApp:
         })
 
     # ------------------------------------------------------------------
+    # POST /__telos/control/reset -- clear the usage_log → zero the dashboard
+    # ------------------------------------------------------------------
+
+    async def handle_control_reset(self, request: web.Request) -> web.Response:
+        """Zero the savings dashboard by clearing the usage_log (loopback-only).
+
+        The current log is rotated to a timestamped ``.bak`` sibling (so the
+        data is recoverable) and a fresh empty log takes its place; the next
+        dashboard refresh then shows the welcome / empty state. Pass body
+        ``{"keep_backup": false}`` to delete the old log outright instead.
+        """
+        if not self._is_loopback(request):
+            return web.json_response(
+                {"error": "control endpoint is loopback-only"}, status=403)
+
+        if self.usage_log is None:
+            return web.json_response(
+                {"error": "no usage_log configured; nothing to reset"},
+                status=400)
+
+        keep_backup = True
+        if request.can_read_body:
+            try:
+                body = await request.json()
+                keep_backup = bool((body or {}).get("keep_backup", True))
+            except Exception:  # noqa: BLE001
+                pass  # empty / non-JSON body → defaults
+
+        log = self.usage_log
+        if not log.exists() or log.stat().st_size == 0:
+            return web.json_response(
+                {"status": "already empty", "usage_log": str(log),
+                 "lines_cleared": 0, "backup": None})
+
+        try:
+            lines = sum(1 for _ in log.open()) if log.exists() else 0
+            backup: str | None = None
+            if keep_backup:
+                stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+                backup_path = log.with_name(f"{log.name}.{stamp}.bak")
+                log.replace(backup_path)          # atomic rename
+                backup = str(backup_path)
+            else:
+                log.unlink()
+            log.touch()                            # fresh empty log for new writes
+        except Exception as e:  # noqa: BLE001
+            _log.exception("usage log reset failed")
+            return web.json_response(
+                {"error": f"reset failed: {e}"}, status=500)
+
+        _log.info("usage log reset: %d line(s) cleared%s",
+                  lines, f", backed up → {backup}" if backup else "")
+        return web.json_response({
+            "status": "reset",
+            "usage_log": str(log),
+            "lines_cleared": lines,
+            "backup": backup,
+        })
+
+    # ------------------------------------------------------------------
     # GET /__telos/developer -- developer-facing live session structure / tool-call statistics
     # ------------------------------------------------------------------
 
@@ -1113,6 +1173,7 @@ def make_app(
     app.router.add_get("/__telos/dashboard", proxy.handle_dashboard)
     app.router.add_route("GET", "/__telos/control/mode", proxy.handle_control_mode)
     app.router.add_route("POST", "/__telos/control/mode", proxy.handle_control_mode)
+    app.router.add_post("/__telos/control/reset", proxy.handle_control_reset)
     app.router.add_get("/__telos/developer", proxy.handle_developer)
     app.router.add_get("/__telos/developer.json", proxy.handle_developer_json)
     app.router.add_route("*", "/{tail:.*}", proxy.handle_passthrough)

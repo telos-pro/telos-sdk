@@ -1,6 +1,6 @@
-"""TELOS 协议的最小自检：跑 demo 中的请求，验证不变量、Mark slot、usage 解析。
+"""Minimal self-check of the TELOS protocol: run the requests from the demo, verify invariants, Mark slots, usage parsing.
 
-运行方式：
+How to run:
     python -m telos.tests.test_smoke
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# 允许直接 python -m telos.tests.test_smoke 运行
+# allow running directly via python -m telos.tests.test_smoke
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from telos import Band, Bridge, TelosInvariantError  # noqa: E402
@@ -19,7 +19,7 @@ from telos.ir import assert_ir_invariants            # noqa: E402
 
 
 def test_harness_band_split() -> None:
-    """OpenClaw 用户消息必须切成 (PIN, DROP)，envelope 不能污染 PIN。"""
+    """An OpenClaw user message must be split into (PIN, DROP); the envelope must not contaminate the PIN."""
     harness = load_harness("openclaw")
     ir = harness.parse(RAW_REQUEST, session_id="t1", engine="anthropic",
                        model="claude-opus-4-7")
@@ -29,7 +29,7 @@ def test_harness_band_split() -> None:
     assert Band.DROP in bands, f"user message missing DROP block: {bands}"
     assert bands.index(Band.PIN) < bands.index(Band.DROP), \
         f"PIN must precede DROP, got {bands}"
-    # 任何 PIN block 的 payload 都不能含 envelope 模式
+    # no PIN block's payload may contain an envelope pattern
     for blk in user_msg.blocks:
         if blk.band is Band.PIN:
             assert "<environment_info>" not in str(blk.payload)
@@ -38,18 +38,18 @@ def test_harness_band_split() -> None:
 
 
 def test_refpool_lifts_large_doc() -> None:
-    """大段 system 文本必须被搬到 ref-pool，留 [ref:...] 引用。"""
+    """A large block of system text must be moved into the ref-pool, leaving a [ref:...] reference."""
     harness = load_harness("openclaw")
     ir = harness.parse(RAW_REQUEST, session_id="t2", engine="anthropic")
     assert ir.ref_pool, "expected ref-pool entries for large system doc"
-    # ref 引用应该出现在 system 段
+    # the ref reference should appear in the system segment
     found_ref = any("[ref:" in str(b.payload) for b in ir.system)
     assert found_ref, "system should contain a [ref:...] pointer"
     print("✓ test_refpool_lifts_large_doc")
 
 
 def test_anthropic_mark_slots() -> None:
-    """Anthropic adapter 应给出 ≤4 slot，且 1h 必须排在 5m 前。"""
+    """The Anthropic adapter should produce ≤4 slots, and 1h must come before 5m."""
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
     ir = harness.parse(RAW_REQUEST, session_id="t3", engine="anthropic",
@@ -57,7 +57,7 @@ def test_anthropic_mark_slots() -> None:
     bridge = Bridge(ir, engine)
     plan = bridge.mark()
     assert len(plan.slots) <= 4
-    # 长 TTL 的 slot 必须出现在短 TTL 之前（按 segment 顺序）
+    # a long-TTL slot must appear before a short-TTL one (in segment order)
     seg_order = {"tools": 0, "system": 1, "message": 2}
     last_ttl = "long"
     for s in sorted(plan.slots, key=lambda s: (seg_order[s.segment], s.index)):
@@ -70,7 +70,7 @@ def test_anthropic_mark_slots() -> None:
 
 
 def test_emit_round_trip_three_engines() -> None:
-    """五个 engine 都能把同一份 IR emit 成各自的 wire 请求且不抛异常。"""
+    """All five engines can emit the same IR into their respective wire requests without raising."""
     harness = load_harness("openclaw")
     for name, model in (
         ("anthropic", "claude-opus-4-7"),
@@ -88,7 +88,7 @@ def test_emit_round_trip_three_engines() -> None:
 
 
 def test_bidirectional_only_on_open_engines() -> None:
-    """vLLM / SGLang 是 bidirectional；闭源三家都不是。"""
+    """vLLM / SGLang are bidirectional; the three closed-source ones are not."""
     harness = load_harness("openclaw")
     bidi = {"vllm", "sglang"}
     for name in ("anthropic", "openai", "deepseek", "vllm", "sglang"):
@@ -96,7 +96,7 @@ def test_bidirectional_only_on_open_engines() -> None:
         bridge = Bridge(ir, load_engine(name))
         assert bridge.is_bidirectional == (name in bidi), \
             f"[{name}] is_bidirectional should be {name in bidi}"
-        # probe 总能调用，闭源就直接返回 hit=False（no-op）
+        # probe can always be called; closed-source engines just return hit=False (no-op)
         probe = bridge.probe_cache()
         if name not in bidi:
             assert probe.hit is False
@@ -104,12 +104,12 @@ def test_bidirectional_only_on_open_engines() -> None:
 
 
 def test_cooperative_fold_emits_cache_control() -> None:
-    """SGLang 的 fork-and-replace 必须把 cache_control 字段放进下次 wire。"""
+    """SGLang's fork-and-replace must put the cache_control field into the next wire."""
     harness = load_harness("openclaw")
     ir = harness.parse(RAW_REQUEST, session_id="cf-sgl", engine="sglang",
                        model="deepseek-ai/DeepSeek-V3")
     bridge = Bridge(ir, load_engine("sglang"))
-    ctrl = bridge.cooperative_fold(message_range=(1, 3), summary="<已折叠>")
+    ctrl = bridge.cooperative_fold(message_range=(1, 3), summary="<folded>")
     assert "fork_from_path" in ctrl, f"expected fork_from_path in {ctrl}"
     wire = bridge.emit_with_extras(ctrl)
     cc = wire.get("cache_control", {})
@@ -119,7 +119,7 @@ def test_cooperative_fold_emits_cache_control() -> None:
 
 
 def test_vllm_pin_cache_policy() -> None:
-    """vLLM 的 pin_until 必须出现在 wire body 的 cache_policy 字段里。"""
+    """vLLM's pin_until must appear in the cache_policy field of the wire body."""
     harness = load_harness("openclaw")
     ir = harness.parse(RAW_REQUEST, session_id="cf-vllm", engine="vllm",
                        model="Qwen/Qwen3-32B")
@@ -133,7 +133,7 @@ def test_vllm_pin_cache_policy() -> None:
 
 
 def test_band_order_violation_caught() -> None:
-    """手动构造一个违反 §5 的 IR，确认 bridge 会拒绝。"""
+    """Manually construct an IR that violates §5 and confirm the bridge rejects it."""
     from telos.ir import TelosBlock, TelosIR, TelosMessage, TelosHints
 
     bad = TelosIR(
@@ -142,7 +142,7 @@ def test_band_order_violation_caught() -> None:
         system=(),
         messages=(TelosMessage(role="user", blocks=(
             TelosBlock(id="d", band=Band.DROP, kind="text", payload="x"),
-            TelosBlock(id="p", band=Band.PIN,  kind="text", payload="y"),  # PIN 在 DROP 后 → 违反
+            TelosBlock(id="p", band=Band.PIN,  kind="text", payload="y"),  # PIN after DROP → violation
         )),),
         ref_pool={},
         hints=TelosHints(engine="anthropic"),
@@ -156,7 +156,7 @@ def test_band_order_violation_caught() -> None:
 
 
 def test_usage_normalization() -> None:
-    """三个 engine 的 usage 都能归一到 (raw_input, cache_read, cache_write)。"""
+    """The usage of all three engines can be normalized to (raw_input, cache_read, cache_write)."""
     harness = load_harness("openclaw")
     cases = [
         ("anthropic", {"usage": {"input_tokens": 80, "cache_read_input_tokens": 1000,

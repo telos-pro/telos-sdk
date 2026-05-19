@@ -1,0 +1,7 @@
+include README.md
+include README.zh-CN.md
+include LICENSE
+include CHANGELOG.md
+include packaging/telos-sdk.rb
+include packaging/README.md
+recursive-include docs *.md

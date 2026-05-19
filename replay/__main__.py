@@ -1,12 +1,13 @@
-"""``python -m telos.replay`` / ``telos replay`` 入口。
+"""``python -m telos.replay`` / ``telos replay`` entry point.
 
-把语料库里某个真实会话，按多种 mode 各重放一遍，结果 append 到 usage_log，
-dashboard 的「A/B 对比」面板会自动并排展示（compare_group = 原会话 id）。
+Replays a real session from the corpus once for each of several modes; the
+results are appended to usage_log, and the dashboard's "A/B comparison" panel
+shows them side by side automatically (compare_group = the original session id).
 
-用法::
+Usage::
 
-    telos replay --list                       # 列出语料库里的会话
-    telos replay --session telos-ab12cd34      # 默认 4 mode 全跑
+    telos replay --list                       # list the sessions in the corpus
+    telos replay --session telos-ab12cd34      # run all 4 modes by default
     telos replay --session <id> --modes none,both
 """
 
@@ -30,16 +31,16 @@ _DEFAULT_USAGE_LOG = Path.home() / ".telos" / "usage.jsonl"
 def _print_sessions(corpus_dir: Path) -> int:
     infos = list_sessions(corpus_dir)
     if not infos:
-        print(f"语料库为空：{corpus_dir}")
-        print("（先用 `telos proxy` 跑几个真实会话，默认就会录进去）")
+        print(f"corpus is empty: {corpus_dir}")
+        print("(run a few real sessions with `telos proxy` first; they are recorded by default)")
         return 0
-    print(f"语料库 {corpus_dir} —— {len(infos)} 个会话：\n")
+    print(f"corpus {corpus_dir} —— {len(infos)} sessions:\n")
     print(f"  {'session_id':<40} {'calls':>6}  last_seen")
     for i in infos:
         last = datetime.fromtimestamp(i.last_ts).strftime("%Y-%m-%d %H:%M") \
             if i.last_ts else "—"
         print(f"  {i.session_id:<40} {i.n_calls:>6}  {last}")
-    print("\n重放：telos replay --session <session_id>")
+    print("\nreplay: telos replay --session <session_id>")
     return 0
 
 
@@ -62,41 +63,41 @@ def _print_summary(results: list[ReplayResult]) -> None:
         print(f"{r.mode:<10} {r.turns_ok:>7} {r.total_raw_input:>12,} "
               f"{r.total_cache_read:>12,} {r.total_cache_write:>12,}")
         if r.turns_failed:
-            print(f"  ⚠ {r.turns_failed} 轮上游调用失败（已跳过）")
+            print(f"  ⚠ {r.turns_failed} turns failed the upstream call (skipped)")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="telos.replay",
-        description="录制 → 重放对照：同一会话按多种 mode 各跑一遍，"
-                    "结果进 dashboard 的 A/B 对比面板。",
+        description="Record → replay comparison: run the same session once for each of "
+                    "several modes; the results go into the dashboard's A/B comparison panel.",
     )
     ap.add_argument("--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR,
-                    help=f"会话语料目录（默认 {DEFAULT_CORPUS_DIR}）")
+                    help=f"session corpus directory (default {DEFAULT_CORPUS_DIR})")
     ap.add_argument("--list", action="store_true",
-                    help="列出语料库里的会话后退出")
+                    help="list the sessions in the corpus and exit")
     ap.add_argument("--session", default=None,
-                    help="要重放的会话 id（见 --list）")
+                    help="the session id to replay (see --list)")
     ap.add_argument("--modes", default="none,telos,rtk,both",
-                    help="逗号分隔的 mode 列表（默认 none,telos,rtk,both）")
+                    help="comma-separated list of modes (default none,telos,rtk,both)")
     ap.add_argument("--usage-log", type=Path, default=_DEFAULT_USAGE_LOG,
-                    help=f"重放结果 append 到此 jsonl（默认 {_DEFAULT_USAGE_LOG}）")
+                    help=f"replay results are appended to this jsonl (default {_DEFAULT_USAGE_LOG})")
     ap.add_argument("--compare-group", default=None,
-                    help="对比分组键（默认用会话 id）")
+                    help="comparison group key (defaults to the session id)")
     ap.add_argument("--upstream", default="https://api.anthropic.com",
-                    help="上游 Anthropic endpoint")
+                    help="upstream Anthropic endpoint")
     ap.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"),
-                    help="Anthropic API key（默认读 ANTHROPIC_API_KEY）")
+                    help="Anthropic API key (defaults to reading ANTHROPIC_API_KEY)")
     ap.add_argument("--no-cache-isolation", action="store_true",
-                    help="不给每个 mode 注入唯一 system 前缀（默认注入，"
-                         "避免跨 mode 缓存互相污染）")
+                    help="do not inject a unique system prefix per mode (injected by default, "
+                         "to avoid cross-mode cache pollution)")
     args = ap.parse_args(argv)
 
     if args.list:
         return _print_sessions(args.corpus_dir)
 
     if not args.session:
-        print("需要 --session <id>（或用 --list 查看可用会话）", file=sys.stderr)
+        print("--session <id> is required (or use --list to view available sessions)", file=sys.stderr)
         return 2
 
     try:
@@ -105,25 +106,25 @@ def main(argv: list[str] | None = None) -> int:
         print(str(e), file=sys.stderr)
         return 1
     if not turns:
-        print(f"会话 {args.session} 没有可重放的轮次", file=sys.stderr)
+        print(f"session {args.session} has no replayable turns", file=sys.stderr)
         return 1
 
     if not args.api_key:
-        print("缺少 API key：设 ANTHROPIC_API_KEY 或传 --api-key", file=sys.stderr)
+        print("missing API key: set ANTHROPIC_API_KEY or pass --api-key", file=sys.stderr)
         return 2
 
     modes = [TelosMode.from_label(m.strip()) for m in args.modes.split(",")
              if m.strip()]
     if not modes:
-        print(f"--modes 解析为空；合法值：{', '.join(MODE_LABELS)}", file=sys.stderr)
+        print(f"--modes parsed to empty; valid values: {', '.join(MODE_LABELS)}", file=sys.stderr)
         return 2
 
     compare_group = args.compare_group or args.session
     sender = anthropic_sender(api_key=args.api_key, upstream=args.upstream)
     flt = build_filter()
 
-    print(f"重放会话 {args.session}（{len(turns)} 轮）"
-          f"× {len(modes)} mode → {args.usage_log}")
+    print(f"replaying session {args.session} ({len(turns)} turns)"
+          f" × {len(modes)} modes → {args.usage_log}")
     t0 = time.time()
     results: list[ReplayResult] = []
     for mode in modes:
@@ -139,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
 
     n = _append_records(args.usage_log, results)
     _print_summary(results)
-    print(f"\n写入 {n} 条记录 · 用时 {time.time() - t0:.1f}s")
-    print(f"看对比：telos dashboard --usage-log {args.usage_log}")
-    print(f"  （compare_group = {compare_group}）")
+    print(f"\nwrote {n} records · took {time.time() - t0:.1f}s")
+    print(f"view the comparison: telos dashboard --usage-log {args.usage_log}")
+    print(f"  (compare_group = {compare_group})")
     return 0
 
 

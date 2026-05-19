@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""TELOS developer page —— 实时显示 session 结构 / pin·fold·drop 区域变化 /
-api 返回的 cache 字段 / 工具调用统计。
+"""TELOS developer page — live view of session structure / pin·fold·drop region
+changes / cache fields returned by the API / tool-call statistics.
 
-与 ``build_savings_dashboard``（面向用户的省钱看板）不同：本页面面向开发者，
-内容是**当前内存里的状态**，每次 GET 重新从 ``_SessionInspector`` 渲染。
+Unlike ``build_savings_dashboard`` (the user-facing savings dashboard): this page
+is for developers, its content is the **current in-memory state**, and every GET
+re-renders from ``_SessionInspector``.
 
-页面元素：
-- 总览：所有 session 的列表，按最近活跃排序；点击进入详情
-- 详情：
-  * 最近 N 次 call 的 (raw_input, cache_read, cache_write, output, plan slots)
-  * 当前 IR layout：tools / system / messages 三段 × pin/fold/drop 三带的
-    block 数 + 字符数，配合"上一轮 → 这一轮"的箭头
-  * 每条 message 的 band 序列（按 mi 列出 role + blocks）
-  * 工具调用统计：调用次数 / 总参数字节 / 总结果字节 / 最大结果块
-  * 上一次 API 返回的 raw cache 字段（cache_creation.ephemeral_*、
-    cache_read_input_tokens 等）
+Page elements:
+- Overview: a list of all sessions, sorted by most recent activity; click to enter details
+- Details:
+  * (raw_input, cache_read, cache_write, output, plan slots) of the last N calls
+  * Current IR layout: block counts + char counts for the three segments
+    (tools / system / messages) × three bands (pin/fold/drop), with
+    "previous round → this round" arrows
+  * The band sequence of each message (role + blocks listed by mi)
+  * Tool-call statistics: invocation count / total argument bytes / total result
+    bytes / largest result block
+  * Raw cache fields returned by the last API call (cache_creation.ephemeral_*,
+    cache_read_input_tokens, etc.)
 
-依赖 ``telos.proxy.server._SessionInspector`` 提供的内存视图。完全 self-
-contained 的 HTML，复用 savings dashboard 的 CSS 调色板。
+Depends on the in-memory view provided by ``telos.proxy.server._SessionInspector``.
+Fully self-contained HTML, reusing the savings dashboard's CSS color palette.
 """
 
 from __future__ import annotations
@@ -35,12 +38,13 @@ if TYPE_CHECKING:
 
 
 class _RegistryLike(Protocol):
-    """Dashboard 仅需要 ``__len__``；用 Protocol 避免对 server.py 的硬依赖
-    （server.py 引 aiohttp，单元测试不该被拖入）。"""
+    """The dashboard only needs ``__len__``; using a Protocol avoids a hard
+    dependency on server.py (server.py imports aiohttp, and unit tests should
+    not be dragged into that)."""
     def __len__(self) -> int: ...
 
 
-# 兼容老类型注解
+# Compatibility with old type annotations
 _SessionInspector = "SessionInspector"
 _SessionRegistry = _RegistryLike
 
@@ -172,7 +176,7 @@ def _delta_span(d: int) -> str:
 
 def _render_segment_stack(segs: Mapping[str, Mapping[str, int]],
                             seg_name: str) -> str:
-    """渲染单个 segment（tools / system / messages）的 pin·fold·drop 堆叠条。"""
+    """Render the pin·fold·drop stacked bar for a single segment (tools / system / messages)."""
     bands = segs.get(seg_name) or {}
     pin = int((bands.get("pin") or {}).get("chars", 0))
     fold = int((bands.get("fold") or {}).get("chars", 0))
@@ -227,7 +231,7 @@ def _render_overview(inspector: "_SessionInspector",
         )
     body = "\n".join(rows) or (
         '<tr><td colspan="8" class="muted left">'
-        '尚无 session — 发起一次 /v1/messages 请求即可在此出现。</td></tr>'
+        'No sessions yet — make a /v1/messages request and it will appear here.</td></tr>'
     )
     return f"""
 <div class="card">
@@ -334,7 +338,7 @@ def _render_session_detail(entry, registry: "_SessionRegistry",
 </div>
 """
 
-    # ---- per-message band view (最新一次 IR) ----
+    # ---- per-message band view (latest IR) ----
     msg_rows = []
     for m in layout.get("messages") or []:
         blks = []
@@ -416,10 +420,10 @@ def _render_session_detail(entry, registry: "_SessionRegistry",
 
 
 def _render_raw_messages(entry) -> str:
-    """渲染最近一次 call 的原始（TELOS 改写前）messages 摘要。
+    """Render a summary of the original (pre-TELOS-rewrite) messages of the last call.
 
-    每条 message 列出 role + 各 content block 的 type / 字符数 / 文本预览。
-    数据来自 ``calls[-1]["raw_messages"]``（proxy 层在每次 call 时回填）。
+    Each message lists role + each content block's type / char count / text preview.
+    Data comes from ``calls[-1]["raw_messages"]`` (the proxy layer backfills it on each call).
     """
     last = entry.calls[-1] if entry.calls else None
     raw_msgs = (last or {}).get("raw_messages") or []
@@ -466,10 +470,10 @@ def render_developer(
     refresh_seconds: int | None = None,
     tab: str = "overview",
 ) -> str:
-    """渲染开发者页面 HTML（self-contained）。
+    """Render the developer page HTML (self-contained).
 
-    - 没指定 focus_session：渲染概览（session 列表）
-    - 指定了：渲染该 session 的所有详情面板
+    - focus_session not specified: render the overview (session list)
+    - specified: render all the detail panels for that session
     """
     refresh_tag = (
         f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'

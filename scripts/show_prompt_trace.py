@@ -10,7 +10,7 @@ Per call we now surface, beyond the headline cache numbers:
   you spot which region is bloating across iterations (typically the
   ``messages`` band growing because of tool_result turns).
 - **Breakpoints (BP)** — which cache anchors the engine adapter placed,
-  with their TTL class. These are the "bp 点".
+  with their TTL class. These are the "bp points".
 - **Task status footer** — if a sibling ``<tag>.result.json`` exists,
   we print whether the task completed and (if not) the inferred reason.
 

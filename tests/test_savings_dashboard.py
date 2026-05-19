@@ -1,4 +1,4 @@
-"""``build_savings_dashboard`` 单测：RTK token 来源、缓存加权计价、TELOS/RTK 分项。"""
+"""``build_savings_dashboard`` unit tests: RTK token source, cache-weighted pricing, TELOS/RTK breakdown."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _rec(*, model: str = "claude-opus-4-7", raw_input: int = 0,
 
 
 def test_rtk_tokens_prefer_logged_token_fields() -> None:
-    """tool_output_reduction 带 token 字段时，tool_saved_tokens 取日志值而非 chars/4。"""
+    """When tool_output_reduction carries token fields, tool_saved_tokens takes the logged value rather than chars/4."""
     tool = {
         "original_chars": 40000, "filtered_chars": 12000,  # saved_chars/4 = 7000
         "original_tokens": 9000, "filtered_tokens": 4000,  # saved_tokens   = 5000
@@ -37,7 +37,7 @@ def test_rtk_tokens_prefer_logged_token_fields() -> None:
 
 
 def test_rtk_tokens_fall_back_to_chars_for_old_logs() -> None:
-    """旧日志只有 chars，无 token 字段 → 回退 saved_chars // 4。"""
+    """Old logs have only chars, no token fields → fall back to saved_chars // 4."""
     tool = {"original_chars": 40000, "filtered_chars": 12000, "blocks_filtered": 1}
     summary = aggregate([_rec(raw_input=1000, tool=tool)])
     assert summary.total.tool_saved_tokens == 28000 // 4
@@ -45,7 +45,7 @@ def test_rtk_tokens_fall_back_to_chars_for_old_logs() -> None:
 
 
 def test_combined_equals_telos_plus_rtk() -> None:
-    """combined_saved_usd 严格等于 TELOS + RTK 两路之和，不双算。"""
+    """combined_saved_usd strictly equals the sum of the TELOS and RTK paths, with no double counting."""
     tool = {"original_tokens": 8000, "filtered_tokens": 2000, "saved_tokens": 6000,
             "original_chars": 32000, "filtered_chars": 8000}
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, tool=tool)])
@@ -56,10 +56,10 @@ def test_combined_equals_telos_plus_rtk() -> None:
 
 
 def test_cache_hit_weights_down_rtk_savings() -> None:
-    """同样省下 N token：高缓存命中率的 call，RTK $ 应低于零命中（边际价更便宜）。"""
+    """For the same N tokens saved: a call with a high cache hit rate should have a lower RTK $ than zero-hit (cheaper marginal price)."""
     tool = {"original_tokens": 12000, "filtered_tokens": 2000, "saved_tokens": 10000}
-    # A：全 raw_input → hit=0 → eff_price = input 价
-    # B：全 cache_read → hit=1 → eff_price = cache_read 价（便宜 10×）
+    # A: all raw_input → hit=0 → eff_price = input price
+    # B: all cache_read → hit=1 → eff_price = cache_read price (10x cheaper)
     summary = aggregate([
         _rec(raw_input=100000, tool=dict(tool), session="A"),
         _rec(cache_read=100000, tool=dict(tool), session="B"),
@@ -67,13 +67,13 @@ def test_cache_hit_weights_down_rtk_savings() -> None:
     a = summary.by_session["A"].tool_saved_usd
     b = summary.by_session["B"].tool_saved_usd
     assert a > b > 0, (a, b)
-    # opus 4.7：input $5 / cache_read $0.5 → 比值 ~10×
+    # opus 4.7: input $5 / cache_read $0.5 → ratio ~10x
     assert abs(a / b - 10.0) < 0.5, a / b
     print("✓ test_cache_hit_weights_down_rtk_savings")
 
 
 def test_render_shows_total_cost_saved() -> None:
-    """渲染产物含 combined 口径的 hero 卡与 TELOS/RTK 分项 KPI。"""
+    """The rendered output contains the combined-basis hero card and the TELOS/RTK breakdown KPIs."""
     tool = {"original_tokens": 8000, "filtered_tokens": 2000, "saved_tokens": 6000}
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, tool=tool)])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
@@ -84,23 +84,23 @@ def test_render_shows_total_cost_saved() -> None:
 
 
 def test_rtk_status_distinguishes_disabled_from_zero_save() -> None:
-    """rtk_status 把「$0」拆开：从未启用 / 启用但空闲 / 跑了但没省 / 实际省。"""
-    # disabled：根本没有 tool_output_reduction
+    """rtk_status breaks down "$0": never enabled / enabled but idle / ran but saved nothing / actually saved."""
+    # disabled: no tool_output_reduction at all
     s = aggregate([_rec(raw_input=1000)])
     assert s.total.rtk_status == "disabled"
-    # disabled：tool_output_reduction 是空 dict（RTK 关时 proxy 写的就是 {}）
+    # disabled: tool_output_reduction is an empty dict (what the proxy writes when RTK is off is {})
     s = aggregate([_rec(raw_input=1000, tool={})])
     assert s.total.rtk_status == "disabled"
-    # idle：RTK 跑了但没扫到 tool_result
+    # idle: RTK ran but did not scan any tool_result
     s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 0,
                                               "original_chars": 0})])
     assert s.total.rtk_status == "idle"
-    # nosave：扫到了工具输出但没省（原文 == 过滤后）
+    # nosave: tool output was scanned but nothing was saved (original == filtered)
     s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 3, "saved_tokens": 0,
                                               "original_chars": 500,
                                               "filtered_chars": 500})])
     assert s.total.rtk_status == "nosave"
-    # active：实际省下 token
+    # active: tokens were actually saved
     s = aggregate([_rec(raw_input=1000, tool={"blocks_seen": 3, "saved_tokens": 4000,
                                               "original_tokens": 9000,
                                               "filtered_tokens": 5000})])
@@ -109,10 +109,10 @@ def test_rtk_status_distinguishes_disabled_from_zero_save() -> None:
 
 
 def test_render_marks_rtk_not_enabled() -> None:
-    """RTK 从未启用时，渲染产物显式标 not enabled，而非和省 0 混同。"""
+    """When RTK was never enabled, the rendered output explicitly marks "not enabled" rather than conflating it with $0 saved."""
     summary = aggregate([_rec(raw_input=5000, cache_read=50000, mode="telos")])
     html_doc = render_dashboard(summary, [Path("sample.jsonl")])
-    assert "not enabled" in html_doc or "未启用" in html_doc
+    assert "not enabled" in html_doc
     print("✓ test_render_marks_rtk_not_enabled")
 
 

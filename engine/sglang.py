@@ -1,18 +1,21 @@
-"""SGLang 适配器（开源推理引擎，RadixAttention + HiCache）。
+"""SGLang adapter (open-source inference engine, RadixAttention + HiCache).
 
-依据：
-- RadixAttention：以 token 为单位的 radix 树缓存；cache-aware scheduler
-  会按前缀亲和度重排请求。
-- HiCache：GPU/CPU/disk 三级缓存；可在请求里给出 ``prefer_tier`` 提示。
-- usage 字段 ``prompt_tokens`` + ``cached_tokens``；HiCache 还回
-  ``cache_hierarchy_breakdown: {gpu, cpu, disk}``。
+Basis:
+- RadixAttention: a token-level radix-tree cache; the cache-aware scheduler
+  reorders requests by prefix affinity.
+- HiCache: a three-tier GPU/CPU/disk cache; a ``prefer_tier`` hint can be
+  given in the request.
+- usage fields ``prompt_tokens`` + ``cached_tokens``; HiCache additionally
+  returns ``cache_hierarchy_breakdown: {gpu, cpu, disk}``.
 
-vs vLLM 的 superset：
-- ``fork_and_replace`` 真正可用 → ``Fold`` 实现"零重算"
-- ``affinity_key`` 让 CASS 调度器把同前缀请求落到同一 worker
-- ``tier_hint`` 允许把 PIN 留 GPU、FOLD 沉 CPU、避免互相挤压
+A superset of vLLM:
+- ``fork_and_replace`` is truly usable → ``Fold`` achieves "zero recomputation"
+- ``affinity_key`` lets the CASS scheduler land same-prefix requests on the
+  same worker
+- ``tier_hint`` allows keeping PIN on the GPU and sinking FOLD to the CPU,
+  avoiding mutual contention
 
-字段集中在 ``_SGLANG_EXT`` 常量里（O5 应对 rename）。
+Field names are centralized in the ``_SGLANG_EXT`` constant (to cope with O5 renames).
 """
 
 from __future__ import annotations
@@ -41,12 +44,12 @@ class SGLangAdapter(BidirectionalEngineAdapter):
             explicit_breakpoints=True,
             ttl_control="none",
             prewarmable=True,
-            routing_key=True,                 # affinity_key 实现
+            routing_key=True,                 # implemented by affinity_key
             retention_policy="configurable",
             max_breakpoints=2,
             cache_probe=True,
             span_eviction=True,
-            fork_and_replace=True,            # 完整支持
+            fork_and_replace=True,            # fully supported
             tier_hint=True,                   # HiCache
             pin_unpin=True,
         )
@@ -70,7 +73,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
                         message_index=mi, ttl_class="short",
                     ))
                     break
-        # affinity_key：把工具集 + system PIN + ref-pool slug 集合 hash 成一个 key
+        # affinity_key: hash the toolset + system PIN + ref-pool slug set into a single key
         affinity = self._affinity_key(ir)
         return EmitPlan(
             slots=tuple(slots),
@@ -94,17 +97,17 @@ class SGLangAdapter(BidirectionalEngineAdapter):
                                  else json.dumps(blk.payload, sort_keys=True))
             wire_messages.append({"role": msg.role, "content": "\n".join(parts)})
 
-        # cache_control：把 plan 翻译成 SGLang 私有字段
+        # cache_control: translate the plan into SGLang private fields
         ctrl: dict[str, Any] = {}
         for slot in plan.slots:
             if slot.name == "lock_radix":
                 ctrl["lock_radix_path"] = True
                 ctrl["path_hash"] = plan.extras.get("path_hash")
-        # tier hint：根据 band 分布给出整体偏好（保守：默认 gpu）
+        # tier hint: give an overall preference based on the band distribution (conservative: default gpu)
         ctrl["prefer_tier"] = "gpu"
         if plan.routing_key:
             ctrl["affinity_key"] = plan.routing_key
-        # 允许 bridge 通过 extras 注入 fork_from_path / replace_suffix / evict_span
+        # allow the bridge to inject fork_from_path / replace_suffix / evict_span via extras
         for k in ("fork_from_path", "replace_suffix", "evict_span"):
             if k in plan.extras:
                 ctrl[k] = plan.extras[k]
@@ -128,14 +131,14 @@ class SGLangAdapter(BidirectionalEngineAdapter):
             cache_read=cached,
             cache_write=0,
             output=int(usage.get("completion_tokens", 0)),
-            raw=usage,                        # 含 cache_hierarchy_breakdown
+            raw=usage,                        # contains cache_hierarchy_breakdown
         )
 
     # ------------------------------------------------------------------
-    # 双向操作
+    # Bidirectional operations
     # ------------------------------------------------------------------
     def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
-        """构造一个 radix lookup 请求；调用方真正发 ``POST /v1/cache/lookup``。"""
+        """Construct a radix lookup request; the caller actually sends ``POST /v1/cache/lookup``."""
         return ProbeResult(hit=False, cached_token_count=0, tier="none")
 
     def evict_span(
@@ -149,16 +152,18 @@ class SGLangAdapter(BidirectionalEngineAdapter):
         path_hash: str,
         replace_suffix: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        """``Fold`` 的真正零重算实现。
+        """``Fold``'s true zero-recomputation implementation.
 
-        bridge 在执行 fold 时，把这个返回值合并进下一次 emit 的 plan.extras：
+        When the bridge performs a fold, it merges this return value into the
+        plan.extras of the next emit:
 
             extras["fork_from_path"] = path_hash
             extras["replace_suffix"] = replace_suffix
 
-        SGLang 收到后，从 ``path_hash`` 这个 radix 节点 fork 一个新分支，
-        把后面那段直接换成 ``replace_suffix``——前缀的 KV 保持不变，只重算
-        摘要这段短得多的尾部。
+        On receiving it, SGLang forks a new branch from the radix node
+        ``path_hash`` and replaces the span after it directly with
+        ``replace_suffix`` — the prefix KV stays unchanged, only the much
+        shorter summary tail is recomputed.
         """
         return {
             "fork_from_path": path_hash,
@@ -166,7 +171,7 @@ class SGLangAdapter(BidirectionalEngineAdapter):
         }
 
     def refresh(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
-        """``prewarm_only`` 模式：不调度生成、只填 radix 路径。"""
+        """``prewarm_only`` mode: do not schedule generation, only fill the radix path."""
         body = dict(self.emit(ir, plan))
         ctrl = dict(body.get(_SGLANG_EXT, {}))
         ctrl["prewarm_only"] = True

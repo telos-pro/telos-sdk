@@ -1,28 +1,30 @@
-"""aiohttp 反向代理 server。
+"""aiohttp reverse-proxy server.
 
-监听 ``POST /v1/messages``：跑 TELOS 管线、转发到 Anthropic（或自定义 upstream），
-支持 SSE 流式响应。其他路径（``/v1/messages/batches``、``/v1/models`` 等）
-按原样透传，不经过 TELOS 改写。
+Listens on ``POST /v1/messages``: runs the TELOS pipeline, forwards to Anthropic (or a
+custom upstream), and supports SSE streaming responses. Other paths
+(``/v1/messages/batches``, ``/v1/models``, etc.) are passed through as-is, without TELOS
+rewriting.
 
-零侵入接入：
+Zero-intrusion integration:
 
 ::
 
-    # 启动代理
+    # start the proxy
     python -m telos.proxy --port 7171
 
-    # 任意 Anthropic-SDK 客户端：
+    # any Anthropic-SDK client:
     export ANTHROPIC_BASE_URL=http://localhost:7171
-    claude  # 或自家 agent
+    claude  # or your own agent
 
-设计：
+Design:
 
-- ``ProxyApp`` 持有共享的 ``aiohttp.ClientSession``，复用 keep-alive 连接。
-- 流式路径（``stream=true``）：边读 upstream content 边 write 到 downstream；
-  同时旁路解析 SSE 事件，从 ``message_start`` / ``message_delta`` 抽 usage。
-- 非流式路径：完整 read → forward；从 JSON 抽 usage。
-- 错误必须按 Anthropic wire schema 回传 (``{"type": "error", "error": {...}}``)，
-  否则 client SDK 会拿到结构化异常。
+- ``ProxyApp`` holds a shared ``aiohttp.ClientSession``, reusing keep-alive connections.
+- Streaming path (``stream=true``): writes to downstream while reading upstream content;
+  at the same time, parses SSE events on a side channel, extracting usage from
+  ``message_start`` / ``message_delta``.
+- Non-streaming path: full read → forward; extracts usage from the JSON.
+- Errors must be returned per the Anthropic wire schema (``{"type": "error", "error": {...}}``),
+  otherwise the client SDK gets a structured exception.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from aiohttp import web
 
 from telos.bridge import BridgeSessionState
 from telos.corpus import record_call
-from telos.output_filter import TelosMode, apply_filter, build_filter
+from telos.output_filter import MODE_LABELS, TelosMode, apply_filter, build_filter
 from telos.proxy.inspector import (
     SessionInspector as _SessionInspector,
     SessionInspectorEntry as _SessionInspectorEntry,
@@ -56,8 +58,8 @@ from telos.scripts.telos_anthropic_transport import _detect_harness_signal
 
 _DEFAULT_UPSTREAM = "https://api.anthropic.com"
 
-# 转发到 upstream 时保留的 header（认证 / 协议版本 / Anthropic 私有 beta）。
-# Host / Content-Length 由 aiohttp 自己算；不要从 client 透传。
+# Headers preserved when forwarding to upstream (auth / protocol version / Anthropic private beta).
+# Host / Content-Length are computed by aiohttp itself; do not pass them through from the client.
 _FORWARD_HEADER_WHITELIST = (
     "x-api-key",
     "authorization",
@@ -69,17 +71,19 @@ _FORWARD_HEADER_WHITELIST = (
 
 _log = logging.getLogger("telos.proxy")
 
-# upstream 建连阶段（TLS 握手 / connect）瞬时失败的有界退避重试。
-# 这些错误都发生在请求体送达 upstream 之前，重试不会重复计费 / 重复处理。
+# Bounded backoff retry for transient failures during the upstream connection phase
+# (TLS handshake / connect). These errors all occur before the request body reaches
+# upstream, so retrying does not double-bill / double-process.
 _MAX_CONNECT_RETRIES = 3
-_CONNECT_BACKOFF_BASE = 0.5   # 秒；指数退避 0.5 / 1.0 / 2.0
+_CONNECT_BACKOFF_BASE = 0.5   # seconds; exponential backoff 0.5 / 1.0 / 2.0
 
 
 def _wire_tool_result_first(req: Mapping[str, Any]) -> bool:
-    """校验请求体里每条 user message 的 tool_result 块都排在非 tool_result 之前。
+    """Verify that the tool_result blocks of every user message in the request body come before non-tool_result blocks.
 
-    Anthropic 要求 user message 的 tool_result 物理居首，违反会被 upstream 判
-    400。proxy 在发送前用它兜底——TELOS 改写若产出非法 wire，退回 passthrough。
+    Anthropic requires the tool_result of a user message to be physically first; a violation
+    is rejected by upstream with a 400. The proxy uses this as a safety net before sending --
+    if TELOS rewriting produces an illegal wire, it falls back to passthrough.
     """
     messages = req.get("messages")
     if not isinstance(messages, list):
@@ -103,14 +107,15 @@ def _wire_tool_result_first(req: Mapping[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 稳定 session-id 派生
+# Stable session-id derivation
 # ---------------------------------------------------------------------------
 
 def _client_identity(headers: Mapping[str, str]) -> str:
-    """从 headers 取一个能区分不同 caller 的稳定串。
+    """Get a stable string from the headers that distinguishes different callers.
 
-    优先 ``x-api-key``；其次 ``authorization``（去掉 ``Bearer`` 前缀）；
-    都没有就返回空串（多个匿名 client 会共享 session-id —— 单机开发够用）。
+    Prefers ``x-api-key``; then ``authorization`` (with the ``Bearer`` prefix stripped);
+    if neither is present, returns an empty string (multiple anonymous clients will share
+    a session-id -- good enough for single-machine development).
     """
     api_key = headers.get("x-api-key")
     if api_key:
@@ -122,21 +127,21 @@ def _client_identity(headers: Mapping[str, str]) -> str:
 
 
 def _derive_session_id(raw: Mapping[str, Any], headers: Mapping[str, str]) -> str:
-    """从「client 身份 + 对话 seed」派生稳定 session-id。
+    """Derive a stable session-id from "client identity + conversation seed".
 
-    一个"对话"在 Anthropic /v1/messages 协议下，跨轮不变的部分是：
-    ``system`` / ``tools`` / ``messages[0]``（即 conversation 第一条 user
-    消息）。每轮请求只在 ``messages[]`` 尾部追加新内容。所以这四项的 hash
-    就唯一标识一段对话。
+    Under the Anthropic /v1/messages protocol, the part of a "conversation" that does not
+    change across turns is: ``system`` / ``tools`` / ``messages[0]`` (i.e. the first user
+    message of the conversation). Each turn only appends new content to the tail of
+    ``messages[]``. So the hash of these four items uniquely identifies a conversation.
 
-    返回形如 ``"telos-<16字节hex>"``，方便 grep。
+    Returns something like ``"telos-<16-hex-bytes>"``, convenient for grep.
     """
     seed = {
         "client": _client_identity(headers),
         "system": raw.get("system") or [],
         "tools": raw.get("tools") or [],
-        # messages[0] 通常是 conversation 的第一条 user message；
-        # 即使 list 为空也用 None placeholder 保证 hash 可计算。
+        # messages[0] is usually the first user message of the conversation;
+        # even if the list is empty, a None placeholder is used to keep the hash computable.
         "msg0": (raw.get("messages") or [None])[0],
     }
     body = json.dumps(seed, sort_keys=True, ensure_ascii=False,
@@ -146,18 +151,19 @@ def _derive_session_id(raw: Mapping[str, Any], headers: Mapping[str, str]) -> st
 
 
 # ---------------------------------------------------------------------------
-# Session 注册表：keyed by session_id，LRU 上限避免长跑时内存爆炸
+# Session registry: keyed by session_id, with an LRU cap to avoid memory blowup on long runs
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MAX_SESSIONS = 10_000
 
 
 class _SessionRegistry:
-    """``dict[session_id, BridgeSessionState]`` 的有界 LRU 包装。
+    """A bounded-LRU wrapper around ``dict[session_id, BridgeSessionState]``.
 
-    在 aiohttp 单事件循环下，所有访问发生在同一线程，无需加锁。同一
-    session 的并发请求会顺序看到累积——足够好。如果未来要支持真并发，
-    每 entry 加一个 ``asyncio.Lock`` 即可。
+    Under aiohttp's single event loop, all accesses happen on the same thread, so no lock
+    is needed. Concurrent requests for the same session see the accumulation sequentially
+    -- good enough. If true concurrency is needed in the future, just add an
+    ``asyncio.Lock`` per entry.
     """
 
     def __init__(self, max_size: int = _DEFAULT_MAX_SESSIONS) -> None:
@@ -180,12 +186,12 @@ class _SessionRegistry:
 
 
 # ---------------------------------------------------------------------------
-# usage 归一化（与 telos_anthropic_transport._normalize_usage 同 schema）
+# usage normalization (same schema as telos_anthropic_transport._normalize_usage)
 # ---------------------------------------------------------------------------
 
 def _normalize_usage(u: dict[str, Any]) -> dict[str, int]:
-    """4 个 bucket 的归一化；保留 ``cache_creation.ephemeral_{5m,1h}_input_tokens``
-    在 raw_usage 里，dashboard 端会读取拆分以正确按 5m / 1h 价计费。"""
+    """Normalization into 4 buckets; keeps ``cache_creation.ephemeral_{5m,1h}_input_tokens``
+    in raw_usage, which the dashboard reads to bill correctly at the 5m / 1h prices."""
     return {
         "raw_input": int(u.get("input_tokens", 0) or 0),
         "cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
@@ -202,18 +208,18 @@ def _anthropic_error(status: int, err_type: str, message: str) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# 原始 message 摘要（developer 页面展示 TELOS 改写前的对话原貌）
+# Raw message summary (the developer page shows the conversation as it was before TELOS rewriting)
 # ---------------------------------------------------------------------------
 
 _RAW_MSG_PREVIEW_CHARS = 240
 
 
 def _summarize_raw_block(blk: Mapping[str, Any]) -> dict[str, Any]:
-    """单个 content block → 摘要 dict（type / chars / preview / extra）。
+    """A single content block → a summary dict (type / chars / preview / extra).
 
-    text → 文本本身；tool_use → input JSON（extra=工具名）；
-    tool_result → content（extra=tool_use_id）；其余 → 整块 JSON。
-    preview 截断到 ``_RAW_MSG_PREVIEW_CHARS``。
+    text → the text itself; tool_use → the input JSON (extra=tool name);
+    tool_result → the content (extra=tool_use_id); everything else → the whole block JSON.
+    The preview is truncated to ``_RAW_MSG_PREVIEW_CHARS``.
     """
     btype = str(blk.get("type", "?"))
     extra = ""
@@ -241,10 +247,11 @@ def _summarize_raw_block(blk: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_raw_messages(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """从原始 ``/v1/messages`` 请求体抽每条 message 的摘要。
+    """Extract a summary of each message from the raw ``/v1/messages`` request body.
 
-    返回 ``[{"role", "blocks": [<block 摘要>...]}, ...]``。content 为 string
-    时归一成单个 text block。出错绝不抛——developer 页面永远要能渲染。
+    Returns ``[{"role", "blocks": [<block summary>...]}, ...]``. When content is a string,
+    it is normalized into a single text block. Never raises on error -- the developer page
+    must always be renderable.
     """
     messages = raw.get("messages")
     if not isinstance(messages, list):
@@ -275,7 +282,7 @@ def _summarize_raw_messages(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# ProxyApp：持有共享 session + 处理 handler
+# ProxyApp: holds the shared session + the request handlers
 # ---------------------------------------------------------------------------
 
 class ProxyApp:
@@ -297,21 +304,23 @@ class ProxyApp:
         self.usage_log = usage_log
         self.harness_override = harness_override
         self.request_timeout = request_timeout
-        # 进程级默认开关；可被单条请求的 X-Telos-Mode header 覆盖（且首个
-        # 请求的取值会被 sticky 到该 session）。
+        # Process-level default switch; can be overridden by a single request's X-Telos-Mode
+        # header (and the first request's value is made sticky to that session).
         self.mode = mode or TelosMode()
-        # 工具结果过滤器：rtk 二进制可用就走 rtk，否则纯 Python fallback。
-        # 构造一次、全 session 复用（无状态）。
+        # Tool-result filter: uses rtk if the rtk binary is available, otherwise a pure
+        # Python fallback. Constructed once, reused across all sessions (stateless).
         self._filter = build_filter()
-        # 会话录制：默认开启，把每次调用的原始请求录进 corpus_dir，供
-        # `telos replay` 重放。仅录请求、不录响应。--no-record 可关。
+        # Session recording: enabled by default, records each call's raw request into
+        # corpus_dir for `telos replay` to replay. Records the request only, not the
+        # response. Can be turned off with --no-record.
         self._record = record
         self._corpus_dir = corpus_dir if record else None
-        # strict=False（默认）：TELOS 失败时原样透传到 upstream，保证
-        # 优化层永远不会破坏正确性（RTK 同款"rewrite 失败 → 原命令"原则）。
-        # strict=True：测试 / 调试用，TELOS 失败直接 500。
+        # strict=False (default): on TELOS failure, pass through to upstream as-is,
+        # guaranteeing the optimization layer never breaks correctness (the same
+        # "rewrite fails → original command" principle as RTK).
+        # strict=True: for testing / debugging, a TELOS failure returns 500 directly.
         self.strict = strict
-        # /__telos/dashboard 的 meta-refresh 间隔（秒）；0 = 关闭 auto-refresh。
+        # The meta-refresh interval (seconds) of /__telos/dashboard; 0 = disable auto-refresh.
         self.dashboard_refresh = dashboard_refresh
 
         if usage_log is not None:
@@ -322,23 +331,26 @@ class ProxyApp:
         self._pipeline_failures = 0
         self._registry = _SessionRegistry(max_size=max_sessions)
         self._inspector = _SessionInspector(max_size=max_sessions)
-        # per-client harness 记忆：key = _client_identity(headers)。一旦某个
-        # client 被任一条请求确信识别（HTTP 头 / 富内容），就记住——后续它发
-        # 的 tool-less 辅助请求（Haiku 标题生成 / 话题检测等）没有任何 harness
-        # 特征，靠这份记忆继承，不会误判成 openclaw。每个 API key 一条，体量极小。
+        # per-client harness memory: key = _client_identity(headers). Once a client is
+        # confidently identified by any request (HTTP headers / rich content), it is
+        # remembered -- subsequent tool-less auxiliary requests it sends (Haiku title
+        # generation / topic detection, etc.) have no harness features at all, and inherit
+        # via this memory rather than being misclassified as openclaw. One entry per API
+        # key, tiny in size.
         self._client_harness: dict[str, str] = {}
 
     # ------------------------------------------------------------------
-    # harness 解析
+    # harness resolution
     # ------------------------------------------------------------------
 
     def _resolve_harness(self, request: web.Request,
                          raw: Mapping[str, Any]) -> str:
-        """决定本次请求按哪个 harness 解析。
+        """Decide which harness to use to parse this request.
 
-        优先级：显式 ``--harness`` 覆盖 > 本次请求的确信信号 > 该 client
-        之前的确信记忆 > 兜底 ``openclaw``。确信信号（HTTP 头 / 富内容）会
-        被 pin 到 ``self._client_harness``，供该 client 后续无信号请求继承。
+        Priority: explicit ``--harness`` override > a confident signal from this request >
+        this client's prior confident memory > fallback ``openclaw``. A confident signal
+        (HTTP headers / rich content) is pinned to ``self._client_harness`` for this
+        client's subsequent signal-less requests to inherit.
         """
         if self.harness_override:
             return canonical_harness(self.harness_override)
@@ -351,7 +363,8 @@ class ProxyApp:
                           client or "(anon)", signal,
                           request.headers.get("user-agent", ""))
             return signal
-        # 本次请求无确信信号——继承该 client 之前确信识别出的 harness。
+        # This request has no confident signal -- inherit the harness this client was
+        # confidently identified as before.
         remembered = self._client_harness.get(client)
         if remembered is not None:
             return remembered
@@ -359,7 +372,7 @@ class ProxyApp:
 
 
     # ------------------------------------------------------------------
-    # 生命周期
+    # Lifecycle
     # ------------------------------------------------------------------
 
     async def _session_get(self) -> aiohttp.ClientSession:
@@ -368,18 +381,21 @@ class ProxyApp:
                 limit=64,
                 ttl_dns_cache=300,
                 keepalive_timeout=30.0,
-                # 缓解 macOS 上 aiohttp SSL transport 不及时释放的抖动。
+                # Mitigates the jitter from aiohttp SSL transports not being released
+                # promptly on macOS.
                 enable_cleanup_closed=True,
             )
             self._session = aiohttp.ClientSession(
                 connector=connector,
-                # sock_connect：卡死的建连快速失败进入重试，不耗尽 total。
+                # sock_connect: a stuck connection fails fast into a retry rather than
+                # exhausting total.
                 timeout=aiohttp.ClientTimeout(
                     total=self.request_timeout, sock_connect=15.0,
                 ),
-                # auto_decompress=True：proxy 需要读懂响应体（解析 usage、
-                # peek SSE），必须拿解压后的明文。响应不转发 Content-Encoding，
-                # 所以不能关——否则客户端会拿到没声明编码的压缩字节。
+                # auto_decompress=True: the proxy needs to understand the response body
+                # (parse usage, peek SSE), so it must get the decompressed plaintext. The
+                # response does not forward Content-Encoding, so this cannot be turned off
+                # -- otherwise the client would get compressed bytes with no declared encoding.
                 auto_decompress=True,
             )
         return self._session
@@ -392,17 +408,19 @@ class ProxyApp:
         headers: dict[str, str],
         call_index: int,
     ) -> aiohttp.ClientResponse:
-        """POST 到 upstream，对「建连阶段」的瞬时失败做有界退避重试。
+        """POST to upstream, with bounded backoff retry for transient failures during the "connection phase".
 
-        只重试两类**响应产生前**的错误：
+        Only retries two classes of errors **that occur before a response is produced**:
 
-        - ``ClientConnectorError``：连接从未建立（TLS 握手 / connect 失败）。
-        - ``ServerDisconnectedError``：upstream 在返回任何响应前断开，多为
-          复用的 keep-alive 死连接。
+        - ``ClientConnectorError``: the connection was never established (TLS handshake /
+          connect failed).
+        - ``ServerDisconnectedError``: upstream disconnected before returning any response,
+          usually a dead reused keep-alive connection.
 
-        这两类失败时请求体一个字节都还没送达 upstream，重试 100% 安全——
-        不会重复计费、不会让 upstream 重复处理。其余 ``ClientError`` / 超时
-        不重试（可能请求已送达），照旧上抛给 ``handle_messages`` 回 502。
+        In both failure classes, not a single byte of the request body has reached
+        upstream yet, so retrying is 100% safe -- no double-billing, no double-processing
+        by upstream. Other ``ClientError`` / timeouts are not retried (the request may have
+        been delivered) and are re-raised to ``handle_messages`` as before to return a 502.
         """
         last_exc: Exception | None = None
         for attempt in range(_MAX_CONNECT_RETRIES + 1):
@@ -440,11 +458,12 @@ class ProxyApp:
     def _resolve_mode(
         self, request: web.Request, session_state: BridgeSessionState,
     ) -> TelosMode:
-        """决定本次请求的 mode。
+        """Decide the mode for this request.
 
-        优先级：``X-Telos-Mode`` header > session 已锁定的 sticky_mode >
-        proxy 进程默认。首个带 header 的请求会把取值 sticky 到该 session，
-        保证对比实验里同一 session 全程不换挡。
+        Priority: ``X-Telos-Mode`` header > the session's locked sticky_mode > the proxy
+        process default. The first request carrying the header makes the value sticky to
+        that session, guaranteeing the same session never changes gears throughout a
+        comparison experiment.
         """
         header = request.headers.get("x-telos-mode")
         if header:
@@ -456,10 +475,23 @@ class ProxyApp:
             return TelosMode.from_label(session_state.sticky_mode)
         return self.mode
 
+    def set_mode(self, mode: TelosMode) -> None:
+        """Hot-swap the process-level default mode.
+
+        Under the single-threaded asyncio event loop, the assignment to ``self.mode`` is
+        atomic, and the next call to ``_resolve_mode`` takes effect immediately -- no
+        gateway restart needed. Old sessions that have already locked sticky_mode are
+        unaffected (this is the intended semantics of sticky).
+        """
+        old = self.mode
+        self.mode = mode
+        _log.info("default mode hot-swap: %s → %s (telos=%s rtk=%s)",
+                  old.label, mode.label, mode.telos, mode.rtk)
+
     def _resolve_compare_group(
         self, request: web.Request, session_state: BridgeSessionState,
     ) -> str | None:
-        """对比实验分组标签（``X-Telos-Compare-Group`` header），sticky。"""
+        """The comparison-experiment group label (``X-Telos-Compare-Group`` header), sticky."""
         header = request.headers.get("x-telos-compare-group")
         if header:
             if session_state.compare_group is None:
@@ -468,7 +500,7 @@ class ProxyApp:
         return session_state.compare_group
 
     # ------------------------------------------------------------------
-    # POST /v1/messages —— 主 handler
+    # POST /v1/messages -- the main handler
     # ------------------------------------------------------------------
 
     async def handle_messages(self, request: web.Request) -> web.StreamResponse:
@@ -478,7 +510,8 @@ class ProxyApp:
         try:
             raw = await request.json()
         except web.HTTPRequestEntityTooLarge as e:  # noqa: BLE001
-            # 请求体超过 client_max_size：与 JSON 语法错误区分开，回 413。
+            # The request body exceeds client_max_size: distinguished from a JSON syntax
+            # error, returns 413.
             _log.warning("request body too large (call=%d): %s", call_index, e)
             return _anthropic_error(413, "request_too_large", str(e))
         except Exception as e:  # noqa: BLE001
@@ -491,33 +524,35 @@ class ProxyApp:
         )
         session_state = self._registry.get_or_create(session_id)
 
-        # ---- 0a. 录会话语料（原始请求，RTK / TELOS 改写之前）----
+        # ---- 0a. Record the session corpus (raw request, before RTK / TELOS rewriting) ----
         if self._corpus_dir is not None:
             try:
                 record_call(self._corpus_dir, session_id, call_index, raw)
-            except Exception:  # noqa: BLE001 — 录制失败绝不影响代理
+            except Exception:  # noqa: BLE001 — a recording failure must never affect the proxy
                 _log.exception("corpus record failed (call=%d)", call_index)
 
-        # ---- 0. 解析本次请求的 mode / compare_group（sticky per session）----
+        # ---- 0. Resolve this request's mode / compare_group (sticky per session) ----
         mode = self._resolve_mode(request, session_state)
         compare_group = self._resolve_compare_group(request, session_state)
 
-        # ---- 0b. RTK 工具结果过滤（仅 mode.rtk）----
+        # ---- 0b. RTK tool-result filtering (only mode.rtk) ----
         effective_raw: Mapping[str, Any] = raw
         filter_reduction: dict[str, Any] = {}
         if mode.rtk:
             try:
                 effective_raw, fstats = apply_filter(raw, self._filter)
                 filter_reduction = fstats.as_dict()
-            except Exception:  # noqa: BLE001 — 过滤层永不破坏请求
+            except Exception:  # noqa: BLE001 — the filter layer never breaks the request
                 _log.exception("RTK filter failed (call=%d) — using raw request",
                                call_index)
                 effective_raw = raw
 
-        # ---- 1. TELOS 管线（仅 mode.telos）----
+        # ---- 1. TELOS pipeline (only mode.telos) ----
         if mode.telos:
-            # harness 在 proxy 层解析：HTTP 头 / per-client 记忆都在这一层，
-            # 内容检测看不到。解析结果显式传给管线，覆盖管线内部的内容检测。
+            # The harness is resolved at the proxy layer: HTTP headers / per-client memory
+            # all live at this layer, and content detection cannot see them. The resolved
+            # result is passed explicitly to the pipeline, overriding the pipeline's
+            # internal content detection.
             resolved_harness = self._resolve_harness(request, raw)
             try:
                 result = process_anthropic_request(
@@ -528,7 +563,8 @@ class ProxyApp:
                 )
             except Exception as e:  # noqa: BLE001
                 self._pipeline_failures += 1
-                # 第一次失败打完整 traceback；后续只打一行短消息减少日志噪音。
+                # Log a full traceback on the first failure; subsequent ones log a single
+                # short line to reduce log noise.
                 if self._pipeline_failures == 1:
                     _log.exception("TELOS pipeline failed (call=%d) — falling back to "
                                    "passthrough. Further failures will log a single line.",
@@ -539,7 +575,8 @@ class ProxyApp:
                 if self.strict:
                     return _anthropic_error(500, "api_error",
                                             f"TELOS pipeline failed: {e}")
-                # 优雅降级：用（过滤后的）raw 当 wire，造空 result 走透传。
+                # Graceful degradation: use the (filtered) raw as the wire, build an empty
+                # result for passthrough.
                 result = PipelineResult(
                     wire=dict(effective_raw),
                     harness="passthrough",
@@ -548,7 +585,7 @@ class ProxyApp:
                     model=raw.get("model", ""),
                 )
         else:
-            # TELOS 关：不打 cache 标记，(过滤后的) raw 直接当 wire。
+            # TELOS off: do not add cache markers, the (filtered) raw is used directly as the wire.
             result = PipelineResult(
                 wire=dict(effective_raw),
                 harness="rtk-only" if mode.rtk else "passthrough",
@@ -557,16 +594,17 @@ class ProxyApp:
                 model=raw.get("model", ""),
             )
 
-        # proxy 层把开关元数据回填进 result，供 _log_usage 落盘。
+        # The proxy layer backfills the switch metadata into result, for _log_usage to persist.
         result.mode = mode.label
         result.compare_group = compare_group
         result.tool_output_reduction = filter_reduction
-        # 原始（TELOS 改写前）请求的 message 摘要，供 developer 页面展示。
+        # The message summary of the raw (pre-TELOS-rewrite) request, for the developer page.
         result.raw_messages = _summarize_raw_messages(raw)
 
-        # 发送前兜底校验：TELOS 改写若产出结构非法的 wire（tool_result 不居首
-        # 等），不能让它打到 upstream 吃 400。退回 passthrough——未改写的
-        # effective_raw 结构合法。与 strict=False「优化层永不破坏正确性」一致。
+        # Safety check before sending: if TELOS rewriting produces a structurally illegal
+        # wire (tool_result not first, etc.), it must not hit upstream and get a 400. Fall
+        # back to passthrough -- the un-rewritten effective_raw is structurally valid.
+        # Consistent with the strict=False "the optimization layer never breaks correctness".
         if not _wire_tool_result_first(result.wire):
             if _wire_tool_result_first(effective_raw):
                 _log.warning(
@@ -605,7 +643,7 @@ class ProxyApp:
         )
 
     # ------------------------------------------------------------------
-    # 非流式路径
+    # Non-streaming path
     # ------------------------------------------------------------------
 
     async def _buffered_response(
@@ -632,8 +670,9 @@ class ProxyApp:
             except Exception:  # noqa: BLE001
                 pass
         elif status >= 400:
-            # 记下 upstream 错误正文——4xx/5xx 的 body 通常直接说明原因
-            # （如 messages.N: tool_result 必须居首），是排查的第一手线索。
+            # Record the upstream error body -- the body of a 4xx/5xx usually states the
+            # cause directly (e.g. messages.N: tool_result must be first), and is the
+            # first-hand clue for troubleshooting.
             _log.warning("upstream %d (call=%d): %s", status, call_index,
                          body[:2000].decode("utf-8", "replace"))
 
@@ -650,7 +689,7 @@ class ProxyApp:
         return web.Response(body=body, status=status, headers={"Content-Type": ct})
 
     # ------------------------------------------------------------------
-    # 流式路径（SSE）
+    # Streaming path (SSE)
     # ------------------------------------------------------------------
 
     async def _stream_response(
@@ -665,7 +704,7 @@ class ProxyApp:
     ) -> web.StreamResponse:
         status = upstream.status
 
-        # 错误响应不会是 SSE：read 完整 body 一次性返回。
+        # An error response will not be SSE: read the full body and return it at once.
         if status != 200:
             try:
                 body = await upstream.read()
@@ -684,7 +723,7 @@ class ProxyApp:
             )
             return web.Response(body=body, status=status, headers={"Content-Type": ct})
 
-        # 200：开始流式转发。
+        # 200: start streaming forwarding.
         downstream = web.StreamResponse(
             status=200,
             headers={
@@ -698,9 +737,10 @@ class ProxyApp:
         try:
             await downstream.prepare(request)
         except (ConnectionResetError, asyncio.CancelledError) as e:
-            # 下游客户端在我们回写响应头前就断开了——常见且无害（用户中断、
-            # 客户端超时）。不是错误：静默释放 upstream 连接后收尾，避免
-            # 异常逃逸打出 noisy traceback、也避免 upstream 连接泄漏。
+            # The downstream client disconnected before we wrote back the response headers
+            # -- common and harmless (user interruption, client timeout). Not an error:
+            # silently release the upstream connection and wrap up, to avoid an escaping
+            # exception printing a noisy traceback and to avoid an upstream connection leak.
             _log.info("downstream disconnected before stream start (call=%d): %s",
                       call_index, e)
             upstream.release()
@@ -711,14 +751,14 @@ class ProxyApp:
 
         try:
             async for chunk in upstream.content.iter_any():
-                # 立即转发，不等 SSE 完整事件
+                # Forward immediately, without waiting for a complete SSE event
                 try:
                     await downstream.write(chunk)
                 except (ConnectionResetError, asyncio.CancelledError):
                     _log.info("downstream disconnected mid-stream (call=%d)", call_index)
                     break
 
-                # 旁路：累积并解析完整 SSE block 取 usage
+                # Side channel: accumulate and parse complete SSE blocks to extract usage
                 sse_buf += chunk
                 while b"\n\n" in sse_buf:
                     block, sse_buf = sse_buf.split(b"\n\n", 1)
@@ -746,14 +786,15 @@ class ProxyApp:
         return downstream
 
     # ------------------------------------------------------------------
-    # SSE 解析（旁路）
+    # SSE parsing (side channel)
     # ------------------------------------------------------------------
 
     def _peek_sse_block(self, block: bytes, usage: dict[str, Any]) -> None:
-        """从 SSE 事件块抽 usage 字段。
+        """Extract usage fields from an SSE event block.
 
-        Anthropic SSE 协议：``message_start`` 携带 input/cache 字段，
-        ``message_delta`` 携带累计 output_tokens。出错就静默吞，绝不影响代理。
+        Anthropic SSE protocol: ``message_start`` carries the input/cache fields,
+        ``message_delta`` carries the cumulative output_tokens. Errors are silently
+        swallowed and never affect the proxy.
         """
         event: str | None = None
         data_raw: bytes | None = None
@@ -779,7 +820,7 @@ class ProxyApp:
             ):
                 if k in u:
                     usage[k] = int(u[k])
-            # 关键：把 5m / 1h 拆分原样带过来，dashboard 端做精确计费用
+            # Key: carry over the 5m / 1h split as-is, for the dashboard to do precise billing
             cc = u.get("cache_creation")
             if isinstance(cc, dict):
                 usage["cache_creation"] = {
@@ -798,12 +839,13 @@ class ProxyApp:
     # ------------------------------------------------------------------
 
     async def handle_dashboard(self, request: web.Request) -> web.Response:
-        """实时读 usage_log → aggregate → 渲染 HTML。
+        """Read the usage_log live → aggregate → render HTML.
 
-        每次请求都重新读全文件 + 重渲染。usage_log 不会大（几十 K/天的
-        量级，每行 jsonl 一两百字节），所以不用搞缓存或 incremental。
+        Each request re-reads the whole file + re-renders. The usage_log will not be large
+        (on the order of tens of KB/day, one or two hundred bytes per jsonl line), so there
+        is no caching or incremental processing.
         """
-        # 延迟 import，避免 proxy 冷启动时强依赖 dashboard 模块。
+        # Lazy import, to avoid a hard dependency on the dashboard module at proxy cold start.
         from telos.scripts.build_savings_dashboard import render_from_usage_log
 
         try:
@@ -820,14 +862,56 @@ class ProxyApp:
         return web.Response(text=body, content_type="text/html")
 
     # ------------------------------------------------------------------
-    # GET /__telos/developer —— 面向开发者的实时 session 结构 / 工具调用统计
+    # GET/POST /__telos/control/mode -- hot-update the default mode (loopback only)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_loopback(request: web.Request) -> bool:
+        """The control endpoint only accepts local-origin requests, preventing a remote from changing gateway behavior."""
+        remote = request.remote or ""
+        return remote in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    async def handle_control_mode(self, request: web.Request) -> web.Response:
+        """GET reads the current default mode; POST {"mode": "<label>"} hot-swaps the default mode."""
+        if not self._is_loopback(request):
+            return web.json_response(
+                {"error": "control endpoint is loopback-only"}, status=403)
+
+        if request.method == "GET":
+            return web.json_response({
+                "mode": self.mode.label,
+                "telos": self.mode.telos,
+                "rtk": self.mode.rtk,
+            })
+
+        try:
+            body = await request.json()
+        except Exception as e:  # noqa: BLE001
+            return web.json_response(
+                {"error": f"invalid JSON: {e}"}, status=400)
+        label = (body or {}).get("mode")
+        if label not in MODE_LABELS:
+            return web.json_response(
+                {"error": f"unknown mode {label!r}; expected one of "
+                          f"{', '.join(MODE_LABELS)}"},
+                status=400)
+        self.set_mode(TelosMode.from_label(label))
+        return web.json_response({
+            "mode": self.mode.label,
+            "telos": self.mode.telos,
+            "rtk": self.mode.rtk,
+        })
+
+    # ------------------------------------------------------------------
+    # GET /__telos/developer -- developer-facing live session structure / tool-call statistics
     # ------------------------------------------------------------------
 
     async def handle_developer(self, request: web.Request) -> web.Response:
-        """实时渲染当前内存里所有 session 的 IR 结构、bp 区域、工具调用。
+        """Render in real time the IR structure, bp regions, and tool calls of all sessions currently in memory.
 
-        如果 query 里带 ``?session=<id>``，仅渲染那一个 session 的详情；
-        否则渲染概览（session 列表）+ 最近一次 call 的 session 详情。
+        If the query carries ``?session=<id>``, render only the details of that one
+        session; otherwise render the overview (session list) + the session details of the
+        most recent call.
         """
         from telos.scripts.build_developer_page import render_developer
 
@@ -848,11 +932,11 @@ class ProxyApp:
         return web.Response(text=body, content_type="text/html")
 
     # ------------------------------------------------------------------
-    # GET /__telos/developer.json —— 同样的数据，机器可读
+    # GET /__telos/developer.json -- the same data, machine-readable
     # ------------------------------------------------------------------
 
     async def handle_developer_json(self, request: web.Request) -> web.Response:
-        """JSON 视图：scripts / 第三方工具读取 session 状态用。"""
+        """JSON view: for scripts / third-party tools to read the session state."""
         sid = request.query.get("session")
         if sid:
             entry = self._inspector.get(sid)
@@ -877,13 +961,13 @@ class ProxyApp:
         })
 
     # ------------------------------------------------------------------
-    # 内部：每收一次响应都把状态推给 inspector
+    # Internal: push state to the inspector on each response received
     # ------------------------------------------------------------------
 
     def _update_inspector(
         self,
         session_id: str,
-        result: "PipelineResult",  # noqa: F821 — 跨模块前向引用
+        result: "PipelineResult",  # noqa: F821 — cross-module forward reference
         usage: Mapping[str, Any],
         call_index: int,
         latency_s: float,
@@ -907,7 +991,7 @@ class ProxyApp:
             _log.exception("inspector record failed (call=%d)", call_index)
 
     # ------------------------------------------------------------------
-    # 透明 passthrough：非 /v1/messages 的所有路径
+    # Transparent passthrough: all paths other than /v1/messages
     # ------------------------------------------------------------------
 
     async def handle_passthrough(self, request: web.Request) -> web.StreamResponse:
@@ -933,17 +1017,17 @@ class ProxyApp:
         return web.Response(body=body_bytes, status=status, headers={"Content-Type": ct})
 
     # ------------------------------------------------------------------
-    # 日志
+    # Logging
     # ------------------------------------------------------------------
 
     def _accumulate_into_state(
         self, session_state: BridgeSessionState, usage: Mapping[str, Any],
     ) -> None:
-        """把 upstream 响应的 cache_creation tokens 累加进 session_state。
+        """Accumulate the cache_creation tokens of the upstream response into session_state.
 
-        这是 TELOS 的 ``bridge.absorb_usage`` 在 proxy 路径下的等价物。
-        没有这一步，R8 触发条件永远凑不齐 ``cumulative_cache_creation``
-        阈值。
+        This is the equivalent of TELOS's ``bridge.absorb_usage`` on the proxy path.
+        Without this step, the R8 trigger condition can never reach the
+        ``cumulative_cache_creation`` threshold.
         """
         cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
         if cache_write:
@@ -993,7 +1077,7 @@ class ProxyApp:
 
 
 # ---------------------------------------------------------------------------
-# 应用构造
+# Application construction
 # ---------------------------------------------------------------------------
 
 def make_app(
@@ -1007,7 +1091,7 @@ def make_app(
     corpus_dir: Path | None = None,
     record: bool = True,
 ) -> web.Application:
-    """构造一个完整的 aiohttp 应用。可被测试 / ASGI 嵌入复用。"""
+    """Construct a complete aiohttp application. Reusable for tests / ASGI embedding."""
     proxy = ProxyApp(
         upstream=upstream,
         usage_log=usage_log,
@@ -1018,14 +1102,17 @@ def make_app(
         corpus_dir=corpus_dir,
         record=record,
     )
-    # client_max_size：aiohttp 默认仅 1 MiB。Claude Code 等 harness 在长对话下
-    # 单次请求体（完整 messages 历史 + system + tools）会远超 1 MiB，触发
-    # HTTPRequestEntityTooLarge → 被 handle_messages 的 except 包成
-    # "400 Invalid JSON: Request Entity Too Large"。放到 1 GiB 实质上不设限。
+    # client_max_size: aiohttp defaults to only 1 MiB. Harnesses like Claude Code, in a
+    # long conversation, produce a single request body (full messages history + system +
+    # tools) that far exceeds 1 MiB, triggering HTTPRequestEntityTooLarge → wrapped by
+    # handle_messages' except into "400 Invalid JSON: Request Entity Too Large". Setting it
+    # to 1 GiB is effectively unlimited.
     app = web.Application(client_max_size=1024 ** 3)
     app.router.add_post("/v1/messages", proxy.handle_messages)
-    # 必须在 catch-all passthrough 之前注册，否则会被吞掉。
+    # Must be registered before the catch-all passthrough, otherwise it gets swallowed.
     app.router.add_get("/__telos/dashboard", proxy.handle_dashboard)
+    app.router.add_route("GET", "/__telos/control/mode", proxy.handle_control_mode)
+    app.router.add_route("POST", "/__telos/control/mode", proxy.handle_control_mode)
     app.router.add_get("/__telos/developer", proxy.handle_developer)
     app.router.add_get("/__telos/developer.json", proxy.handle_developer_json)
     app.router.add_route("*", "/{tail:.*}", proxy.handle_passthrough)
@@ -1047,7 +1134,7 @@ def run(
     corpus_dir: Path | None = None,
     record: bool = True,
 ) -> None:
-    """阻塞式启动（CLI 入口用）。"""
+    """Blocking startup (for the CLI entry point)."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -1063,11 +1150,11 @@ def run(
         corpus_dir=corpus_dir,
         record=record,
     )
-    _log.info("TELOS proxy listening on http://%s:%d → %s", host, port, upstream)
-    _log.info("default mode  → %s (telos=%s rtk=%s); 单请求可用 X-Telos-Mode 覆盖",
+    _log.info("TELOS gateway listening on http://%s:%d → %s", host, port, upstream)
+    _log.info("default mode  → %s (telos=%s rtk=%s); a single request can override with X-Telos-Mode",
               mode.label, mode.telos, mode.rtk)
     if record and corpus_dir is not None:
-        _log.info("session corpus → %s（录原始请求供 telos replay；--no-record 可关）",
+        _log.info("session corpus → %s (records raw requests for telos replay; --no-record to disable)",
                   corpus_dir)
     if usage_log:
         _log.info("usage log    → %s", usage_log)
@@ -1080,5 +1167,5 @@ def run(
               " (live session inspector; JSON at /__telos/developer.json)",
               host, port)
     if strict:
-        _log.info("strict mode ON — TELOS failure 返回 500（不降级到 passthrough）")
+        _log.info("strict mode ON — a TELOS failure returns 500 (no degradation to passthrough)")
     web.run_app(app, host=host, port=port, print=None, access_log=None)

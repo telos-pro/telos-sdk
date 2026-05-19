@@ -1,15 +1,17 @@
-"""Ref-pool：所有大段内容的"指针表"。
+"""Ref-pool: the "pointer table" for all large content blocks.
 
-设计要点
---------
-- 每个 ref-pool 条目 *绑定一个稳定的 slug*，这个 slug 在整个会话期内
-  不能变。emit-time lint 会扫描所有文本 block 内的 ``[ref:<slug>]`` 引用，
-  发现未注册的 slug 直接抛 ``TelosInvariantError``。
-- compact 时 *只换 payload 不换 slug*：``[ref:login.py]`` 字符串原地不动，
-  user/assistant 中所有引用点的字节因此不变 —— 这是 Janus §8 提到的
-  "引用天然折叠"的真正落地方式。
-- slug 命名规则：``[A-Za-z0-9_\-./]+``，禁止时间戳 / 版本号 / hash，
-  规范化时大小写敏感。
+Design points
+-------------
+- Every ref-pool entry *binds to a stable slug*, and that slug must not change
+  for the lifetime of the session. The emit-time lint scans all text blocks for
+  ``[ref:<slug>]`` references and raises ``TelosInvariantError`` immediately if
+  it finds an unregistered slug.
+- On compact, *only the payload changes, not the slug*: the ``[ref:login.py]``
+  string stays in place, so the bytes at every reference point in the
+  user/assistant content are unchanged —— this is the real implementation of the
+  "references fold naturally" idea mentioned in Janus §8.
+- Slug naming rules: ``[A-Za-z0-9_\-./]+``, timestamps / version numbers / hashes
+  are forbidden, and normalization is case-sensitive.
 """
 
 from __future__ import annotations
@@ -27,18 +29,19 @@ REF_RE = re.compile(r"\[ref:([A-Za-z0-9_\-./]+)\]")
 
 @dataclass
 class RefPool:
-    """会话级 ref-pool 状态。
+    """Session-level ref-pool state.
 
-    bridge 把它当作"一个段"来管理：注册时 freeze slug，emit 时按字典序
-    渲染进 system 段尾部（保证字节稳定）。
+    The bridge manages it as "one band": it freezes slugs on registration and,
+    at emit time, renders them in lexicographic order at the tail of the system
+    band (guaranteeing byte stability).
     """
 
     _entries: dict[str, TelosBlock] = field(default_factory=dict)
 
-    # ------ 注册与替换 ------
+    # ------ Registration and replacement ------
 
     def register(self, slug: str, block: TelosBlock) -> None:
-        """首次注册 slug；slug 一经注册不可重命名（违反 I3）。"""
+        """Register a slug for the first time; once registered a slug cannot be renamed (violates I3)."""
         if not SLUG_RE.match(slug):
             raise TelosInvariantError(
                 f"Invalid ref slug {slug!r}; must match {SLUG_RE.pattern}"
@@ -58,15 +61,17 @@ class RefPool:
         self._entries[slug] = block
 
     def register_or_skip(self, slug: str, block: TelosBlock) -> bool:
-        """Idempotent register —— 跨 turn 共享 RefPool 时用。
+        """Idempotent register —— used when sharing a RefPool across turns.
 
-        - slug 未注册 → 走标准 register
-        - slug 已注册 → 跳过（保留现有 entry，可能已被 fold 成占位符）
+        - slug not registered → go through the standard register
+        - slug already registered → skip (keep the existing entry, which may
+          already have been folded into a placeholder)
 
-        关键不变量：harness 每轮都生产完整 payload 的 ref_pool；本方法防止
-        第二轮把第一轮 fold 过的 entry 覆盖回完整内容。
+        Key invariant: the harness produces a ref_pool with full payloads every
+        turn; this method prevents the second turn from overwriting an entry that
+        the first turn folded back to full content.
 
-        返回 True 表示真的注册了，False 表示跳过。
+        Returns True if it actually registered, False if it skipped.
         """
         if slug in self._entries:
             return False
@@ -74,9 +79,10 @@ class RefPool:
         return True
 
     def fold(self, slug: str, *, summary: str | None = None) -> TelosBlock:
-        """把 ref-pool 条目折叠成短占位符；返回新 block。
+        """Fold a ref-pool entry into a short placeholder; return the new block.
 
-        slug 不动，``[ref:slug]`` 引用点字节不变 → 后续 BP 仍可命中。
+        The slug stays unchanged, the bytes at ``[ref:slug]`` reference points are
+        unchanged → later BP can still hit.
         """
         if slug not in self._entries:
             raise TelosInvariantError(f"Cannot fold unregistered slug {slug!r}")
@@ -93,23 +99,23 @@ class RefPool:
         self._entries[slug] = new
         return new
 
-    # ------ 查询与遍历 ------
+    # ------ Query and iteration ------
 
     @property
     def slugs(self) -> frozenset[str]:
         return frozenset(self._entries.keys())
 
     def render_blocks(self) -> tuple[TelosBlock, ...]:
-        """按 slug 字典序渲染条目；保证多次 emit 字节稳定。"""
+        """Render entries in lexicographic slug order; guarantees byte stability across emits."""
         return tuple(self._entries[k] for k in sorted(self._entries.keys()))
 
     def to_mapping(self) -> dict[str, TelosBlock]:
         return dict(self._entries)
 
-    # ------ 引用 lint（§4 / §8.5 L1）------
+    # ------ Reference lint (§4 / §8.5 L1) ------
 
     def lint_text(self, text: str, where: str) -> None:
-        """扫描文本里所有 ``[ref:slug]``，未注册的 slug 直接 fail-fast。"""
+        """Scan all ``[ref:slug]`` in the text; fail-fast on any unregistered slug."""
         for m in REF_RE.finditer(text):
             slug = m.group(1)
             if slug not in self._entries:

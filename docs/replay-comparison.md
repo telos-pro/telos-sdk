@@ -1,139 +1,115 @@
-# Replay 对照 —— 录制 / 重放
+# Replay comparison — record / replay
 
-> 把一个真实会话录下来，按多种开关组合各重放一遍，得到**受控**的成本对照。
+> Record a real session, then replay it once for each of several switch combinations, to get a **controlled** cost comparison.
 
-TELOS 提供两种对照方式。本文讲 replay；另一种「双 session」见文末对比。
-
----
-
-## 1. 为什么要 replay
-
-要回答「开 TELOS / RTK 到底省多少钱」，最直觉的做法是同一个任务跑两遍、
-换不同开关——但两次跑出来的 agent 轨迹会分叉（采样随机性、工具结果不同
-导致后续决策不同），成本差里混进了与优化无关的噪声。样本量 1 时，这个
-delta 基本不可信。
-
-replay 把**轨迹钉死**：录一次真实会话，得到一串「请求序列」；之后每个
-mode 都重放**逐字节相同**的这串请求。唯一的变量就是开关本身——这是受控
-实验，对照数字干净、可复现、可进 CI。
-
-代价也低：一次完整真实会话 + 每个 mode 一串廉价 prefill 调用，比「N 个
-mode 各跑一整个 agent 会话 × K 次取平均」便宜一两个数量级。
+TELOS offers two comparison methods. This document covers replay; for the other one, "dual session", see the comparison at the end.
 
 ---
 
-## 2. 原理
+## 1. Why replay
 
-### 2.1 只录请求，不录响应
+To answer "how much does turning on TELOS / RTK actually save", the most intuitive approach is to run the same task twice with different switches — but the two agent trajectories will diverge (sampling randomness, different tool results leading to different downstream decisions), so the cost delta is mixed with noise unrelated to the optimization. With a sample size of 1, this delta is essentially untrustworthy.
 
-Anthropic `/v1/messages` 是无状态的：第 N 轮的请求体里，`messages[]` 已经
-包含了前 N−1 轮的全部 assistant 回复和 tool_result。所以「请求序列」本身
-就是完整可重放的轨迹，assistant 响应不必单独存（也避免把模型输出落盘）。
+replay **pins the trajectory down**: record one real session to get a "request sequence", then for each mode replay this **byte-identical** sequence of requests. The only variable is the switch itself — this is a controlled experiment, and the comparison numbers are clean, reproducible, and CI-ready.
 
-proxy 默认把每次调用的**原始请求**（client→proxy，RTK 过滤前、TELOS 改写
-前）录进语料库 `~/.telos/corpus/<session>.jsonl`。录的是「规范输入」——
-replay 时每个 mode 各自从同一份规范输入重新推导 wire，对照才公平。
-
-> RTK 的过滤只发生在 proxy→upstream 这一段，不改 agent 的本地对话状态。
-> 所以 agent 下一轮仍会发来未过滤的完整 tool_result——语料库里录到的
-> 永远是未过滤的规范输入。
-
-### 2.2 重放只测 prefill 成本
-
-`telos replay` 对每个 mode：
-
-1. 取语料里每一轮的原始请求；
-2. （可选）注入缓存隔离前缀（见 2.3）；
-3. `mode.rtk` 开 → 跑 RTK 工具结果过滤；
-4. `mode.telos` 开 → 跑 TELOS 管线打 cache_control / ref-pool；
-5. 把 `max_tokens` 强制设成 `1`，去掉 `stream` / `tool_choice` / `thinking`，
-   发到上游；
-6. 只取响应的 `usage`，写一条 usage_log 记录。
-
-强制 `max_tokens=1` 是因为我们只关心 prompt / prefill 侧的
-`cache_read` / `cache_write` 计费——输出生成被刻意阉割，几乎不产生 output
-成本。拿到的是 Anthropic **实报**的缓存数字，不是估算值。
-
-### 2.3 跨 mode 缓存隔离
-
-Anthropic 的前缀缓存按「前缀内容 + 组织」keyed，没有路由 key。如果先重放
-`telos`、再重放 `both`，而两者的可缓存前缀恰好一致，后者会白蹭前者暖好的
-缓存，对照数字就被污染了。
-
-默认对策：给每个 mode 在 `system` 段最前面注入一个唯一前缀块
-`[telos-replay ns=<session>/<mode>]`。各 mode 前缀因此互不相同 → 缓存各自
-独立。这个块只有 ~10 个 token、各 mode 等长，不影响相对对照。
-
-`--no-cache-isolation` 可关闭注入。
+The cost is also low: one complete real session + a string of cheap prefill calls per mode, an order of magnitude or two cheaper than "running a full agent session for each of N modes × K times and averaging".
 
 ---
 
-## 3. 用法
+## 2. How it works
+
+### 2.1 Record only requests, not responses
+
+Anthropic's `/v1/messages` is stateless: in the N-th turn's request body, `messages[]` already contains all assistant replies and tool_results from the previous N−1 turns. So the "request sequence" itself is a complete, replayable trajectory, and the assistant responses don't need to be stored separately (which also avoids writing model output to disk).
+
+By default the proxy records each call's **original request** (client→proxy, before RTK filtering, before TELOS rewriting) into the corpus `~/.telos/corpus/<session>.jsonl`. What's recorded is the "canonical input" — on replay each mode re-derives the wire from the same canonical input, so the comparison is fair.
+
+> RTK filtering happens only on the proxy→upstream leg, and does not change the agent's local conversation state.
+> So the agent's next turn still sends the unfiltered full tool_result — what the corpus records
+> is always the unfiltered canonical input.
+
+### 2.2 Replay measures only prefill cost
+
+For each mode, `telos replay`:
+
+1. takes the original request of each turn from the corpus;
+2. (optionally) injects a cache-isolation prefix (see 2.3);
+3. if `mode.rtk` is on → runs the RTK tool-result filtering;
+4. if `mode.telos` is on → runs the TELOS pipeline to mark cache_control / ref-pool;
+5. forces `max_tokens` to `1`, strips `stream` / `tool_choice` / `thinking`,
+   and sends to upstream;
+6. takes only the response's `usage` and writes one usage_log record.
+
+Forcing `max_tokens=1` is because we only care about the `cache_read` / `cache_write` billing on the prompt / prefill side — output generation is deliberately neutered, producing almost no output cost. What you get is the cache numbers **actually reported** by Anthropic, not an estimate.
+
+### 2.3 Cross-mode cache isolation
+
+Anthropic's prefix cache is keyed by "prefix content + organization", with no routing key. If you replay `telos` first, then `both`, and the two have an identical cacheable prefix, the latter freeloads on the cache the former warmed up, and the comparison numbers get polluted.
+
+The default countermeasure: for each mode, inject a unique prefix block `[telos-replay ns=<session>/<mode>]` at the very front of the `system` segment. The modes' prefixes thus differ from each other → caches are independent. This block is only ~10 tokens, equal-length across modes, and doesn't affect the relative comparison.
+
+`--no-cache-isolation` disables the injection.
+
+---
+
+## 3. Usage
 
 ```bash
-# 1. 跑几个真实会话（proxy 默认就会录进语料库）
-telos proxy --usage-log ~/.telos/usage.jsonl
-#    ... 用 agent 干活 ...
+# 1. run a few real sessions (the proxy records into the corpus by default)
+telos gateway start --usage-log ~/.telos/usage.jsonl
+#    ... do work with the agent ...
 
-# 2. 看语料库里有哪些会话
+# 2. see which sessions are in the corpus
 telos replay --list
 
-# 3. 重放：默认 4 个 mode 全跑
+# 3. replay: by default all 4 modes run
 telos replay --session telos-ab12cd34
-#    或挑 mode：
+#    or pick modes:
 telos replay --session telos-ab12cd34 --modes none,both
 
-# 4. 看对比（dashboard「A/B 对比」面板，卡片标 `replay` 徽章）
+# 4. view the comparison (the dashboard "A/B comparison" panel, cards tagged with the `replay` badge)
 telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html
 ```
 
-重放需要 `ANTHROPIC_API_KEY`（或 `--api-key`）。结果 append 到 `--usage-log`
-（默认 `~/.telos/usage.jsonl`），`compare_group` = 原会话 id，dashboard 据此
-把同会话的各 mode 并排展示。
+Replay requires `ANTHROPIC_API_KEY` (or `--api-key`). Results are appended to `--usage-log`
+(default `~/.telos/usage.jsonl`), with `compare_group` = the original session id, and the dashboard
+uses this to display the modes of the same session side by side.
 
 ---
 
-## 4. 边界 —— replay 测不到什么
+## 4. Boundaries — what replay cannot measure
 
-replay 是受控实验，受控的代价是它**只在轨迹固定时成立**：
+replay is a controlled experiment, and the price of being controlled is that it **only holds when the trajectory is fixed**:
 
-- **测的是「同一段对话在不同编码下的成本」，不是「同一个任务在不同配置
-  下的成本」。** 它捕捉不到二阶效应——比如 RTK 缩短了工具结果后，真实
-  运行里 agent 的下一步可能因为上下文不同而做出不同（更好或更坏）的决策，
-  进而改变后续轮数和总成本。replay 把这条岔路堵死了。
-- **测的是 prefill / 缓存计费，不是端到端任务成本。** `max_tokens=1`
-  意味着 output 成本不计入；真实任务的 output 开销要另算。
-- **缓存隔离前缀是一个刻意引入的人为产物。** 它对相对对照无害（各 mode
-  等长），但绝对 token 数会比真实多出那 ~10 token/轮。
-- **替代不了真实运行。** 要证明「用 TELOS 后 agent 整体更便宜」这种端到端
-  论断，只能跑独立 session。
+- **It measures "the cost of the same conversation under different encodings", not "the cost of the same task under different configurations".** It cannot capture second-order effects — for example, after RTK shortens the tool results, in a real run the agent's next step might, because the context is different, make a different (better or worse) decision, which in turn changes the subsequent turn count and total cost. replay blocks off this branch.
+- **It measures prefill / cache billing, not end-to-end task cost.** `max_tokens=1` means output cost is not counted; the output cost of a real task must be tallied separately.
+- **The cache-isolation prefix is a deliberately introduced artifact.** It is harmless to the relative comparison (equal-length across modes), but the absolute token count is ~10 tokens/turn more than reality.
+- **It cannot replace a real run.** To prove an end-to-end claim like "with TELOS the agent is cheaper overall", you can only run independent sessions.
 
-把 replay 当成「现有 dashboard 那个*计算出来*的『不开 TELOS』反事实」的
-升级版——把它换成*实测出来*的反事实。要测机制（缓存标记 + 过滤是否降低
-计费 token），这正好是对的范围；要测任务结果，用下面的双 session。
+Think of replay as an upgrade to "the *computed* 'TELOS off' counterfactual that the current dashboard shows" — replacing it with a *measured* counterfactual. For measuring the mechanism (whether cache markers + filtering reduce billed tokens), this is exactly the right scope; for measuring task outcomes, use the dual session below.
 
 ---
 
-## 5. 对比：replay vs 双 session
+## 5. Comparison: replay vs dual session
 
-| | 成本 | 控制变量 | 适合论断 |
+| | Cost | Controlled variables | Suitable claims |
 |---|---|---|---|
-| **replay** | 1 次真实会话 + 廉价 prefill | 好（轮次钉死） | 「对给定工作负载，token 账单降 X」 |
-| **双 session** | N×K 个完整 agent 会话 | 差（trajectory 分叉） | 「用了 TELOS，agent 整体更便宜」 |
+| **replay** | 1 real session + cheap prefill | good (turns pinned) | "for a given workload, the token bill drops by X" |
+| **dual session** | N×K complete agent sessions | poor (trajectory diverges) | "with TELOS, the agent is cheaper overall" |
 
-双 session 做法：起两个独立 agent 会话、用户输入相同，各自带不同的
-`X-Telos-Mode` + 相同的 `X-Telos-Compare-Group` header；dashboard 的同一个
-「A/B 对比」面板会把它们并排（卡片标 `live A/B` 徽章）。
+The dual-session approach: start two independent agent sessions with the same user input, each carrying a different
+`X-Telos-Mode` + the same `X-Telos-Compare-Group` header; the same "A/B comparison" panel of the dashboard
+places them side by side (cards tagged with the `live A/B` badge).
 
-日常对照、回归基准用 replay；偶尔做端到端校验用双 session。
+Use replay for everyday comparisons and regression baselines; use dual session for occasional end-to-end validation.
 
 ---
 
-## 6. 隐私
+## 6. Privacy
 
-proxy 默认开启会话录制，录的是**原始请求 body**——里面有你的 prompt、
-代码、文件内容。语料库落在 `~/.telos/corpus/`。
+The proxy enables session recording by default, recording the **original request body** — which contains your prompts,
+code, and file contents. The corpus lands in `~/.telos/corpus/`.
 
-- 不想落盘：`telos proxy --no-record`。
-- 改目录：`telos proxy --corpus-dir <path>`。
-- 语料库会随会话增长，目前不自动清理，自行管理。
+- To avoid writing to disk: `telos proxy --no-record`.
+- To change the directory: `telos proxy --corpus-dir <path>`.
+- The corpus grows with sessions and is currently not auto-cleaned; manage it yourself.

@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
-"""批量跑 SWE-bench Verified（telos + TELOS + OpenRouter）。
+"""Batch-run SWE-bench Verified (telos + TELOS + OpenRouter).
 
-从数据集随机采样 N 个 instance，并发地通过 ``run_swebench_one`` 跑完，
-可选自动跑 evaluator 并聚合 ``result_5_2.md`` 风格的指标。
+Randomly samples N instances from the dataset, runs them to completion
+concurrently through ``run_swebench_one``, optionally runs the evaluator
+automatically, and aggregates ``result_5_2.md``-style metrics.
 
-用法::
+Usage::
 
     export OPENROUTER_API_KEY=sk-or-...
     export PYTHONPATH=/Users/george/Code
 
-    # 随机 5 个，4 路并发，跑完直接评测
+    # 5 random instances, 4-way concurrency, evaluate immediately after finishing
     python -m telos.scripts.run_swebench_batch \\
         -n 5 --seed 42 --workers 4 \\
         --model deepseek/deepseek-v4-flash \\
         --results-dir /tmp/telos-telos-runs \\
         --evaluate
 
-    # 只跑指定的 instance（绕过随机采样）
+    # Run only the specified instances (bypassing random sampling)
     python -m telos.scripts.run_swebench_batch \\
         --instances pallets__flask-5014 django__django-14373 \\
         --workers 2
 
-输出：
+Output:
 
-* 每个 instance 仍然是 ``run_swebench_one`` 的 4 件套
+* Each instance is still the 4-file set from ``run_swebench_one``
   (``.patch / .trajectory.json / .result.json / .usage.jsonl``)
-* 评测完会有 ``.eval.json``
-* 批次根目录新增 ``batch-<timestamp>.json``：完整状态 + 聚合指标
+* After evaluation there is a ``.eval.json``
+* The batch root directory gets a new ``batch-<timestamp>.json``: full state + aggregated metrics
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ DEFAULT_RESULTS = Path("/tmp/telos-telos-runs")
 
 
 # ---------------------------------------------------------------------------
-# 采样
+# Sampling
 # ---------------------------------------------------------------------------
 
 def load_all_instance_ids(dataset_path: Path,
@@ -88,12 +89,12 @@ def pick_instances(args: argparse.Namespace) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 单任务子进程
+# Single-task subprocess
 # ---------------------------------------------------------------------------
 
 def run_one(instance_id: str, args: argparse.Namespace,
             log_dir: Path) -> dict[str, Any]:
-    """在子进程里调用 run_swebench_one；返回该任务的元信息。"""
+    """Invoke run_swebench_one in a subprocess; return that task's metadata."""
     cmd = [
         sys.executable, "-m", "telos.scripts.run_swebench_one",
         "--instance", instance_id,
@@ -112,7 +113,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
         logf.write(f"$ {' '.join(cmd)}\n\n")
         logf.flush()
         env = os.environ.copy()
-        # 让子进程也能 import telos
+        # let the subprocess import telos too
         repo_root = str(Path(__file__).resolve().parents[2])
         env["PYTHONPATH"] = (
             repo_root + os.pathsep + env.get("PYTHONPATH", "")
@@ -131,7 +132,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
             err = f"{type(e).__name__}: {e}"
     duration = int(time.time() - t0)
 
-    # 把 run_swebench_one 自己写的 result.json 读回来（如果有）
+    # Read back the result.json that run_swebench_one wrote itself (if any)
     result_path = Path(args.results_dir) / f"telos-{instance_id}.result.json"
     summary: dict[str, Any] = {}
     if result_path.exists():
@@ -151,7 +152,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
 
 
 # ---------------------------------------------------------------------------
-# 评测 + 聚合
+# Evaluate + aggregate
 # ---------------------------------------------------------------------------
 
 def run_evaluator(args: argparse.Namespace) -> int:

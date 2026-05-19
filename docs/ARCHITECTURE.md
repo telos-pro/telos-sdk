@@ -1,209 +1,208 @@
-# TELOS — 架构设计与代码实现参考
+# TELOS — Architecture Design and Code Implementation Reference
 
-> 本文是 `telos-sdk` 仓库（Python `telos` 包）的权威架构文档，覆盖设计理念、
-> 三层结构、核心数据结构、每个模块的代码实现、两条接入路径、RTK 过滤层、
-> 录制/重放对照，以及全部不变量与扩展点。
+> This is the authoritative architecture document for the `telos-sdk` repository (the Python `telos` package). It covers the design philosophy,
+> the three-layer structure, the core data structures, the code implementation of each module, the two integration paths, the RTK filtering layer,
+> recording/replay comparison, and all invariants and extension points.
 >
-> - 想上手用 → [playbook.md](playbook.md)、[User-guide.md](User-guide.md)
-> - 想看协议规范 → [2026-05-06-telos-protocol.md](2026-05-06-telos-protocol.md)
-> - 想看改动史 → [../CHANGELOG.md](../CHANGELOG.md)
+> - Want to get started → [playbook.md](playbook.md), [User-guide.md](User-guide.md)
+> - Want the protocol spec → [2026-05-06-telos-protocol.md](2026-05-06-telos-protocol.md)
+> - Want the change history → [../CHANGELOG.md](../CHANGELOG.md)
 >
-> 最后更新：2026-05-18
+> Last updated: 2026-05-18
 
 ---
 
-## 目录
+## Table of Contents
 
-1. [设计理念](#1-设计理念)
-2. [仓库地图](#2-仓库地图)
-3. [三层架构总览](#3-三层架构总览)
-4. [核心数据结构 —— TelosIR](#4-核心数据结构--telosir)
-5. [Bridge —— 策略核心](#5-bridge--策略核心)
-6. [Harness 层](#6-harness-层)
-7. [Engine 层](#7-engine-层)
+1. [Design Philosophy](#1-design-philosophy)
+2. [Repository Map](#2-repository-map)
+3. [Three-Layer Architecture Overview](#3-three-layer-architecture-overview)
+4. [Core Data Structure — TelosIR](#4-core-data-structure--telosir)
+5. [Bridge — Policy Core](#5-bridge--policy-core)
+6. [Harness Layer](#6-harness-layer)
+7. [Engine Layer](#7-engine-layer)
 8. [ref-pool](#8-ref-pool)
-9. [接入路径 A / B](#9-接入路径-a--b)
-10. [RTK 输出过滤层](#10-rtk-输出过滤层)
-11. [录制与重放对照](#11-录制与重放对照)
-12. [可观测性](#12-可观测性)
-13. [不变量与设计约束](#13-不变量与设计约束)
-14. [端到端数据流](#14-端到端数据流)
-15. [扩展点](#15-扩展点)
+9. [Integration Paths A / B](#9-integration-paths-a--b)
+10. [RTK Output Filtering Layer](#10-rtk-output-filtering-layer)
+11. [Recording and Replay Comparison](#11-recording-and-replay-comparison)
+12. [Observability](#12-observability)
+13. [Invariants and Design Constraints](#13-invariants-and-design-constraints)
+14. [End-to-End Data Flow](#14-end-to-end-data-flow)
+15. [Extension Points](#15-extension-points)
 
 ---
 
-## 1. 设计理念
+## 1. Design Philosophy
 
-### 1.1 要解决的问题
+### 1.1 The Problem to Solve
 
-LLM 推理的 KV cache 能把「重复出现的前缀」的计算结果留住，命中时
-input token 价格打到 ~10%（Anthropic）。但 agent 的多轮对话默认**不**
-cache 友好：每轮请求里 system prompt、工具定义、历史对话拼接顺序稍有
-抖动（JSON key 乱序、工具数组顺序变化、时间戳混进前缀），前缀 hash
-就变，cache 全部失效。
+The KV cache of LLM inference can retain the computed results of "recurring prefixes"; on a hit,
+the input token price drops to ~10% (Anthropic). But an agent's multi-turn conversations are by default **not**
+cache-friendly: in each round's request, the slightest jitter in the concatenation order of the system prompt, tool definitions, and conversation history (JSON keys out of order, tool array order changing, timestamps mixed into the prefix)
+changes the prefix hash, and the entire cache is invalidated.
 
-TELOS 的全部价值是一句话：**把真正稳定的部分稳住，让它一直命中 KV
-cache。** 其余复杂度全部砍掉。
+The whole value of TELOS is one sentence: **stabilize the parts that are genuinely stable, so they keep hitting the KV
+cache.** All other complexity is cut away.
 
-### 1.2 "石碑" 比喻
+### 1.2 The "Stone Tablet" Metaphor
 
 TELOS = **S**table prefix · **T**iered bands · **E**phemeral tail ·
-**L**ayered adapters · **A**nchored marks。
+**L**ayered adapters · **A**nchored marks.
 
-石碑底座的铭文（durable prefix）刻一次用一辈子；上方按时间累加的题字
-（每轮新内容）随时可擦改，但不会动到底座。KV cache 的全部价值就是把
-底座留住。
+The inscription on the base of a stone tablet (the durable prefix) is carved once and used for a lifetime; the inscriptions added on top over time
+(new content each round) can be erased and rewritten at any time, but never touch the base. The entire value of the KV cache is to
+keep the base preserved.
 
-### 1.3 三个核心设计决策
+### 1.3 Three Core Design Decisions
 
-1. **三色带（Band）一刀切**。每个内容块必落 `PIN` / `FOLD` / `DROP`
-   之一，没有"既可缓存又不可缓存"的灰色态。
-2. **顺序不变量是唯一硬约束**。每个段内 blocks 必须物理排成
-   `pin* → fold* → drop*`（协议 §5）。违反即抛 `TelosInvariantError`。
-   其余都是软建议。
-3. **三层只往下传值，不反向引用**。harness 不认识 engine，engine 不认识
-   harness，中间的 IR 是唯一契约。跨请求状态只允许存在于 Bridge 持有的
-   `BridgeSessionState`。
+1. **The three-color band (Band) is a clean cut.** Every content block must land in one of `PIN` / `FOLD` / `DROP`;
+   there is no gray "both cacheable and non-cacheable" state.
+2. **The ordering invariant is the only hard constraint.** Within each segment, blocks must be physically arranged as
+   `pin* → fold* → drop*` (protocol §5). A violation immediately raises `TelosInvariantError`.
+   Everything else is a soft recommendation.
+3. **The three layers only pass values downward, never reference backward.** The harness does not know the engine, the engine does not know
+   the harness; the IR in the middle is the only contract. Cross-request state is only allowed to exist in the
+   `BridgeSessionState` held by the Bridge.
 
-### 1.4 正交的第二条优化线 —— RTK
+### 1.4 The Orthogonal Second Optimization Line — RTK
 
-TELOS 稳的是**请求前缀**（system / tools / 对话前缀）。但每轮 agent 还会
-往对话尾部追加大段工具输出（bash / pytest / docker 日志）。TELOS 吸收了
-[rtk-ai/rtk](https://github.com/rtk-ai/rtk) 的思路，加了一层正交的
-**RTK 输出过滤**：在请求进 TELOS 管线前，把 `tool_result` 里的大段重复
-输出压缩掉。两条线由 `TelosMode` 四态开关独立控制（见 §10）。
+What TELOS stabilizes is the **request prefix** (system / tools / conversation prefix). But each round, the agent also
+appends large chunks of tool output (bash / pytest / docker logs) to the tail of the conversation. TELOS absorbed
+the ideas of [rtk-ai/rtk](https://github.com/rtk-ai/rtk) and added an orthogonal
+**RTK output filtering** layer: before a request enters the TELOS pipeline, it compresses away the large repetitive
+output in `tool_result`. The two lines are independently controlled by the `TelosMode` four-state switch (see §10).
 
 ---
 
-## 2. 仓库地图
+## 2. Repository Map
 
 ```
-telos-sdk/                         (Python 包名 = telos，pyproject 把根目录映射成 telos)
+telos-sdk/                         (Python package name = telos; pyproject maps the root directory to telos)
 │
-├── ir.py                  核心数据结构：Band / TelosBlock / TelosMessage / TelosIR / UsageReport
-├── bridge.py              策略核心：5 原语 + canonicalize + BridgeSessionState
-├── refpool.py             ref-pool：大内容的"指针表"，slug 冻结
-├── registry.py            按名加载 harness / engine 的工厂
-├── cli.py                 `telos` 统一 CLI：proxy / init / dashboard / replay
-├── corpus.py              会话语料库：录原始请求供 replay
+├── ir.py                  Core data structures: Band / TelosBlock / TelosMessage / TelosIR / UsageReport
+├── bridge.py              Policy core: 5 primitives + canonicalize + BridgeSessionState
+├── refpool.py             ref-pool: the "pointer table" for large content, slug freezing
+├── registry.py            Factory that loads harness / engine by name
+├── cli.py                 `telos` unified CLI: proxy / init / dashboard / replay
+├── corpus.py              Session corpus: records raw requests for replay
 │
-├── harness/               第 1 层：上游 agent 请求 → TelosIR
+├── harness/               Layer 1: upstream agent request → TelosIR
 │   ├── base.py            HarnessPlugin ABC
-│   ├── _user_split.py     user 文本 envelope 切分（PIN/FOLD/DROP）
-│   ├── openclaw.py        OpenClaw（Anthropic /v1/messages 形状）
-│   ├── hermes.py          Hermes / Claude Code（Anthropic 形状 + 不同 envelope）
-│   └── telos.py           Telos（OpenAI ChatCompletions 形状）
+│   ├── _user_split.py     user text envelope splitting (PIN/FOLD/DROP)
+│   ├── openclaw.py        OpenClaw (Anthropic /v1/messages shape)
+│   ├── hermes.py          Hermes / Claude Code (Anthropic shape + different envelope)
+│   └── telos.py           Telos (OpenAI ChatCompletions shape)
 │
-├── engine/                第 3 层：TelosIR → 各引擎 wire 请求
+├── engine/                Layer 3: TelosIR → each engine's wire request
 │   ├── base.py            EngineAdapter / BidirectionalEngineAdapter / EngineCapabilities
-│   ├── anthropic.py       AnthropicAdapter（唯一支持显式 BP）
-│   ├── openai.py          OpenAIAdapter（layout + routing key）
-│   ├── deepseek.py        DeepSeekAdapter（零控制面）
-│   ├── vllm.py            VLLMAdapter（双向）
-│   └── sglang.py          SGLangAdapter（双向，vLLM 超集）
+│   ├── anthropic.py       AnthropicAdapter (the only one with explicit BP support)
+│   ├── openai.py          OpenAIAdapter (layout + routing key)
+│   ├── deepseek.py        DeepSeekAdapter (zero control plane)
+│   ├── vllm.py            VLLMAdapter (bidirectional)
+│   └── sglang.py          SGLangAdapter (bidirectional, superset of vLLM)
 │
-├── output_filter/         RTK 风格工具结果过滤层（与 TELOS 正交）
-│   ├── mode.py            TelosMode 四态开关
+├── output_filter/         RTK-style tool result filtering layer (orthogonal to TELOS)
+│   ├── mode.py            TelosMode four-state switch
 │   ├── filters.py         ToolResultFilter / RtkFilter / FallbackFilter / CompositeFilter
-│   └── preprocess.py      apply_filter：改写 raw 请求里的 tool_result
+│   └── preprocess.py      apply_filter: rewrites tool_result in the raw request
 │
-├── proxy/                 接入路径 B：HTTP 反向代理
-│   ├── server.py          aiohttp 反向代理（SSE-aware）
-│   ├── pipeline.py        process_anthropic_request：parse→bridge→emit 纯函数
-│   ├── inspector.py       SessionInspector：内存里的诊断快照存储
-│   └── __main__.py        `python -m telos.proxy` 入口
+├── proxy/                 Integration path B: HTTP reverse proxy
+│   ├── server.py          aiohttp reverse proxy (SSE-aware)
+│   ├── pipeline.py        process_anthropic_request: parse→bridge→emit pure function
+│   ├── inspector.py       SessionInspector: in-memory diagnostic snapshot store
+│   └── __main__.py        `python -m telos.proxy` entry point
 │
-├── replay/                录制 → 重放对照引擎
-│   ├── __init__.py        replay_session 引擎
+├── replay/                Recording → replay comparison engine
+│   ├── __init__.py        replay_session engine
 │   └── __main__.py        `telos replay` CLI
 │
-├── init/                  接入路径 B 的安装器
+├── init/                  Integration path B installers
 │   ├── base.py            AgentInstaller ABC + InstallResult
 │   ├── claude_code.py     patch ~/.claude/settings.json
-│   ├── generic.py         打印 export 指令
-│   └── __main__.py        `python -m telos.init` 入口
+│   ├── generic.py         prints export instructions
+│   └── __main__.py        `python -m telos.init` entry point
 │
 ├── scripts/
-│   ├── telos_anthropic_transport.py   接入路径 A（Anthropic 形状）+ _detect_harness
-│   ├── telos_transport.py             接入路径 A（OpenAI 形状）
-│   ├── build_savings_dashboard.py     省钱看板（含 mode / A/B 对比面板）
-│   ├── build_developer_page.py        开发者 inspector 页面
-│   └── show_prompt_trace.py           prompt_trace.jsonl 的终端美化打印
+│   ├── telos_anthropic_transport.py   Integration path A (Anthropic shape) + _detect_harness
+│   ├── telos_transport.py             Integration path A (OpenAI shape)
+│   ├── build_savings_dashboard.py     Savings dashboard (with mode / A/B comparison panels)
+│   ├── build_developer_page.py        Developer inspector page
+│   └── show_prompt_trace.py           Terminal pretty-printer for prompt_trace.jsonl
 │
-├── tests/                 测试套件（77 个测试函数）
-└── docs/                  设计与使用文档
+├── tests/                 Test suite (77 test functions)
+└── docs/                  Design and usage documentation
 ```
 
 ---
 
-## 3. 三层架构总览
+## 3. Three-Layer Architecture Overview
 
 ```
-上游 agent（Claude Code / OpenClaw / Hermes / 自研）
-    │  原始请求（Anthropic /v1/messages 或 OpenAI ChatCompletions）
+Upstream agent (Claude Code / OpenClaw / Hermes / in-house)
+    │  Raw request (Anthropic /v1/messages or OpenAI ChatCompletions)
     ▼
 ┌─────────────────────────────────────────────────────────┐
-│ 第 1 层 · HARNESS（无状态纯函数）                          │
+│ Layer 1 · HARNESS (stateless pure function)               │
 │   harness.parse(raw) → TelosIR                           │
-│   职责：envelope 切分、大文档进 ref-pool、内容分带          │
+│   Responsibilities: envelope splitting, large docs into ref-pool, content banding │
 └──────────────────────────┬────────────────────────────────┘
                            ▼  TelosIR
 ┌─────────────────────────────────────────────────────────┐
-│ 第 2 层 · BRIDGE（有状态，每 session 一个）                │
-│   5 原语：place / pin / mark / fold / refresh             │
-│   canonicalize（key 排序、工具排序）+ §5 不变量校验        │
-│   持有 BridgeSessionState（ref-pool、R8 计数）             │
+│ Layer 2 · BRIDGE (stateful, one per session)              │
+│   5 primitives: place / pin / mark / fold / refresh       │
+│   canonicalize (key sorting, tool sorting) + §5 invariant check │
+│   holds BridgeSessionState (ref-pool, R8 counter)         │
 └──────────────────────────┬────────────────────────────────┘
-                           ▼  TelosIR（改写后）+ EmitPlan
+                           ▼  TelosIR (rewritten) + EmitPlan
 ┌─────────────────────────────────────────────────────────┐
-│ 第 3 层 · ENGINE（无状态，capability-aware）               │
+│ Layer 3 · ENGINE (stateless, capability-aware)            │
 │   plan_marks(ir) → EmitPlan                              │
-│   emit(ir, plan) → wire 请求                              │
+│   emit(ir, plan) → wire request                          │
 │   parse_usage(response) → UsageReport                    │
 └──────────────────────────┬────────────────────────────────┘
-                           ▼  引擎原生 wire 请求
-真实 LLM 服务（Anthropic / OpenAI / DeepSeek / vLLM / SGLang）
+                           ▼  Engine-native wire request
+Real LLM service (Anthropic / OpenAI / DeepSeek / vLLM / SGLang)
 ```
 
-**核心不变量**：跨请求状态只能存在于第 2 层。harness 和 engine 都是纯
-函数 / 无状态对象，相同输入永远输出相同结果。
+**Core invariant**: Cross-request state can only exist in Layer 2. Both the harness and the engine are pure
+functions / stateless objects; the same input always produces the same result.
 
-`registry.py` 提供 `load_harness(name)` / `load_engine(name)`，让 bridge
-不直接 import 任何具体实现 —— 这是"三层只往下传值"在代码层的落地。
+`registry.py` provides `load_harness(name)` / `load_engine(name)`, so the bridge
+does not directly import any concrete implementation — this is how "the three layers only pass values downward" is realized at the code level.
 
 ---
 
-## 4. 核心数据结构 —— TelosIR
+## 4. Core Data Structure — TelosIR
 
-定义在 [ir.py](../ir.py)。所有 dataclass 都 **frozen（不可变）**：bridge 的
-"修改"返回新 IR，不在原对象上改字节，避免共享状态写竞争。
+Defined in [ir.py](../ir.py). All dataclasses are **frozen (immutable)**: the bridge's
+"modifications" return a new IR rather than mutating bytes on the original object, avoiding write races on shared state.
 
-### 4.1 Band —— 三色带
+### 4.1 Band — The Three-Color Band
 
 ```python
 class Band(str, Enum):
-    PIN  = "pin"    # 长寿稳定段：tools 定义、system prompt、用户当下提问
-    FOLD = "fold"   # 可缓存但 compact 时可丢：assistant 回答、tool_result、ref-pool 大文档
-    DROP = "drop"   # 永不进 cache hash：timestamp、cwd、git status、envelope；必须在段末
+    PIN  = "pin"    # Long-lived stable segment: tool definitions, system prompt, the user's current question
+    FOLD = "fold"   # Cacheable but droppable on compact: assistant replies, tool_result, ref-pool large docs
+    DROP = "drop"   # Never enters the cache hash: timestamp, cwd, git status, envelope; must be at the segment end
 ```
 
-排序权重 `_BAND_RANK = {PIN: 0, FOLD: 1, DROP: 2}`。
+The sorting weights are `_BAND_RANK = {PIN: 0, FOLD: 1, DROP: 2}`.
 
-### 4.2 TelosBlock —— 最小内容单元
+### 4.2 TelosBlock — The Smallest Content Unit
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `id` | `str` | 会话内稳定标识（诊断 / 引用用） |
-| `band` | `Band` | 三色带归属 |
+| `id` | `str` | Stable identifier within the session (for diagnostics / referencing) |
+| `band` | `Band` | Three-color band membership |
 | `kind` | `BlockKind` | `text` / `tool_def` / `tool_use` / `tool_result` / `image` / `thinking` |
-| `payload` | `Any` | engine-agnostic 内容；emit 时由 adapter 翻译 |
-| `ref_slug` | `str \| None` | 非空表示此 block 来自 ref-pool |
-| `source_tag` | `str \| None` | 诊断字段：哪条 harness 规则分的带 |
-| `extra` | `Mapping` | engine 需要的稳定旁信息（如 image 的 `detail`、工具的 `source`/`mcp_server`） |
+| `payload` | `Any` | Engine-agnostic content; translated by the adapter at emit time |
+| `ref_slug` | `str \| None` | Non-null means this block comes from the ref-pool |
+| `source_tag` | `str \| None` | Diagnostic field: which harness rule banded it |
+| `extra` | `Mapping` | Stable side information needed by the engine (e.g. the image's `detail`, a tool's `source`/`mcp_server`) |
 
-> **关键约束**：必须进 cache hash 的字段都要写进 `extra`、由 adapter 在
-> emit 时一并序列化。harness 决不能在 emit 时刻才注入字段，否则字节稳定
-> 性被破坏。
+> **Key constraint**: Any field that must enter the cache hash must be written into `extra` and serialized by the adapter
+> together at emit time. The harness must never inject a field at emit time, otherwise byte stability
+> is broken.
 
 ### 4.3 TelosMessage / TelosIR / TelosHints
 
@@ -211,13 +210,13 @@ class Band(str, Enum):
 @dataclass(frozen=True)
 class TelosMessage:
     role: Literal["system", "user", "assistant"]
-    blocks: tuple[TelosBlock, ...]      # 必须满足 §5：pin* → fold* → drop*
+    blocks: tuple[TelosBlock, ...]      # Must satisfy §5: pin* → fold* → drop*
 
 @dataclass(frozen=True)
 class TelosIR:
     session_id: str
-    tools:    tuple[TelosBlock, ...]    # 全部 band=PIN
-    system:   tuple[TelosBlock, ...]    # pin* → fold*(含 ref-pool) → drop*
+    tools:    tuple[TelosBlock, ...]    # All band=PIN
+    system:   tuple[TelosBlock, ...]    # pin* → fold*(incl. ref-pool) → drop*
     messages: tuple[TelosMessage, ...]
     ref_pool: Mapping[str, TelosBlock]  # slug → block
     hints:    TelosHints
@@ -226,510 +225,510 @@ class TelosIR:
 class TelosHints:
     engine: Literal["anthropic", "openai", "deepseek"] = "anthropic"
     model:  str = ""
-    expected_turns: int = 0             # 影响 mid-rolling 锚的开关
+    expected_turns: int = 0             # Affects whether the mid-rolling anchor is enabled
 ```
 
-### 4.4 UsageReport —— 归一化用量
+### 4.4 UsageReport — Normalized Usage
 
-所有引擎的原始 `usage` 字段都归一到这四个数，否则成本指标算不出来：
+The raw `usage` fields of all engines are normalized to these four numbers, otherwise cost metrics cannot be computed:
 
 ```python
 @dataclass(frozen=True)
 class UsageReport:
-    raw_input:   int   # 未命中且未写缓存的 input token
-    cache_read:  int   # 从缓存读入
-    cache_write: int   # 本次请求写入缓存的新增 token
+    raw_input:   int   # Input tokens that were neither hit nor written to cache
+    cache_read:  int   # Read from cache
+    cache_write: int   # New tokens written to cache by this request
     output:      int
-    raw: Mapping       # 原始 usage 字段，留作诊断
+    raw: Mapping       # Raw usage fields, kept for diagnostics
 ```
 
-### 4.5 §5 校验函数
+### 4.5 §5 Validation Functions
 
-- `enforce_band_order(blocks)` —— 稳定排序成 `pin* → fold* → drop*`
-  （同带内保留插入序）。harness 拼 message 时兜底调用。
-- `assert_band_order(blocks, where)` —— O(n) 单次扫描，发现 rank 回退
-  即抛 `TelosInvariantError`。
-- `assert_ir_invariants(ir)` —— 对整份 IR 跑完整校验；额外要求 `tools`
-  全部 `band=PIN`。
+- `enforce_band_order(blocks)` — stably sorts into `pin* → fold* → drop*`
+  (preserves insertion order within the same band). Called as a fallback when the harness assembles a message.
+- `assert_band_order(blocks, where)` — O(n) single-pass scan; raises `TelosInvariantError`
+  as soon as a rank regression is found.
+- `assert_ir_invariants(ir)` — runs full validation over the entire IR; additionally requires that `tools`
+  are all `band=PIN`.
 
 ---
 
-## 5. Bridge —— 策略核心
+## 5. Bridge — Policy Core
 
-定义在 [bridge.py](../bridge.py)。每个 session 一个实例，**有状态**。
+Defined in [bridge.py](../bridge.py). One instance per session, **stateful**.
 
-### 5.1 五个原语
+### 5.1 The Five Primitives
 
-| 原语 | 方法 | 作用 | 协议节 |
+| Primitive | Method | Effect | Protocol Section |
 |---|---|---|---|
-| **Place** | `place(segment, blocks)` / `append_message(msg)` | 替换某段全部 blocks / 追加一条 message，立即跑 §5 校验 | §6.1 |
-| **Pin** | `pin(slug, payload)` | 注册一个 ref-pool 条目，slug 立即冻结 | §6.2 |
-| **Mark** | `mark()` | 委托 engine adapter 决定本次 emit 的 cache 锚位（返回 `EmitPlan`） | §6.3 |
-| **Fold** | `fold(slugs=, message_range=, summary=)` | 折叠 ref-pool 条目（只换 payload 不换 slug），或把一段历史 message 折成摘要 | §6.4 |
-| **Refresh** | `refresh(plan)` | 触发 engine keep-alive；自适应门控（见 §5.4） | §6.5 |
+| **Place** | `place(segment, blocks)` / `append_message(msg)` | Replace all blocks of a segment / append a message, immediately running the §5 check | §6.1 |
+| **Pin** | `pin(slug, payload)` | Register a ref-pool entry; the slug is frozen immediately | §6.2 |
+| **Mark** | `mark()` | Delegate to the engine adapter to decide the cache anchor positions for this emit (returns an `EmitPlan`) | §6.3 |
+| **Fold** | `fold(slugs=, message_range=, summary=)` | Fold a ref-pool entry (swap payload only, not slug), or fold a stretch of history messages into a summary | §6.4 |
+| **Refresh** | `refresh(plan)` | Trigger engine keep-alive; adaptive gating (see §5.4) | §6.5 |
 
-> 注意：`pin()` 注册的是 `band=FOLD` 的可折叠条目。原语名 "Pin" 指
-> "把这段大内容固定在 ref-pool 里、给它稳定指针"，**不是** `band=PIN`。
+> Note: `pin()` registers a foldable entry with `band=FOLD`. The primitive name "Pin" refers to
+> "fixing this large content in the ref-pool and giving it a stable pointer", **not** `band=PIN`.
 
-### 5.2 emit 流程
+### 5.2 The emit Flow
 
 ```python
 def emit_with_plan(self) -> tuple[wire, EmitPlan]:
-    canon = _canonicalize_ir(self._ir)        # ① 规范化
-    assert_ir_invariants(canon)               # ② §5 完整校验（最后一道防线）
-    refpool.lint_blocks(...)                  # ③ 扫描 [ref:slug] 引用，未注册即 fail-fast
-    plan = engine.plan_marks(canon)           # ④ engine 决定锚位
-    wire = engine.emit(canon, plan)           # ⑤ engine 出 wire
+    canon = _canonicalize_ir(self._ir)        # ① Canonicalize
+    assert_ir_invariants(canon)               # ② Full §5 check (last line of defense)
+    refpool.lint_blocks(...)                  # ③ Scan [ref:slug] references, fail-fast on unregistered ones
+    plan = engine.plan_marks(canon)           # ④ Engine decides the anchor positions
+    wire = engine.emit(canon, plan)           # ⑤ Engine produces the wire
     stats.real_requests_since_refresh += 1
     return wire, plan
 ```
 
-`emit()` 是 `emit_with_plan()` 的一元返回版。**调用方必须走 `emit*`，不能
-直接 `engine.emit(ir, plan)`** —— 否则跳过 `_canonicalize_ir`。
+`emit()` is the single-return version of `emit_with_plan()`. **Callers must go through `emit*`, not
+call `engine.emit(ir, plan)` directly** — otherwise `_canonicalize_ir` is skipped.
 
-### 5.3 Canonicalization（修复 R5）
+### 5.3 Canonicalization (fixes R5)
 
-跨 engine 通用，必须在 emit 前统一做掉。问题根源：Swift / Go 的 JSON
-序列化会随机化 key 顺序，导致前缀 hash 漂移、cache 失效。
+Common across engines, must be done uniformly before emit. Root cause: the JSON
+serialization of Swift / Go randomizes key order, causing prefix hash drift and cache invalidation.
 
-- `_canonicalize_payload` —— dict key 字典序排序（递归）。
-- `_canonicalize_schema` —— JSON-Schema 子树专用：除 key 排序外，还把
-  **集合语义数组**排序。当前只有 `required`（`_SCHEMA_SET_ARRAY_KEYS`）。
-  故意**不**排序 `enum` / `examples` / `anyOf` / `oneOf` / `allOf`（顺序有语义）。
-- `_canonicalize_tool_def` —— 识别 Anthropic（`input_schema`）/ OpenAI
-  （`function.parameters`）两种工具形状，schema 子树走 schema 规范化。
-- `_tool_sort_key` —— 工具数组稳定排序键 `(source_rank, mcp_server, name)`。
-  `source_rank`：builtin(0) → mcp(1) → user(2) → 未标记(3)。保证多 MCP
-  server 启动竞态不会在两个 server 之间交替插入而破坏前缀。
+- `_canonicalize_payload` — sorts dict keys lexicographically (recursive).
+- `_canonicalize_schema` — dedicated to JSON-Schema subtrees: besides key sorting, it also sorts
+  **set-semantics arrays**. Currently only `required` (`_SCHEMA_SET_ARRAY_KEYS`).
+  Deliberately **does not** sort `enum` / `examples` / `anyOf` / `oneOf` / `allOf` (order is semantic).
+- `_canonicalize_tool_def` — recognizes the two tool shapes, Anthropic (`input_schema`) and OpenAI
+  (`function.parameters`); the schema subtree goes through schema canonicalization.
+- `_tool_sort_key` — the stable sort key for the tool array, `(source_rank, mcp_server, name)`.
+  `source_rank`: builtin(0) → mcp(1) → user(2) → unmarked(3). Guarantees that a multi-MCP
+  server startup race does not interleave insertions between two servers and break the prefix.
 
-> `tool_use` / `tool_result` 的 payload 是**用户数据**，只做 key 排序，
-> 绝不动数组顺序（payload 里碰巧叫 `required` 的字段不能被静默重排）。
+> The payload of `tool_use` / `tool_result` is **user data**; only key sorting is done,
+> array order is never touched (a field that happens to be named `required` in a payload must not be silently reordered).
 
-### 5.4 BridgeSessionState —— 跨 turn 状态
+### 5.4 BridgeSessionState — Cross-Turn State
 
 ```python
 @dataclass
 class BridgeSessionState:
-    refpool: RefPool                    # slug 注册表，冻结后跨轮保持
+    refpool: RefPool                    # slug registry, persists across turns once frozen
     stats: _SessionStats                # cumulative_cache_creation + real_requests_since_refresh
-    sticky_harness: str | None = None   # 首轮识别出的 harness，锁定后复用
-    sticky_mode: str | None = None      # 首轮的 mode（none/telos/rtk/both），锁定
-    compare_group: str | None = None    # 对比实验分组标签
+    sticky_harness: str | None = None   # The harness identified in the first turn, locked and reused
+    sticky_mode: str | None = None      # The mode of the first turn (none/telos/rtk/both), locked
+    compare_group: str | None = None    # Comparison-experiment grouping label
 ```
 
-上游（proxy / SDK transport）按 session_id 持有一份，每轮构造新 `Bridge`
-时传进来。不传则 Bridge 自己 new 一个，退化为"每轮独立"。
+The upstream (proxy / SDK transport) holds one copy per session_id and passes it in when constructing a new `Bridge`
+each round. If not passed, the Bridge news up its own one, degrading to "independent per round".
 
-`REFRESH_THRESHOLD = 11`（Janus §6.3.1）：**R8 自适应门控** —— 续期窗口内
-真实请求数低于阈值就跳过 refresh，让 cache 自然过期，避免低活跃 session
-续期成本 > 收益。
+`REFRESH_THRESHOLD = 11` (Janus §6.3.1): **R8 adaptive gating** — if the number of
+real requests within the renewal window is below the threshold, refresh is skipped, letting the cache expire naturally and avoiding a renewal
+cost > benefit for low-activity sessions.
 
-### 5.5 双向操作（仅 vLLM / SGLang）
+### 5.5 Bidirectional Operations (vLLM / SGLang only)
 
-`is_bidirectional` = `isinstance(engine, BidirectionalEngineAdapter)`。
+`is_bidirectional` = `isinstance(engine, BidirectionalEngineAdapter)`.
 
-| Bridge 方法 | 闭源 API | vLLM / SGLang |
+| Bridge Method | Closed-source API | vLLM / SGLang |
 |---|---|---|
-| `probe_cache()` | 返回 `ProbeResult(hit=False)` | 真发 lookup，问"前缀还在缓存吗" |
-| `cooperative_fold(...)` | 等同 `fold()` + 返回 `{}` | 客户端折叠 + 返回服务端 `evict_span` / `fork_and_replace` 片段 |
-| `emit_with_extras(extras)` | 把片段合并进 `plan.extras` 再 emit | 同左 |
+| `probe_cache()` | Returns `ProbeResult(hit=False)` | Actually sends a lookup, asking "is the prefix still in cache" |
+| `cooperative_fold(...)` | Equivalent to `fold()` + returns `{}` | Client-side fold + returns the server's `evict_span` / `fork_and_replace` fragments |
+| `emit_with_extras(extras)` | Merges the fragments into `plan.extras` then emits | Same as left |
 
-`cooperative_fold` 是"零重算 Fold"：闭源 API 每次 fold 都要 server 重新
-prefill 整段；vLLM/SGLang 让 server 保留前缀 KV 不动、只重算摘要尾段。
+`cooperative_fold` is "zero-recompute Fold": with a closed-source API, every fold requires the server to
+re-prefill the entire segment; vLLM/SGLang let the server keep the prefix KV untouched and only recompute the summary tail.
 
 ---
 
-## 6. Harness 层
+## 6. Harness Layer
 
-第 1 层。每个 harness plugin 是**纯无状态函数**：`parse(raw) → TelosIR`。
-基类 [harness/base.py](../harness/base.py) 的 `HarnessPlugin.parse` 签名：
+Layer 1. Each harness plugin is a **pure stateless function**: `parse(raw) → TelosIR`.
+The signature of `HarnessPlugin.parse` in the base class [harness/base.py](../harness/base.py):
 
 ```python
 def parse(self, raw_request, *, session_id, engine, model="", expected_turns=0) -> TelosIR
 ```
 
-### 6.1 分带规则（三个 harness 共通）
+### 6.1 Banding Rules (common to the three harnesses)
 
-| 上游内容 | Band | 说明 |
+| Upstream content | Band | Description |
 |---|---|---|
 | `tools[]` | PIN | `kind=tool_def` |
-| `system` 文本（≤ 2048 字符）| PIN | |
-| `system` 文本（> 2048）/ `<file>` 块 | FOLD（进 ref-pool）+ PIN 引用 stub | 阈值 `_REFPOOL_THRESHOLD = 2048` |
-| user 文本 | → `split_user_text`（PIN/FOLD/DROP）| 见 §6.2 |
+| `system` text (≤ 2048 chars) | PIN | |
+| `system` text (> 2048) / `<file>` block | FOLD (into ref-pool) + PIN reference stub | Threshold `_REFPOOL_THRESHOLD = 2048` |
+| user text | → `split_user_text` (PIN/FOLD/DROP) | See §6.2 |
 | user `tool_result` | FOLD | |
-| assistant 文本 / `tool_use` / `thinking` | FOLD | |
+| assistant text / `tool_use` / `thinking` | FOLD | |
 
-每条 message 拼完后过一遍 `enforce_band_order`（openclaw / hermes 显式调用；
-telos 因构造顺序天然合规未调用）。
+After each message is assembled, it is passed once through `enforce_band_order` (openclaw / hermes call it explicitly;
+telos does not call it because its construction order is naturally compliant).
 
 ### 6.2 `_user_split.split_user_text`
 
-把一条 user 文本切成 PIN（真正的提问）+ FOLD（历史回声）+ DROP（envelope）。
-正则集：
+Splits one user text into PIN (the actual question) + FOLD (history echo) + DROP (envelope).
+The regex set:
 
-- **DROP**（每轮变化的 envelope）：`<environment_info>` / `<system-reminder>`
+- **DROP** (the envelope that changes each round): `<environment_info>` / `<system-reminder>`
   / `<command-message>` / `<command-name>` / `Current time:...`
-- **FOLD**（显式包裹的历史回声）：`<prev>...</prev>`
-- **PIN**：剥掉上述之后剩下的就是用户提问。
+- **FOLD** (explicitly wrapped history echo): `<prev>...</prev>`
+- **PIN**: whatever remains after stripping the above is the user's question.
 
-返回的 tuple 已经是 §5 顺序，可直接塞进 `TelosMessage`。
+The returned tuple is already in §5 order and can be put directly into a `TelosMessage`.
 
-### 6.3 三个 harness 的区别
+### 6.3 Differences Among the Three Harnesses
 
 | | OpenClaw | Hermes | Telos |
 |---|---|---|---|
-| Wire 形状 | Anthropic `/v1/messages` | Anthropic `/v1/messages` | OpenAI ChatCompletions |
-| 身份标记 | 默认 / fallback | `<system-reminder>`、`<command-message>`、thinking 块、Claude Code 工具集 | 独立 transport（OpenAI 形状）|
-| 工具分类 | `_classify_anthropic_tool`（type 前缀 + server 字段 + metadata）| 复用 `_classify_anthropic_tool` | `_classify_openai_tool`（仅 metadata）|
-| `<file>` 入 ref-pool | 否（整个超大 system item 入池，slug `system-doc-{i}`）| 是（`<file path=...>`，点号 slug）| 是（dash slug）|
-| `thinking` 块 | 不处理 | FOLD `kind=thinking` | 不适用 |
-| `tool_result` 来源 | 嵌在 user message | 嵌在 user message | 独立 `role=tool` → 包装成 user |
-| system 提取 | `system` 字段 | `system` 字段 | `messages[]` 开头连续的 `role=system` |
-| `source_tag` 前缀 | `openclaw/*` | `hermes/*` | `telos/*` |
+| Wire shape | Anthropic `/v1/messages` | Anthropic `/v1/messages` | OpenAI ChatCompletions |
+| Identity markers | Default / fallback | `<system-reminder>`, `<command-message>`, thinking blocks, the Claude Code tool set | Standalone transport (OpenAI shape) |
+| Tool classification | `_classify_anthropic_tool` (type prefix + server field + metadata) | Reuses `_classify_anthropic_tool` | `_classify_openai_tool` (metadata only) |
+| `<file>` into ref-pool | No (the whole oversized system item goes into the pool, slug `system-doc-{i}`) | Yes (`<file path=...>`, dotted slug) | Yes (dash slug) |
+| `thinking` block | Not handled | FOLD `kind=thinking` | Not applicable |
+| `tool_result` source | Embedded in the user message | Embedded in the user message | Standalone `role=tool` → wrapped into a user message |
+| system extraction | The `system` field | The `system` field | The consecutive `role=system` at the start of `messages[]` |
+| `source_tag` prefix | `openclaw/*` | `hermes/*` | `telos/*` |
 
-工具分类把 `source`（builtin / mcp / user）写进 `TelosBlock.extra`，喂给
-bridge 的 `_tool_sort_key`，保护 PIN 前缀稳定。
+Tool classification writes `source` (builtin / mcp / user) into `TelosBlock.extra`, feeding it to
+the bridge's `_tool_sort_key` to protect PIN prefix stability.
 
-### 6.4 `_detect_harness`（在 [scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py)）
+### 6.4 `_detect_harness` (in [scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py))
 
-对 Anthropic 形状的流量在 `hermes` / `openclaw` 之间二选一。检测顺序
-（首个命中即返回）：
+For Anthropic-shaped traffic, picks between `hermes` / `openclaw`. Detection order
+(returns on the first hit):
 
-0. **HTTP 头指纹** —— `User-Agent` 含 `claude-cli` 或 `x-app: cli` → `hermes`。
-   仅 proxy 路径有请求头。这是内容检测拿不到、却对每条请求都可靠的
-   per-client 信号：Claude Code 用 Haiku 发的辅助请求（标题生成 / 话题检测）
-   既无工具也无标签，下面 1–3 全 miss，只有头指纹能正确识别。
-1. **Envelope 标签** —— 在 system 文本**和每条 user 文本块**里跑成对
-   开/闭正则（`system-reminder` / `command-message` / `command-name`）。
-   成对匹配避免用户只是在散文里讨论标签而误判。命中 → `hermes`。
-2. **thinking 块** —— 任意 assistant message 含 `thinking` 内容块 → `hermes`。
-3. **工具指纹** —— 工具名与 `{Bash, Edit, Read, Write, Grep, Glob,
-   TodoWrite, Task, WebFetch, WebSearch, NotebookEdit}` 的交集 ≥ 3 → `hermes`。
-   捕捉首轮（还没注入 reminder）的请求。
-4. 兜底 → `openclaw`。
+0. **HTTP header fingerprint** — `User-Agent` containing `claude-cli` or `x-app: cli` → `hermes`.
+   Only the proxy path has request headers. This is a per-client signal that content detection cannot obtain
+   yet is reliable for every request: the auxiliary requests Claude Code sends with Haiku (title generation / topic detection)
+   have neither tools nor markers, so 1–3 below all miss; only the header fingerprint can correctly identify them.
+1. **Envelope markers** — run paired
+   open/close regexes (`system-reminder` / `command-message` / `command-name`) in the system text **and in every user text block**.
+   Paired matching avoids a misclassification where the user is merely discussing tags in prose. Hit → `hermes`.
+2. **thinking block** — any assistant message containing a `thinking` content block → `hermes`.
+3. **Tool fingerprint** — the intersection of tool names with `{Bash, Edit, Read, Write, Grep, Glob,
+   TodoWrite, Task, WebFetch, WebSearch, NotebookEdit}` ≥ 3 → `hermes`.
+   Catches the first-turn request (before the reminder is injected).
+4. Fallback → `openclaw`.
 
-`_detect_harness_signal` 返回**确信信号**（命中 0–3）或 `None`（只会兜底）。
-proxy 用它做 **per-client harness 记忆**（`ProxyApp._client_harness`，按
-`_client_identity` keyed）：某 client 被任一条请求确信识别后就记住，它后续
-无信号的请求（如 tool-less 辅助请求）直接继承，不会误判成 `openclaw`。
+`_detect_harness_signal` returns a **confident signal** (a hit on 0–3) or `None` (will only fall back).
+The proxy uses it for **per-client harness memory** (`ProxyApp._client_harness`, keyed by
+`_client_identity`): once a client is confidently identified by any request, it is remembered; its subsequent
+signal-less requests (such as tool-less auxiliary requests) inherit it directly and are not misclassified as `openclaw`.
 
-SDK transport 路径没有 HTTP 头，检测结果在 session 内 sticky（写进
-`BridgeSessionState.sticky_harness`），避免逐 call 重新探测导致 harness
-翻转、前缀失稳。
+The SDK transport path has no HTTP headers; the detection result is sticky within the session (written into
+`BridgeSessionState.sticky_harness`), avoiding re-probing per call which would cause the harness to
+flip and the prefix to destabilize.
 
 ---
 
-## 7. Engine 层
+## 7. Engine Layer
 
-第 3 层。基类 [engine/base.py](../engine/base.py)。bridge 只面向抽象接口
-编程，从不按引擎名分支。
+Layer 3. Base class [engine/base.py](../engine/base.py). The bridge programs only against the abstract interface
+and never branches by engine name.
 
-### 7.1 接口契约
+### 7.1 Interface Contract
 
-`EngineAdapter`（ABC）四个成员：
+`EngineAdapter` (ABC) has four members:
 - `capabilities` (property) → `EngineCapabilities`
-- `plan_marks(ir) → EmitPlan` —— 决定锚位
+- `plan_marks(ir) → EmitPlan` — decides the anchor positions
 - `emit(ir, plan) → wire dict`
 - `parse_usage(response) → UsageReport`
-- `refresh(ir, plan)` —— 可选 keep-alive，基类默认 no-op
+- `refresh(ir, plan)` — optional keep-alive; the base class defaults to a no-op
 
-`MarkSlot`（引擎无关的逻辑 cache 锚）：`name` / `segment` / `index` /
-`message_index` / `ttl_class`。bridge 只看 slot 列表，永远不知道
-`cache_control` 长什么样。
+`MarkSlot` (an engine-agnostic logical cache anchor): `name` / `segment` / `index` /
+`message_index` / `ttl_class`. The bridge only sees the slot list and never knows what
+`cache_control` looks like.
 
-`BidirectionalEngineAdapter` 额外加读路径 + 显式服务端状态变更：
-`probe` / `evict_span` / `fork_and_replace`。闭源 API 不继承它，bridge
-靠 `isinstance` 保证永不误调。
+`BidirectionalEngineAdapter` additionally adds a read path + explicit server-side state mutation:
+`probe` / `evict_span` / `fork_and_replace`. Closed-source APIs do not inherit it; the bridge
+relies on `isinstance` to guarantee it never calls them by mistake.
 
-### 7.2 能力矩阵
+### 7.2 Capability Matrix
 
-| 字段 | Anthropic | OpenAI | DeepSeek | vLLM | SGLang |
+| Field | Anthropic | OpenAI | DeepSeek | vLLM | SGLang |
 |---|:---:|:---:|:---:|:---:|:---:|
 | `explicit_breakpoints` | ✓ | ✗ | ✗ | ✓ | ✓ |
 | `max_breakpoints` | **4** | 0 | 0 | 2 | 2 |
-| `ttl_control` | presets(5m/1h) | presets(内存/24h) | none | none | none |
+| `ttl_control` | presets(5m/1h) | presets(in-memory/24h) | none | none | none |
 | `prewarmable` | ✓(`max_tokens:0`) | ✗ | ✗ | ✓(`max_tokens:1`) | ✓(`prewarm_only`) |
 | `routing_key` | ✗ | ✓(`prompt_cache_key`) | ✗ | ✓(`cache_salt`) | ✓(`affinity_key`) |
 | `cache_probe` | ✗ | ✗ | ✗ | ✓ | ✓ |
 | `span_eviction` | ✗ | ✗ | ✗ | ✓ | ✓ |
 | `fork_and_replace` | ✗ | ✗ | ✗ | ✗ | ✓ |
 | `tier_hint` | ✗ | ✗ | ✗ | ✗ | ✓ |
-| 双向类 | 否 | 否 | 否 | 是 | 是 |
+| Bidirectional class | No | No | No | Yes | Yes |
 
-### 7.3 每个引擎的 emit 策略
+### 7.3 Each Engine's emit Strategy
 
-- **Anthropic**（[anthropic.py](../engine/anthropic.py)）—— 唯一支持显式
-  断点。`plan_marks` 出至多 4 个候选 slot：**BP-T**（tools 段尾）、
-  **BP-S**（system 最后一个 PIN）、**BP-R**（system 最后一个 FOLD =
-  ref-pool 尾）、**BP-X**（最近 message 末非 DROP 块，5m 滚动）、
-  **BP-mid**（messages ≥ 19 时在 `len-19` 处加锚，修复 R2）。超过 4 个
-  按 R7 优先级 `BP-T < BP-S < BP-R < BP-mid < BP-X` 截断。emit 时在
-  slot 落点的 block 上挂 `cache_control`（5m `{"type":"ephemeral"}` /
-  1h 加 `"ttl":"1h"`）；DROP 块不挂、必须在所有 BP 之后。常量
-  `_LOOKBACK=20`、`_MID_ANCHOR_STRIDE=19`。
-- **OpenAI**（[openai.py](../engine/openai.py)）—— 无显式 BP。`plan_marks`
-  只出 `routing_key`（`telos-<sha256[:16]>`，对工具 + PIN system + ref-pool
-  键做 hash）+ retention。emit 把 block 排成 非DROP→DROP，让 OpenAI 的
-  自动前缀匹配命中稳定头；写 `prompt_cache_key` / `prompt_cache_retention`。
-  `cache_write` 恒为 0（OpenAI 隐式写缓存不单独计费）。`KEY_RPM_SOFT_CAP=12`。
-- **DeepSeek**（[deepseek.py](../engine/deepseek.py)）—— 零控制面。磁盘
-  context cache 永远开。`plan_marks` 返回空 `EmitPlan()`。emit 只靠把
-  block 排成 非DROP→DROP 让 exact-match 前缀命中。
-- **vLLM**（[vllm.py](../engine/vllm.py)）—— 双向。emit 私有扩展字段
-  `cache_policy`（`pin_prefix_until_block` / `evict_span`）+ `cache_salt`。
-- **SGLang**（[sglang.py](../engine/sglang.py)）—— vLLM 严格超集。emit
-  私有 `cache_control`（`lock_radix_path` / `path_hash` / `prefer_tier`
-  / `affinity_key` / `fork_from_path` / `replace_suffix`）。多 `fork_and_replace`
-  和 `tier_hint`（HiCache GPU/CPU/disk）。
+- **Anthropic** ([anthropic.py](../engine/anthropic.py)) — the only one with explicit
+  breakpoint support. `plan_marks` produces at most 4 candidate slots: **BP-T** (end of the tools segment),
+  **BP-S** (the last PIN of system), **BP-R** (the last FOLD of system =
+  end of the ref-pool), **BP-X** (the last non-DROP block of the most recent message, 5m rolling),
+  **BP-mid** (when messages ≥ 19, adds an anchor at `len-19`, fixes R2). If more than 4,
+  truncates by the R7 priority `BP-T < BP-S < BP-R < BP-mid < BP-X`. At emit time, `cache_control` is attached to the block
+  at the slot's landing point (5m `{"type":"ephemeral"}` /
+  1h adds `"ttl":"1h"`); DROP blocks are not attached and must come after all BPs. Constants
+  `_LOOKBACK=20`, `_MID_ANCHOR_STRIDE=19`.
+- **OpenAI** ([openai.py](../engine/openai.py)) — no explicit BP. `plan_marks`
+  only produces a `routing_key` (`telos-<sha256[:16]>`, hashing tools + PIN system + ref-pool
+  keys) + retention. emit arranges blocks as non-DROP→DROP so OpenAI's
+  automatic prefix matching hits a stable head; writes `prompt_cache_key` / `prompt_cache_retention`.
+  `cache_write` is always 0 (OpenAI's implicit cache write is not billed separately). `KEY_RPM_SOFT_CAP=12`.
+- **DeepSeek** ([deepseek.py](../engine/deepseek.py)) — zero control plane. The disk
+  context cache is always on. `plan_marks` returns an empty `EmitPlan()`. emit relies only on arranging
+  blocks as non-DROP→DROP so the exact-match prefix hits.
+- **vLLM** ([vllm.py](../engine/vllm.py)) — bidirectional. emit writes the private extension field
+  `cache_policy` (`pin_prefix_until_block` / `evict_span`) + `cache_salt`.
+- **SGLang** ([sglang.py](../engine/sglang.py)) — a strict superset of vLLM. emit writes
+  the private `cache_control` (`lock_radix_path` / `path_hash` / `prefer_tier`
+  / `affinity_key` / `fork_from_path` / `replace_suffix`). Adds `fork_and_replace`
+  and `tier_hint` (HiCache GPU/CPU/disk).
 
-### 7.4 usage 解析
+### 7.4 usage Parsing
 
-| 引擎 | cache_read 字段 | cache_write 字段 |
+| Engine | cache_read field | cache_write field |
 |---|---|---|
 | Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` |
-| OpenAI | `prompt_tokens_details.cached_tokens` | 恒 0 |
-| DeepSeek | `prompt_cache_hit_tokens` | 恒 0（写成本并入 miss 价） |
-| vLLM / SGLang | `cached_tokens` | 恒 0 |
+| OpenAI | `prompt_tokens_details.cached_tokens` | always 0 |
+| DeepSeek | `prompt_cache_hit_tokens` | always 0 (write cost folded into the miss price) |
+| vLLM / SGLang | `cached_tokens` | always 0 |
 
 ---
 
 ## 8. ref-pool
 
-定义在 [refpool.py](../refpool.py)。所有大段内容的"指针表"。
+Defined in [refpool.py](../refpool.py). The "pointer table" for all large chunks of content.
 
-- **slug 一经注册即冻结**。`register` 校验 slug 正则 `^[A-Za-z0-9_\-./]+$`、
-  block 必须 `band=FOLD`、`ref_slug` 必须等于 slug。重复注册抛错。
-- **`register_or_skip`** —— 幂等注册。跨 turn 共享 RefPool 时用：harness
-  每轮都生产完整 payload 的 ref_pool，本方法防止第二轮把第一轮已 `fold`
-  成占位符的条目覆盖回完整内容。
-- **`fold(slug, summary=)`** —— 把条目换成短占位符。**slug 不动**，文本里
-  所有 `[ref:slug]` 引用点字节不变 → 后续 BP 仍可命中。这是"引用天然
-  折叠"的落地方式。
-- **`render_blocks`** —— 按 slug 字典序渲染，保证多次 emit 字节稳定。
-- **`lint_text` / `lint_blocks`** —— emit 前扫描所有 `[ref:slug]`，发现
-  未注册的 slug 立即 `fail-fast`。
+- **A slug is frozen once registered.** `register` validates the slug regex `^[A-Za-z0-9_\-./]+$`,
+  the block must be `band=FOLD`, and `ref_slug` must equal the slug. Duplicate registration raises an error.
+- **`register_or_skip`** — idempotent registration. Used when sharing a RefPool across turns: the harness
+  produces a ref_pool with the full payload every round, and this method prevents the second round from overwriting an entry that the first round
+  already `fold`ed into a placeholder back to the full content.
+- **`fold(slug, summary=)`** — swaps an entry for a short placeholder. **The slug is not touched**, and the bytes of
+  every `[ref:slug]` reference point in the text stay unchanged → subsequent BPs can still hit. This is how "references fold
+  naturally" is realized.
+- **`render_blocks`** — renders in lexicographic slug order, guaranteeing byte stability across emits.
+- **`lint_text` / `lint_blocks`** — before emit, scan all `[ref:slug]`; on finding
+  an unregistered slug, immediately `fail-fast`.
 
-bridge 的 `_sync_refpool_into_system` 把 ref-pool 渲染进 system 段：
-`pin* + ref-pool fold* + drop*`。
-
----
-
-## 9. 接入路径 A / B
-
-两条路径**功能等价**（同一 TELOS 管线、同一状态累积、同一 `cache_control`
-注入），区别只在进程边界 / 错误处理 / 流式。
-
-### 9.1 路径 A —— SDK Transport（进程内）
-
-把 agent 的 LLM client 换成 TELOS transport，鸭子接口完全相同。
-
-- **`TelosAnthropicTransport`**（[scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py)）——
-  包 `anthropic.Anthropic`，暴露 `.messages.create(...)`。`_do_create`
-  流程：快照入参 → 选 harness（显式 > sticky > 自动检测）→ `harness.parse`
-  → `Bridge(...).emit_with_plan()` → 透传非 TELOS 字段 → 发真请求 →
-  `bridge.absorb_usage` 累积 → 写 `usage_log` / `prompt_trace_log`。
-- **`TelosOpenAITransport`**（[scripts/telos_transport.py](../scripts/telos_transport.py)）——
-  包 `openai.OpenAI`，暴露 `.chat.completions.create(...)`。走 `telos`
-  harness，用自定义 `_ir_to_chat_completions` 出 wire（保留 OpenAI 的
-  `tool_calls` / `role=tool` 结构，不内联成文本）。
-
-transport 实例 = 一个 session，内部持有 `BridgeSessionState`。
-
-### 9.2 路径 B —— HTTP 反向代理（进程外）
-
-agent 设 `ANTHROPIC_BASE_URL=http://127.0.0.1:7171`，零代码改动。
-
-- **`proxy/server.py`** —— aiohttp 反向代理。`POST /v1/messages` 经
-  TELOS 管线后转发；SSE 流式支持（旁路解析 `message_start` /
-  `message_delta` 抽 usage）；其他路径透明 passthrough。内嵌
-  `/__telos/dashboard`、`/__telos/developer`、`/__telos/developer.json`。
-  默认非 strict：TELOS 失败降级 passthrough（`--strict` 改成返 500）。
-- **`proxy/pipeline.py`** —— `process_anthropic_request(raw, ...)` 纯函数，
-  把 parse → bridge → emit 拆出来，proxy 和 transport 共用，杜绝 wire 漂移。
-- **session-id 派生**优先级：`x-telos-session` header → `metadata.user_id`
-  → `blake2b(api_key + system + tools + messages[0])` → `telos-<16hex>`。
-- **`_SessionRegistry`** —— OrderedDict LRU（默认上限 10000），按 session_id
-  持有 `BridgeSessionState`。
-
-### 9.3 安装器（路径 B）
-
-[init/](../init/)。`AgentInstaller` ABC，要求**幂等** + `uninstall` 精确还原。
-
-- **`ClaudeCodeInstaller`** —— 往 `~/.claude/settings.json` 的 `env` 字段
-  写 `ANTHROPIC_BASE_URL`。首次 patch 备份成 `.telos.bak`；保留用户原值到
-  `__telos_previous_base_url`；标记键 `__telos_installed`。原子写
-  （`.tmp` + `os.replace`）。不动 npm 包、不动 PATH、`npm update` 不丢。
-- **`GenericInstaller`** —— 只打印 `export ANTHROPIC_BASE_URL=...` 指令。
+The bridge's `_sync_refpool_into_system` renders the ref-pool into the system segment:
+`pin* + ref-pool fold* + drop*`.
 
 ---
 
-## 10. RTK 输出过滤层
+## 9. Integration Paths A / B
 
-[output_filter/](../output_filter/)。与 TELOS 管线**正交**：TELOS 稳请求
-前缀拿 KV cache，本层缩工具结果尾巴减少每轮新增 token。
+The two paths are **functionally equivalent** (same TELOS pipeline, same state accumulation, same `cache_control`
+injection); the only differences are the process boundary / error handling / streaming.
 
-### 10.1 TelosMode —— 四态开关
+### 9.1 Path A — SDK Transport (in-process)
+
+Swap the agent's LLM client for the TELOS transport; the duck interface is identical.
+
+- **`TelosAnthropicTransport`** ([scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py)) —
+  wraps `anthropic.Anthropic`, exposes `.messages.create(...)`. The `_do_create`
+  flow: snapshot the inputs → pick the harness (explicit > sticky > auto-detect) → `harness.parse`
+  → `Bridge(...).emit_with_plan()` → pass through non-TELOS fields → send the real request →
+  `bridge.absorb_usage` accumulation → write `usage_log` / `prompt_trace_log`.
+- **`TelosOpenAITransport`** ([scripts/telos_transport.py](../scripts/telos_transport.py)) —
+  wraps `openai.OpenAI`, exposes `.chat.completions.create(...)`. Goes through the `telos`
+  harness, using a custom `_ir_to_chat_completions` to produce the wire (preserving OpenAI's
+  `tool_calls` / `role=tool` structure rather than inlining it into text).
+
+A transport instance = one session, internally holding a `BridgeSessionState`.
+
+### 9.2 Path B — HTTP Reverse Proxy (out-of-process)
+
+The agent sets `ANTHROPIC_BASE_URL=http://127.0.0.1:7171`, with zero code changes.
+
+- **`proxy/server.py`** — aiohttp reverse proxy. `POST /v1/messages` is forwarded after passing through
+  the TELOS pipeline; SSE streaming is supported (side-channel parsing of `message_start` /
+  `message_delta` to extract usage); other paths are transparently passed through. It embeds
+  `/__telos/dashboard`, `/__telos/developer`, `/__telos/developer.json`.
+  Default non-strict: on TELOS failure it degrades to passthrough (`--strict` changes it to return 500).
+- **`proxy/pipeline.py`** — `process_anthropic_request(raw, ...)` is a pure function,
+  splitting out parse → bridge → emit, shared by the proxy and the transport, eliminating wire drift.
+- **session-id derivation** priority: `x-telos-session` header → `metadata.user_id`
+  → `blake2b(api_key + system + tools + messages[0])` → `telos-<16hex>`.
+- **`_SessionRegistry`** — an OrderedDict LRU (default cap 10000), holding a
+  `BridgeSessionState` per session_id.
+
+### 9.3 Installers (Path B)
+
+[init/](../init/). The `AgentInstaller` ABC requires **idempotency** + `uninstall` to restore exactly.
+
+- **`ClaudeCodeInstaller`** — writes `ANTHROPIC_BASE_URL` into the `env` field of
+  `~/.claude/settings.json`. The first patch backs up to `.telos.bak`; keeps the user's original value in
+  `__telos_previous_base_url`; the marker key is `__telos_installed`. Atomic write
+  (`.tmp` + `os.replace`). Does not touch the npm package, does not touch PATH, survives `npm update`.
+- **`GenericInstaller`** — only prints the `export ANTHROPIC_BASE_URL=...` instruction.
+
+---
+
+## 10. RTK Output Filtering Layer
+
+[output_filter/](../output_filter/). **Orthogonal** to the TELOS pipeline: TELOS stabilizes the request
+prefix to get the KV cache, while this layer shrinks the tool result tail to reduce the new tokens added each round.
+
+### 10.1 TelosMode — The Four-State Switch
 
 ```python
 @dataclass(frozen=True)
 class TelosMode:
-    telos: bool = True    # 跑 TELOS 管线（cache_control / ref-pool）
-    rtk:   bool = False   # 跑 RTK 工具结果过滤
+    telos: bool = True    # Run the TELOS pipeline (cache_control / ref-pool)
+    rtk:   bool = False   # Run RTK tool result filtering
 ```
 
-| label | telos | rtk | 含义 |
+| label | telos | rtk | Meaning |
 |---|:---:|:---:|---|
-| `none` | ✗ | ✗ | 纯透传，proxy 不改一个字节 |
-| `telos` | ✓ | ✗ | 只 TELOS 前缀缓存（proxy 默认）|
-| `rtk` | ✗ | ✓ | 只 RTK 工具过滤，不打 cache 标记 |
-| `both` | ✓ | ✓ | 两者都开 |
+| `none` | ✗ | ✗ | Pure passthrough, the proxy does not change a single byte |
+| `telos` | ✓ | ✗ | TELOS prefix caching only (proxy default) |
+| `rtk` | ✗ | ✓ | RTK tool filtering only, no cache markers applied |
+| `both` | ✓ | ✓ | Both enabled |
 
-未知 / 空值退化到默认 `telos`（保持引入开关前的历史行为）。
+An unknown / empty value degrades to the default `telos` (preserving the historical behavior from before the switch was introduced).
 
-### 10.2 过滤器
+### 10.2 Filters
 
-- **`RtkFilter`** —— shell-out 到 `rtk` 二进制（`rtk filter --command <cmd>`
-  读 stdin）。约定调用形式；任何失败退化 passthrough。
-- **`FallbackFilter`** —— 无依赖的纯 Python 过滤器：连续重复行折叠成
-  `<line> (×N)`、头尾截断、pytest 摘要保留。rtk 没装时保证开关仍生效。
-- **`CompositeFilter`** —— rtk 优先、未省下字节再退回 fallback。
-- `build_filter()` —— rtk 可用 → `Composite(rtk, fallback)`，否则纯
-  `FallbackFilter`。
-- 阈值：短于 600 字符的输出不过滤；dedup 后超过 4000 字符走头尾截断。
+- **`RtkFilter`** — shells out to the `rtk` binary (`rtk filter --command <cmd>`
+  reading stdin). A conventional call form; any failure degrades to passthrough.
+- **`FallbackFilter`** — a dependency-free pure-Python filter: consecutive repeated lines folded into
+  `<line> (×N)`, head/tail truncation, pytest summary preserved. Guarantees the switch still takes effect when rtk is not installed.
+- **`CompositeFilter`** — rtk first; if it saves no bytes, fall back to fallback.
+- `build_filter()` — rtk available → `Composite(rtk, fallback)`, otherwise a pure
+  `FallbackFilter`.
+- Thresholds: output shorter than 600 chars is not filtered; after dedup, output over 4000 chars goes through head/tail truncation.
 
 ### 10.3 apply_filter
 
-`preprocess.apply_filter(raw, flt) → (new_raw, FilterStats)` —— 纯函数，
-深拷贝 raw，改写所有 `tool_result` 的文本内容（支持 str 和 block-list 两种
-content 形态），从前一条 assistant message 的 `tool_use` 里查命令 hint。
-`FilterStats` 记 `original_chars` / `filtered_chars` / `blocks_filtered`
-/ `by_rule`。
+`preprocess.apply_filter(raw, flt) → (new_raw, FilterStats)` — a pure function that
+deep-copies raw, rewrites the text content of all `tool_result` (supporting both the str and block-list
+content forms), and looks up the command hint from the `tool_use` of the previous assistant message.
+`FilterStats` records `original_chars` / `filtered_chars` / `blocks_filtered`
+/ `by_rule`.
 
-### 10.4 proxy 接线
+### 10.4 proxy Wiring
 
-- `--mode` CLI 开关 + `X-Telos-Mode` header（首请求 sticky 到 session）。
-- `X-Telos-Compare-Group` header → 对比实验分组。
-- `mode.rtk` 开 → 进 TELOS 前先 `apply_filter`；`mode.telos` 关 → 跳过
-  管线走 passthrough。
-- usage_log 加 `mode` / `compare_group` / `tool_output_reduction` 字段。
+- The `--mode` CLI switch + the `X-Telos-Mode` header (sticky to the session on the first request).
+- The `X-Telos-Compare-Group` header → comparison-experiment grouping.
+- `mode.rtk` on → `apply_filter` before entering TELOS; `mode.telos` off → skip the
+  pipeline and go to passthrough.
+- usage_log gains the `mode` / `compare_group` / `tool_output_reduction` fields.
 
 ---
 
-## 11. 录制与重放对照
+## 11. Recording and Replay Comparison
 
-### 11.1 corpus —— 会话语料库
+### 11.1 corpus — The Session Corpus
 
-[corpus.py](../corpus.py)。proxy 默认把每次调用的**原始请求**录到
-`~/.telos/corpus/<session>.jsonl`（只录请求、不录响应 —— Anthropic 无状态，
-第 N 轮请求已含前 N-1 轮全部内容）。`--no-record` 可关，`--corpus-dir`
-可改目录。函数：`record_call` / `load_session` / `list_sessions`。
+[corpus.py](../corpus.py). By default the proxy records the **raw request** of every call to
+`~/.telos/corpus/<session>.jsonl` (records only requests, not responses — Anthropic is stateless,
+the Nth-turn request already contains all the content of the previous N-1 turns). `--no-record` turns it off, `--corpus-dir`
+changes the directory. Functions: `record_call` / `load_session` / `list_sessions`.
 
-### 11.2 replay —— 受控重放对照
+### 11.2 replay — Controlled Replay Comparison
 
-[replay/](../replay/)。`replay_session(turns, mode, ...)` 把一个真实会话按
-某个 mode 重放：逐字节相同的轮次序列 → RTK 过滤（若 `mode.rtk`）→ TELOS
-管线（若 `mode.telos`）→ `max_tokens=1` 发上游 → 只取 usage。
+[replay/](../replay/). `replay_session(turns, mode, ...)` replays a real session under
+a given mode: a byte-identical turn sequence → RTK filtering (if `mode.rtk`) → the TELOS
+pipeline (if `mode.telos`) → sent upstream with `max_tokens=1` → only the usage is taken.
 
-- **为什么 `max_tokens=1`**：只测 prefill / 缓存计费，输出生成被刻意阉割。
-- **缓存隔离**：默认给每个 mode 在 system 段最前注入唯一前缀
-  `[telos-replay ns=<session>/<mode>]`，让 Anthropic 端缓存各自独立，
-  避免先重放的 mode 把缓存暖好被后者白蹭。
-- 结果 append 到 usage_log，`compare_group` = 原会话 id，`replay: true`。
+- **Why `max_tokens=1`**: only prefill / cache billing is measured; output generation is deliberately neutered.
+- **Cache isolation**: by default a unique prefix
+  `[telos-replay ns=<session>/<mode>]` is injected at the very front of the system segment for each mode, so Anthropic-side caches are independent of each other,
+  preventing an earlier-replayed mode from warming the cache for a later one to free-ride on.
+- The result is appended to usage_log, with `compare_group` = the original session id and `replay: true`.
 
-CLI：`telos replay --list` / `telos replay --session <id> --modes ...`。
-原理与边界详见 [replay-comparison.md](replay-comparison.md)。
+CLI: `telos replay --list` / `telos replay --session <id> --modes ...`.
+See [replay-comparison.md](replay-comparison.md) for the principle and boundaries.
 
-### 11.3 replay vs 双 session
+### 11.3 replay vs Dual Session
 
-| | 成本 | 控制变量 | 适合论断 |
+| | Cost | Controlled variables | Suitable claim |
 |---|---|---|---|
-| replay | 1 次真实会话 + 廉价 prefill | 好（轮次钉死）| 「对给定工作负载，token 账单降 X」|
-| 双 session | N×K 个完整会话 | 差（trajectory 分叉）| 「用了 TELOS，agent 整体更便宜」|
+| replay | 1 real session + cheap prefill | Good (turns pinned) | "For a given workload, the token bill drops by X" |
+| Dual session | N×K full sessions | Poor (trajectory forks) | "Using TELOS, the agent is cheaper overall" |
 
 ---
 
-## 12. 可观测性
+## 12. Observability
 
 ### 12.1 usage_log
 
-proxy 和 SDK transport 共有。每次调用一行 jsonl。关键字段：`session_id`
+Shared by the proxy and the SDK transport. One jsonl line per call. Key fields: `session_id`
 / `call_index` / `harness` / `mode` / `compare_group` / `tool_output_reduction`
-/ `normalized`（4 字段）/ `raw_usage` / `cumulative`（`cache_creation` /
-`real_requests_since_refresh` / `refpool_slugs`）。
+/ `normalized` (4 fields) / `raw_usage` / `cumulative` (`cache_creation` /
+`real_requests_since_refresh` / `refpool_slugs`).
 
-### 12.2 省钱看板（[build_savings_dashboard.py](../scripts/build_savings_dashboard.py)）
+### 12.2 Savings Dashboard ([build_savings_dashboard.py](../scripts/build_savings_dashboard.py))
 
-`telos dashboard` 或 proxy 内嵌 `/__telos/dashboard`。把 usage_log 聚合成
-"省了多少 token / 多少美刀"。含 2026 价格表（含 cache_write 5m/1h 拆分）。
-本批新增：**Breakdown by mode** 表 + **A/B 对比** 面板（同 `compare_group`
-下不同 mode 并排，replay 组标 `replay` 徽章、双 session 标 `live A/B`）+
-**RTK tool output removed** KPI。
+`telos dashboard` or the proxy-embedded `/__telos/dashboard`. Aggregates usage_log into
+"how many tokens / how many dollars saved". Includes the 2026 price table (with the cache_write 5m/1h split).
+New in this batch: a **Breakdown by mode** table + an **A/B comparison** panel (different modes under the same `compare_group`
+shown side by side, replay groups marked with a `replay` badge, dual sessions marked `live A/B`) +
+the **RTK tool output removed** KPI.
 
-### 12.3 开发者页面（[build_developer_page.py](../scripts/build_developer_page.py)）
+### 12.3 Developer Page ([build_developer_page.py](../scripts/build_developer_page.py))
 
-proxy 内嵌 `/__telos/developer`。渲染**当前内存里**所有 session 的 IR
-结构、prompt 区域 PIN/FOLD/DROP 字符分布、最近调用表、逐 message band
-视图、工具调用统计。数据源是 `proxy/inspector.py` 的 `SessionInspector`
-（OrderedDict LRU，每 session 留最近 `INSPECTOR_HISTORY=25` 次调用）。
+The proxy-embedded `/__telos/developer`. Renders the IR
+structure of all sessions **currently in memory**, the PIN/FOLD/DROP character distribution of prompt regions, a recent-calls table, a per-message band
+view, and tool-call statistics. The data source is the `SessionInspector` of `proxy/inspector.py`
+(an OrderedDict LRU, keeping the most recent `INSPECTOR_HISTORY=25` calls per session).
 
 ### 12.4 prompt_trace + show_prompt_trace
 
-SDK transport 额外写 `prompt_trace_log`（IR layout 快照、plan 细节、跨
-call 的 prefix 重合度）。`scripts/show_prompt_trace.py` 在终端美化打印。
+The SDK transport additionally writes `prompt_trace_log` (IR layout snapshot, plan details, prefix overlap
+across calls). `scripts/show_prompt_trace.py` pretty-prints it in the terminal.
 
 ---
 
-## 13. 不变量与设计约束
+## 13. Invariants and Design Constraints
 
-| 编号 | 约束 | 落地 |
+| ID | Constraint | Realization |
 |---|---|---|
-| §5 | 每段内 `pin* → fold* → drop*` | `assert_band_order`，emit 前后各校验一次 |
-| I3 | ref-pool slug 一经注册即冻结 | `RefPool.register` 重复注册抛错 |
-| §4 | `[ref:slug]` 引用必须能在 ref-pool 找到 | `lint_blocks` emit 前 fail-fast |
-| R2 | 长对话需要 mid-rolling 锚 | Anthropic `BP-mid`（messages ≥ 19）|
-| R5 | 跨语言 JSON key 乱序破坏 cache | `_canonicalize_*` 统一在 bridge 做 |
-| R6 | thinking 块不能直接挂 cache_control | harness 分 FOLD，engine emit 不挂 |
-| R7 | BP 超过 4 个要按优先级截断 | Anthropic `BP-T<BP-S<BP-R<BP-mid<BP-X` |
-| R8 | 低活跃 session 续期亏本 | `refresh` 自适应门控，阈值 `REFRESH_THRESHOLD=11` |
+| §5 | Within each segment, `pin* → fold* → drop*` | `assert_band_order`, validated once before and once after emit |
+| I3 | A ref-pool slug is frozen once registered | `RefPool.register` raises on duplicate registration |
+| §4 | A `[ref:slug]` reference must be findable in the ref-pool | `lint_blocks` fail-fast before emit |
+| R2 | Long conversations need a mid-rolling anchor | Anthropic `BP-mid` (messages ≥ 19) |
+| R5 | Cross-language JSON key disorder breaks the cache | `_canonicalize_*` done uniformly in the bridge |
+| R6 | A thinking block cannot have cache_control attached directly | harness bands it FOLD, the engine does not attach it on emit |
+| R7 | When BPs exceed 4, truncate by priority | Anthropic `BP-T<BP-S<BP-R<BP-mid<BP-X` |
+| R8 | Renewing a low-activity session loses money | `refresh` adaptive gating, threshold `REFRESH_THRESHOLD=11` |
 
 ---
 
-## 14. 端到端数据流
+## 14. End-to-End Data Flow
 
-以路径 B（proxy）+ `mode=both` 为例：
+Taking path B (proxy) + `mode=both` as an example:
 
 ```
-1. agent 发 POST /v1/messages 到 proxy
-2. proxy 派生 session_id，取 BridgeSessionState
-3. [录制] record_call 把原始请求写进 corpus
-4. 解析 mode（header > sticky > 进程默认）+ compare_group
-5. [RTK] mode.rtk → apply_filter 缩短 tool_result
+1. The agent sends POST /v1/messages to the proxy
+2. The proxy derives the session_id and fetches the BridgeSessionState
+3. [Recording] record_call writes the raw request into the corpus
+4. Parse the mode (header > sticky > process default) + compare_group
+5. [RTK] mode.rtk → apply_filter shortens tool_result
 6. [TELOS] mode.telos → process_anthropic_request:
-     a. _detect_harness → 选 harness（sticky）
+     a. _detect_harness → pick the harness (sticky)
      b. harness.parse → TelosIR
      c. Bridge(ir, engine, session_state).emit_with_plan():
-        - _canonicalize_ir（key 排序、工具排序）
-        - assert_ir_invariants（§5 校验）
-        - refpool.lint_blocks（引用校验）
-        - engine.plan_marks → EmitPlan（BP 锚位）
-        - engine.emit → wire（挂 cache_control）
-     d. 透传非 TELOS 字段
-7. proxy 转发 wire 到真实 Anthropic
-8. 收到响应：旁路解析 usage
-9. bridge 累积 cache_creation；写 usage_log + inspector
-10. 响应原样回 agent
+        - _canonicalize_ir (key sorting, tool sorting)
+        - assert_ir_invariants (§5 check)
+        - refpool.lint_blocks (reference check)
+        - engine.plan_marks → EmitPlan (BP anchor positions)
+        - engine.emit → wire (cache_control attached)
+     d. Pass through non-TELOS fields
+7. The proxy forwards the wire to the real Anthropic
+8. On receiving the response: side-channel parse of usage
+9. The bridge accumulates cache_creation; writes usage_log + inspector
+10. The response is returned to the agent as-is
 ```
 
 ---
 
-## 15. 扩展点
+## 15. Extension Points
 
-| 想做的事 | 改哪 |
+| What you want to do | What to change |
 |---|---|
-| 新增 agent installer | [init/](../init/) 加 `<name>.py` 实现 `AgentInstaller`，注册到 `init.INSTALLERS` |
-| 新增 harness | [harness/](../harness/) 加 plugin，注册到 [registry.py](../registry.py) |
-| 新增 engine adapter | [engine/](../engine/) 加 `EngineAdapter` / `BidirectionalEngineAdapter` 子类，注册到 registry |
-| 新增工具过滤规则 | [output_filter/filters.py](../output_filter/filters.py) 的 `FallbackFilter`，或让 `RtkFilter` 走 rtk 二进制 |
-| 加 `/v1/chat/completions` 代理路径 | [proxy/server.py](../proxy/server.py) 加 route，复用 OpenAI 同款管线 |
-| 持久化 session state | `BridgeSessionState` 是普通 dataclass，序列化成 JSON；改 `_SessionRegistry` 走外部存储 |
-| 调整 canonical 排序 | bridge 的 `_SCHEMA_SET_ARRAY_KEYS`、`_TOOL_SOURCE_RANK` 都是模块级名字，可 monkey-patch |
+| Add a new agent installer | In [init/](../init/) add `<name>.py` implementing `AgentInstaller`, register it in `init.INSTALLERS` |
+| Add a new harness | In [harness/](../harness/) add a plugin, register it in [registry.py](../registry.py) |
+| Add a new engine adapter | In [engine/](../engine/) add an `EngineAdapter` / `BidirectionalEngineAdapter` subclass, register it in the registry |
+| Add a new tool filtering rule | The `FallbackFilter` of [output_filter/filters.py](../output_filter/filters.py), or let `RtkFilter` go through the rtk binary |
+| Add a `/v1/chat/completions` proxy path | In [proxy/server.py](../proxy/server.py) add a route, reusing the same OpenAI pipeline |
+| Persist session state | `BridgeSessionState` is an ordinary dataclass, serializable to JSON; change `_SessionRegistry` to use external storage |
+| Adjust the canonical sorting | The bridge's `_SCHEMA_SET_ARRAY_KEYS`, `_TOOL_SOURCE_RANK` are module-level names, monkey-patchable |

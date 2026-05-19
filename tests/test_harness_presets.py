@@ -1,9 +1,9 @@
-"""Harness preset / 别名支持的单测（无网络）。
+"""Unit tests for harness preset / alias support (no network).
 
-覆盖：
-- ``registry.canonical_harness`` / ``load_harness`` 的别名解析
-- ``TelosTransport`` 各 preset 的工厂构造（不发请求）
-- proxy pipeline 在 ``harness_name`` 传别名时把 ``result.harness`` 归一化
+Covers:
+- alias resolution in ``registry.canonical_harness`` / ``load_harness``
+- factory construction of each ``TelosTransport`` preset (no requests sent)
+- the proxy pipeline normalizing ``result.harness`` when an alias is passed as ``harness_name``
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ _HERMES_REQ = {
 
 def test_canonical_harness_resolves_aliases() -> None:
     assert canonical_harness("claude-code") == "hermes"
-    # 非别名原样返回
+    # non-aliases are returned unchanged
     assert canonical_harness("openclaw") == "openclaw"
     assert canonical_harness("hermes") == "hermes"
     assert canonical_harness("telos") == "telos"
@@ -44,13 +44,13 @@ def test_load_harness_accepts_aliases() -> None:
 
 
 def test_harness_display_name() -> None:
-    # canonical 名 → 友好展示名
+    # canonical name → friendly display name
     assert harness_display_name("hermes") == "Claude Code"
     assert harness_display_name("openclaw") == "OpenClaw"
     assert harness_display_name("telos") == "Telos"
-    # 别名先归一化再映射
+    # aliases are normalized first, then mapped
     assert harness_display_name("claude-code") == "Claude Code"
-    # 非 harness 名（proxy 的伪 harness）原样返回
+    # a non-harness name (proxy's pseudo-harness) is returned unchanged
     assert harness_display_name("passthrough") == "passthrough"
     assert harness_display_name("rtk-only") == "rtk-only"
     assert harness_display_name("?") == "?"
@@ -64,18 +64,18 @@ def test_presets_cover_all_harnesses() -> None:
         assert isinstance(preset, HarnessPreset)
         assert preset.wire_protocol == "anthropic"
         assert preset.description
-    # claude-code 是 hermes 的别名 preset
+    # claude-code is an alias preset of hermes
     assert PRESETS["claude-code"].harness_name == "hermes"
     print("✓ test_presets_cover_all_harnesses")
 
 
 def test_transport_for_harness_builds_each_preset() -> None:
-    # 不发网络请求，只验证构造路径 + 鸭子接口挂载正确。
+    # no network request is sent; only verifies the construction path + that the duck interface is wired correctly.
     os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 
     for name in ("openclaw", "hermes", "claude-code"):
         t = TelosTransport.for_harness(name)
-        assert hasattr(t, "messages"), f"{name} 应暴露 Anthropic 接口"
+        assert hasattr(t, "messages"), f"{name} should expose the Anthropic interface"
         assert t.preset.wire_protocol == "anthropic"
     print("✓ test_transport_for_harness_builds_each_preset")
 
@@ -86,13 +86,13 @@ def test_transport_for_harness_rejects_unknown() -> None:
     except ValueError as e:
         assert "does-not-exist" in str(e)
     else:
-        raise AssertionError("未知 harness 应抛 ValueError")
+        raise AssertionError("an unknown harness should raise ValueError")
     print("✓ test_transport_for_harness_rejects_unknown")
 
 
 def test_pipeline_canonicalizes_alias_override() -> None:
-    # 调用方传别名 claude-code，result.harness 应归一化成 hermes，
-    # 保证 usage log / dashboard 与自动检测出的 hermes 一致。
+    # the caller passes the alias claude-code; result.harness should be normalized to hermes,
+    # ensuring the usage log / dashboard stay consistent with the auto-detected hermes.
     r = process_anthropic_request(
         _HERMES_REQ, session_id="t-alias", harness_name="claude-code",
     )

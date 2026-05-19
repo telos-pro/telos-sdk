@@ -1,13 +1,15 @@
-"""Session inspector —— 旁路存储每个 session 的实时 IR / usage / 工具调用
-快照，供 ``/__telos/developer`` 页面渲染。
+"""Session inspector -- stores a side-channel snapshot of each session's live IR / usage /
+tool calls, for rendering the ``/__telos/developer`` page.
 
-设计：
-- 与 ``BridgeSessionState`` 平行：bridge 自己只关心 ref-pool / 统计计数，
-  inspector 关心"开发者要看的诊断"，互不污染。
-- 完全在内存，重启即丢；高频写、低频读（每 GET 重新渲染整页）。
-- 有界 LRU：超过 ``max_size`` 时淘汰最久未访问的 session。
-- 不依赖 aiohttp / 任何 server-side 库——所有 server 路径都从 inspector
-  读，所以 inspector 可独立 unit-test。
+Design:
+- Parallel to ``BridgeSessionState``: the bridge itself only cares about the ref-pool /
+  statistics counters, the inspector cares about "the diagnostics a developer wants to
+  see", and they do not pollute each other.
+- Entirely in memory, lost on restart; high-frequency writes, low-frequency reads (the
+  whole page is re-rendered on each GET).
+- Bounded LRU: evicts the least-recently-accessed session when exceeding ``max_size``.
+- Does not depend on aiohttp / any server-side library -- all server paths read from the
+  inspector, so the inspector can be unit-tested independently.
 """
 
 from __future__ import annotations
@@ -18,16 +20,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-INSPECTOR_HISTORY = 25  # 每个 session 保留最近 N 次 call 的快照
+INSPECTOR_HISTORY = 25  # keep a snapshot of the most recent N calls per session
 DEFAULT_MAX_SESSIONS = 10_000
 
 
 @dataclass
 class ToolStat:
-    """单个工具在某 session 内的累计调用统计。
+    """Cumulative call statistics for a single tool within a session.
 
-    ``invocations`` 来自 assistant 发起的 tool_use；``result_chars_*``
-    来自 user message 内的 tool_result（通过 tool_use_id 关联到工具名）。
+    ``invocations`` comes from the assistant-initiated tool_use; ``result_chars_*``
+    comes from the tool_result inside user messages (linked to the tool name via tool_use_id).
     """
     name: str
     invocations: int = 0
@@ -55,7 +57,7 @@ class ToolStat:
 
 @dataclass
 class SessionInspectorEntry:
-    """单 session 的全部 inspector 数据。"""
+    """All inspector data for a single session."""
 
     session_id: str
     created_at: float = field(default_factory=time.time)
@@ -85,10 +87,11 @@ class SessionInspectorEntry:
         harness: str,
         raw_messages: list[dict[str, Any]] | None = None,
     ) -> None:
-        """一次 call 完成后，累加 inspector 状态。
+        """After a call completes, accumulate inspector state.
 
-        在 ``calls`` 历史里登记一条简短摘要（带"上一轮"对比的 Δ），并
-        通过 ``tool_use_id`` 把后续 ``tool_result`` 关联回工具名。
+        Registers a short summary in the ``calls`` history (with a "previous turn" Δ
+        comparison), and links a subsequent ``tool_result`` back to the tool name via
+        ``tool_use_id``.
         """
         self.last_seen = time.time()
         self.last_layout = layout
@@ -98,7 +101,7 @@ class SessionInspectorEntry:
         self.last_model = model
         self.last_harness = harness
 
-        # 当前段 chars 总和（每段 pin+fold+drop）
+        # Total chars of the current segments (pin+fold+drop per segment)
         segs = layout.get("segments") or {}
         cur_seg = {
             seg: sum(b.get("chars", 0) for b in (segs.get(seg) or {}).values())
@@ -127,7 +130,7 @@ class SessionInspectorEntry:
         if len(self.calls) > INSPECTOR_HISTORY:
             del self.calls[: -INSPECTOR_HISTORY]
 
-        # 更新工具统计
+        # Update tool statistics
         for u in tool_uses:
             name = u.get("name") or "?"
             stat = self.tools_stat.setdefault(name, ToolStat(name=name))
@@ -139,7 +142,7 @@ class SessionInspectorEntry:
             tid = r.get("tool_use_id")
             name = None
             if tid:
-                # 反查最近 calls 历史里 use.id == tid 的工具名
+                # Look back through recent calls history for the tool name where use.id == tid
                 for c in reversed(self.calls):
                     for u in c.get("tool_uses") or []:
                         if u.get("id") == tid:
@@ -153,7 +156,7 @@ class SessionInspectorEntry:
 
 
 class SessionInspector:
-    """``session_id → SessionInspectorEntry``，有界 LRU。"""
+    """``session_id → SessionInspectorEntry``, a bounded LRU."""
 
     def __init__(self, max_size: int = DEFAULT_MAX_SESSIONS) -> None:
         self._max = max_size
@@ -180,7 +183,7 @@ class SessionInspector:
 
 
 def entry_to_json(entry: SessionInspectorEntry) -> dict[str, Any]:
-    """``SessionInspectorEntry`` → JSON-safe dict（给 /__telos/developer.json 用）。"""
+    """``SessionInspectorEntry`` → JSON-safe dict (for /__telos/developer.json)."""
     return {
         "session_id": entry.session_id,
         "model": entry.last_model,

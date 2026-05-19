@@ -208,14 +208,17 @@ slug 一旦 `register()` 就**冻结**:内容可变(`fold()`),slug 不能变。`
 
 ## ⬢ &nbsp;看得见的成本 · savings dashboard
 
-任何 TELOS 入口(proxy / SDK transport)都会把每次 call 的 normalized usage 追加进 `usage_log` jsonl,聚合成单文件 HTML(零 JS、离线可开):
+任何 TELOS 入口(gateway / SDK transport)都会把每次 call 的 normalized usage 追加进 `usage_log` jsonl,聚合成单文件 HTML(零 JS、离线可开):
 
 ```bash
-telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html
+# 一行安装
+pip install telos-sdk          # 或：brew install telos-sdk（见 packaging/）
 
-# proxy 内嵌的自动刷新看板
-telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl
-open http://127.0.0.1:7171/__telos/dashboard
+# 自动检测 harness、注入配置、启动 gateway
+telos init
+
+# 浏览器打开实时看板
+telos dashboard
 ```
 
 看板算的是**绝对量**:累计 cache_read、cost saved = cache_read ×(input_price − cache_read_price)、token mix、按 harness / model / session 三维拆分。

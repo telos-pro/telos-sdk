@@ -1,8 +1,9 @@
-"""HTTP 头 harness 检测 + proxy per-client 记忆的单测（无网络）。
+"""Unit tests for HTTP-header harness detection + proxy per-client memory (no network).
 
-复现并验证修复:Claude Code 用 Haiku 发的辅助请求(标题生成 / 话题检测)
-没有工具、没有 ``<system-reminder>`` 标签,纯内容检测会误判成 openclaw。
-引入 HTTP 头检测 + proxy per-client 记忆后,这些请求也能正确识别为 hermes。
+Reproduces and verifies the fix: Claude Code's auxiliary requests sent via Haiku (title
+generation / topic detection) have no tools and no ``<system-reminder>`` tag, so pure
+content detection misclassifies them as openclaw. After introducing HTTP-header detection
+and proxy per-client memory, these requests are also correctly identified as hermes.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from telos.scripts.telos_anthropic_transport import (
 )
 
 
-# Claude Code 主对话请求:有工具 + system-reminder
+# Claude Code main-conversation request: has tools + system-reminder
 _MAIN_REQ = {
     "model": "claude-opus-4-7",
     "system": [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI."}],
@@ -24,7 +25,7 @@ _MAIN_REQ = {
         {"type": "text", "text": "fix it <system-reminder>cwd=/repo</system-reminder>"}]}],
 }
 
-# Claude Code 辅助请求:Haiku 标题生成——无工具、无标签,内容上毫无 harness 特征
+# Claude Code auxiliary request: Haiku title generation -- no tools, no tags, no harness signal in the content
 _AUX_REQ = {
     "model": "claude-haiku-4-5-20251001",
     "system": [{"type": "text", "text": "Summarize this conversation in 5-10 words."}],
@@ -40,7 +41,7 @@ _AUX_REQ = {
 def test_headers_user_agent_identifies_claude_code() -> None:
     assert _detect_harness_from_headers(
         {"User-Agent": "claude-cli/1.2.3 (external, cli)"}) == "hermes"
-    # key 大小写不敏感
+    # key is case-insensitive
     assert _detect_harness_from_headers(
         {"user-agent": "Claude-CLI/9.9"}) == "hermes"
     print("✓ test_headers_user_agent_identifies_claude_code")
@@ -60,21 +61,21 @@ def test_headers_unknown_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _detect_harness_signal —— 区分确信信号 vs 兜底
+# _detect_harness_signal -- distinguishes a confident signal vs a fallback
 # ---------------------------------------------------------------------------
 
 def test_signal_header_classifies_toolless_aux_request() -> None:
-    # 关键复现:tool-less 辅助请求,内容检测必然 miss——
+    # key reproduction: a tool-less auxiliary request, content detection will inevitably miss --
     ua = {"user-agent": "claude-cli/1.2.3"}
-    assert _detect_harness_signal(_AUX_REQ) is None          # 无头 → 无信号
-    assert _detect_harness_signal(_AUX_REQ, ua) == "hermes"  # 有头 → 确信 hermes
+    assert _detect_harness_signal(_AUX_REQ) is None          # no header → no signal
+    assert _detect_harness_signal(_AUX_REQ, ua) == "hermes"  # has header → confident hermes
     print("✓ test_signal_header_classifies_toolless_aux_request")
 
 
 def test_signal_content_rules_still_work() -> None:
-    # 富内容请求即使没有头也能确信识别
+    # a content-rich request can be confidently identified even without a header
     assert _detect_harness_signal(_MAIN_REQ) == "hermes"
-    # 纯 openclaw 形状(无工具无标签无头)→ 无确信信号
+    # a pure openclaw shape (no tools, no tags, no header) → no confident signal
     openclaw_req = {"model": "claude-opus-4-7",
                     "system": [{"type": "text", "text": "You are an agent."}],
                     "messages": [{"role": "user", "content": "hi"}]}
@@ -83,19 +84,19 @@ def test_signal_content_rules_still_work() -> None:
 
 
 def test_detect_harness_backcompat() -> None:
-    # 单参数调用(SDK transport / replay / 老测试)仍可用,兜底 openclaw
+    # single-argument calls (SDK transport / replay / old tests) still work, falling back to openclaw
     assert _detect_harness(_MAIN_REQ) == "hermes"
-    assert _detect_harness(_AUX_REQ) == "openclaw"           # 无头 → 兜底
+    assert _detect_harness(_AUX_REQ) == "openclaw"           # no header → fallback
     assert _detect_harness(_AUX_REQ, {"x-app": "cli"}) == "hermes"
     print("✓ test_detect_harness_backcompat")
 
 
 # ---------------------------------------------------------------------------
-# proxy per-client 记忆
+# proxy per-client memory
 # ---------------------------------------------------------------------------
 
 class _FakeRequest:
-    """只暴露 ``headers`` —— ``_resolve_harness`` 只用到这个。"""
+    """Exposes only ``headers`` -- that is all ``_resolve_harness`` uses."""
 
     def __init__(self, headers: dict[str, str]) -> None:
         self.headers = headers
@@ -104,18 +105,18 @@ class _FakeRequest:
 def test_proxy_resolves_aux_request_via_header() -> None:
     proxy = ProxyApp()
     ua = {"x-api-key": "k1", "user-agent": "claude-cli/1.2.3"}
-    # 辅助请求自带 Claude Code 的 User-Agent → 直接判 hermes
+    # the auxiliary request carries Claude Code's User-Agent → directly judged hermes
     assert proxy._resolve_harness(_FakeRequest(ua), _AUX_REQ) == "hermes"
     print("✓ test_proxy_resolves_aux_request_via_header")
 
 
 def test_proxy_client_memory_covers_headerless_aux_request() -> None:
     proxy = ProxyApp()
-    # turn 1:主对话,带 Claude Code UA → pin 该 client 为 hermes
+    # turn 1: main conversation, with Claude Code UA → pin this client to hermes
     main_hdr = {"x-api-key": "k2", "user-agent": "claude-cli/1.2.3"}
     assert proxy._resolve_harness(_FakeRequest(main_hdr), _MAIN_REQ) == "hermes"
-    # turn 2:同一 client(同 x-api-key)发 tool-less 辅助请求,且这次连
-    # User-Agent 都没有——靠 per-client 记忆继承,不再误判成 openclaw。
+    # turn 2: the same client (same x-api-key) sends a tool-less auxiliary request, and this time
+    # it doesn't even have a User-Agent -- relying on per-client memory inheritance, it is no longer misclassified as openclaw.
     aux_hdr = {"x-api-key": "k2"}
     assert proxy._resolve_harness(_FakeRequest(aux_hdr), _AUX_REQ) == "hermes"
     print("✓ test_proxy_client_memory_covers_headerless_aux_request")
@@ -123,7 +124,7 @@ def test_proxy_client_memory_covers_headerless_aux_request() -> None:
 
 def test_proxy_unknown_client_falls_back_to_openclaw() -> None:
     proxy = ProxyApp()
-    # 没有任何信号、没有记忆的全新 client → 兜底 openclaw
+    # a brand-new client with no signal and no memory → falls back to openclaw
     hdr = {"x-api-key": "k3"}
     assert proxy._resolve_harness(_FakeRequest(hdr), _AUX_REQ) == "openclaw"
     print("✓ test_proxy_unknown_client_falls_back_to_openclaw")
@@ -131,7 +132,7 @@ def test_proxy_unknown_client_falls_back_to_openclaw() -> None:
 
 def test_proxy_explicit_override_wins() -> None:
     proxy = ProxyApp(harness_override="claude-code")
-    # 显式覆盖最优先,且别名归一化成 canonical 名
+    # an explicit override takes top priority, and the alias is normalized to the canonical name
     hdr = {"x-api-key": "k4", "user-agent": "python-httpx/0.27"}
     assert proxy._resolve_harness(_FakeRequest(hdr), _AUX_REQ) == "hermes"
     print("✓ test_proxy_explicit_override_wins")

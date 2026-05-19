@@ -1,15 +1,18 @@
-"""会话语料库 —— proxy 把每次 ``/v1/messages`` 的**原始请求**录到磁盘，
-供 ``telos replay`` 之后重放对照。
+"""Session corpus —— the proxy records the **raw request** of every
+``/v1/messages`` call to disk, so that ``telos replay`` can replay them for
+comparison later.
 
-为什么只录请求、不录响应：Anthropic ``/v1/messages`` 是无状态的，第 N 轮
-的请求体里 ``messages[]`` 已经包含了前 N-1 轮的全部 assistant 回复和
-tool_result。所以「请求序列」本身就是完整的可重放轨迹；assistant 响应
-不必单独存（也避免把模型输出落盘）。
+Why only requests are recorded, not responses: Anthropic ``/v1/messages`` is
+stateless; the request body of turn N already contains all assistant replies and
+tool_results from the prior N-1 turns. So the "request sequence" itself is a
+complete, replayable trace; assistant responses need not be stored separately
+(which also avoids writing model output to disk).
 
-录的是 client→proxy 的**原始**请求（RTK 过滤前、TELOS 改写前），即「规范
-输入」。replay 时每个 mode 各自从同一份规范输入重新推导 wire，对照才公平。
+What is recorded is the **raw** client→proxy request (before RTK filtering,
+before TELOS rewriting), i.e. the "canonical input". On replay each mode
+re-derives the wire from the same canonical input, so the comparison is fair.
 
-默认目录 ``~/.telos/corpus/``，一个 session 一个 ``<session>.jsonl``。
+The default directory is ``~/.telos/corpus/``, one ``<session>.jsonl`` per session.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ DEFAULT_CORPUS_DIR = Path.home() / ".telos" / "corpus"
 
 
 def _safe_name(session_id: str) -> str:
-    """把 session_id 变成安全的文件名（非字母数字 . _ - 一律替换成 _）。"""
+    """Turn a session_id into a safe filename (anything not alphanumeric . _ - is replaced with _)."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:120]
     return cleaned or "anon"
 
@@ -38,10 +41,12 @@ def record_call(
     *,
     ts: float | None = None,
 ) -> None:
-    """把一次调用的原始请求 append 到 ``<corpus_dir>/<session>.jsonl``。
+    """Append the raw request of one call to ``<corpus_dir>/<session>.jsonl``.
 
-    调用方负责保证 ``request`` 是 client 发来的原始 body（未经 RTK / TELOS
-    改写）。本函数从不抛错由调用方决定——这里照常抛，proxy 侧包 try。
+    The caller is responsible for ensuring ``request`` is the raw body sent by the
+    client (not rewritten by RTK / TELOS). This function leaves it to the caller
+    to decide whether to raise —— it raises normally here, and the proxy side
+    wraps it in a try.
     """
     corpus_dir.mkdir(parents=True, exist_ok=True)
     path = corpus_dir / f"{_safe_name(session_id)}.jsonl"
@@ -78,7 +83,7 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:
 
 
 def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
-    """扫描语料目录，返回每个 session 的摘要（按 last_ts 倒序）。"""
+    """Scan the corpus directory, return a summary of each session (descending by last_ts)."""
     if not corpus_dir.exists():
         return []
     infos: list[CorpusSessionInfo] = []
@@ -100,13 +105,13 @@ def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
 
 
 def load_session(corpus_dir: Path, session_id: str) -> list[dict[str, Any]]:
-    """读出某个 session 的全部轮次，按 ``call_index`` 升序。
+    """Read all turns of a session, in ascending ``call_index`` order.
 
-    ``session_id`` 既可传真实 id，也可传文件名 stem —— 两种都能命中。
-    找不到时抛 ``FileNotFoundError``。
+    ``session_id`` can be either a real id or a filename stem —— both will match.
+    Raises ``FileNotFoundError`` if not found.
     """
     candidates = [corpus_dir / f"{_safe_name(session_id)}.jsonl"]
-    # 真实 id 与 safe 文件名不一致时，回退到全目录扫描匹配内部 session_id。
+    # When the real id and the safe filename differ, fall back to scanning the whole directory for the internal session_id.
     if not candidates[0].exists() and corpus_dir.exists():
         for path in corpus_dir.glob("*.jsonl"):
             recs = _read_lines(path)
@@ -119,4 +124,4 @@ def load_session(corpus_dir: Path, session_id: str) -> list[dict[str, Any]]:
             recs.sort(key=lambda r: int(r.get("call_index") or 0))
             return recs
     raise FileNotFoundError(
-        f"corpus 里找不到 session {session_id!r}（目录 {corpus_dir}）")
+        f"session {session_id!r} not found in corpus (directory {corpus_dir})")

@@ -1,15 +1,15 @@
-"""OpenClaw harness plugin。
+"""OpenClaw harness plugin.
 
-输入约定：OpenClaw 的请求体形如 Anthropic ``/v1/messages``，外加可选的
-``metadata.openclaw`` 字段。
+Input contract: OpenClaw's request body is shaped like Anthropic
+``/v1/messages``, plus an optional ``metadata.openclaw`` field.
 
-带类规则（与 TELOS 协议 §7.1 一致）：
+Band rules (consistent with TELOS protocol §7.1):
 - ``tools[]``                                 → PIN
-- ``system[]`` 元素                            → PIN
-- 大文档 / 大文件内容（>2KB 文本）               → FOLD，搬到 ref-pool
-- ``messages[i].role=user`` 文本               → 走 ``_user_split.split_user_text``
-- ``messages[i].role=assistant``                → FOLD（整条）
-- ``role=user`` 的 ``tool_result`` 内容         → FOLD
+- ``system[]`` elements                       → PIN
+- large documents / large file content (>2KB text) → FOLD, moved to the ref-pool
+- ``messages[i].role=user`` text               → goes through ``_user_split.split_user_text``
+- ``messages[i].role=assistant``                → FOLD (the whole message)
+- the ``tool_result`` content of ``role=user``  → FOLD
 """
 
 from __future__ import annotations
@@ -28,25 +28,26 @@ from telos.ir import (
 )
 
 
-_REFPOOL_THRESHOLD = 2048  # 字节阈值；超过此长度的文本搬到 ref-pool
+_REFPOOL_THRESHOLD = 2048  # byte threshold; text longer than this is moved to the ref-pool
 
-# Anthropic 内置工具的 type 前缀（``computer_``/``bash_``/``text_editor_``/
-# ``web_search_``）。识别后打 ``source=builtin`` 标签，使其在 canonical sort
-# 中始终排在 MCP / user 工具前面，保护 PIN 段前缀稳定性（见 bridge.py
-# ``_tool_sort_key``）。
+# The type prefixes of Anthropic built-in tools (``computer_``/``bash_``/
+# ``text_editor_``/``web_search_``). Once recognized they are tagged
+# ``source=builtin``, so that in the canonical sort they always come before
+# MCP / user tools, protecting the prefix stability of the PIN segment (see
+# bridge.py ``_tool_sort_key``).
 _ANTHROPIC_BUILTIN_TYPE_PREFIXES = (
     "computer_", "bash_", "text_editor_", "web_search_",
 )
 
 
 def _classify_anthropic_tool(t: Mapping[str, Any]) -> tuple[str, str | None]:
-    """返回 ``(source, mcp_server)`` —— 用于 ``TelosBlock.extra``。
+    """Return ``(source, mcp_server)`` — used for ``TelosBlock.extra``.
 
-    优先级：
-    1. 上游 ``metadata.source`` 显式覆盖（``"builtin"|"mcp"|"user"``）
-    2. ``type`` 命中 Anthropic builtin 前缀 → ``builtin``
-    3. 含 ``server`` / ``mcp_server`` 字段 → ``mcp``
-    4. 否则 ``user``
+    Priority:
+    1. an explicit override from upstream ``metadata.source`` (``"builtin"|"mcp"|"user"``)
+    2. ``type`` matches an Anthropic builtin prefix → ``builtin``
+    3. contains a ``server`` / ``mcp_server`` field → ``mcp``
+    4. otherwise ``user``
     """
     meta = t.get("metadata") if isinstance(t, Mapping) else None
     if isinstance(meta, Mapping):
@@ -115,7 +116,7 @@ class OpenClawPlugin(HarnessPlugin):
                     ref_slug=slug,
                     source_tag="openclaw/system-large",
                 )
-                # 在 system 段留一个 PIN 引用
+                # leave a PIN reference in the system segment
                 system_blocks.append(TelosBlock(
                     id=f"system/{i}-ref",
                     band=Band.PIN,
@@ -178,8 +179,8 @@ class OpenClawPlugin(HarnessPlugin):
                         payload=item,
                         source_tag="openclaw/other",
                     ))
-            # 修复：多 content block 拼接会让 (PIN,DROP,PIN,DROP,...) 违反 §5。
-            # 在 message 级别按 band 稳定排序，恢复 pin* → fold* → drop*。
+            # Fix: concatenating multiple content blocks would make (PIN,DROP,PIN,DROP,...) violate §5.
+            # Stably sort by band at the message level, restoring pin* → fold* → drop*.
             messages.append(TelosMessage(role=role, blocks=enforce_band_order(blocks)))
 
         return TelosIR(

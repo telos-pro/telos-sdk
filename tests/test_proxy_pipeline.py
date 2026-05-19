@@ -1,4 +1,4 @@
-"""``telos.proxy.pipeline`` 的纯函数单测（无网络）。"""
+"""Pure-function unit tests for ``telos.proxy.pipeline`` (no network)."""
 
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ def test_pipeline_detects_hermes() -> None:
 
 
 def test_pipeline_injects_cache_control() -> None:
-    """tools 段或 system 段必须出现 cache_control（Anthropic BP 标记）。"""
+    """The tools segment or system segment must contain cache_control (an Anthropic BP marker)."""
     r = process_anthropic_request(_OPENCLAW_REQ, session_id="t-cc")
     bins = list(r.wire.get("tools", [])) + list(r.wire.get("system", []))
     assert any("cache_control" in b for b in bins), \
-        f"wire 没有任何 cache_control 标记: {r.wire}"
-    assert r.plan_slots, "EmitPlan 应至少返回一个 slot"
+        f"wire has no cache_control marker at all: {r.wire}"
+    assert r.plan_slots, "EmitPlan should return at least one slot"
     print(f"✓ test_pipeline_injects_cache_control (slots={r.plan_slots})")
 
 
@@ -61,7 +61,7 @@ def test_pipeline_explicit_harness_override() -> None:
     r = process_anthropic_request(_HERMES_REQ, session_id="t-ov",
                                    harness_name="openclaw")
     assert r.harness == "openclaw", \
-        "显式 harness_name 应覆盖自动检测"
+        "an explicit harness_name should override auto-detection"
     print("✓ test_pipeline_explicit_harness_override")
 
 
@@ -78,9 +78,9 @@ def test_pipeline_passthrough_fields() -> None:
 
 
 def test_detect_hermes_marker_in_user_message() -> None:
-    """Claude Code 把 ``<system-reminder>`` 注入到 user message 而非 system。
+    """Claude Code injects ``<system-reminder>`` into the user message rather than system.
 
-    旧实现只扫 system 段，会把这种请求误判成 openclaw。
+    The old implementation scanned only the system segment and would misclassify such requests as openclaw.
     """
     req = {
         "model": "claude-opus-4-7",
@@ -98,7 +98,7 @@ def test_detect_hermes_marker_in_user_message() -> None:
 
 
 def test_detect_hermes_command_name_in_user_message() -> None:
-    """``<command-name>`` 也是 Hermes envelope（slash command 面板）。"""
+    """``<command-name>`` is also a Hermes envelope (the slash command panel)."""
     req = {
         "model": "claude-opus-4-7",
         "messages": [
@@ -112,7 +112,7 @@ def test_detect_hermes_command_name_in_user_message() -> None:
 
 
 def test_detect_hermes_via_tool_fingerprint() -> None:
-    """首轮无 reminder、无 thinking 时，Claude Code 的 tool 集合也是强指纹。"""
+    """On the first turn with no reminder and no thinking, Claude Code's tool set is also a strong fingerprint."""
     req = {
         "model": "claude-opus-4-7",
         "tools": [
@@ -131,7 +131,7 @@ def test_detect_hermes_via_tool_fingerprint() -> None:
 
 
 def test_detect_openclaw_when_no_signals() -> None:
-    """既没有 envelope 标签、没有 thinking、tools 又不像 Claude Code → openclaw。"""
+    """No envelope tags, no thinking, and tools that don't look like Claude Code → openclaw."""
     req = {
         "model": "claude-opus-4-7",
         "tools": [{"name": "search_api", "input_schema": {"type": "object"}}],
@@ -145,7 +145,7 @@ def test_detect_openclaw_when_no_signals() -> None:
 
 
 def test_detect_substring_no_false_positive() -> None:
-    """裸字符串 ``<system-reminder>`` 不带闭合标签时不应触发 hermes 判定。"""
+    """A bare ``<system-reminder>`` string without a closing tag should not trigger the hermes verdict."""
     req = {
         "model": "claude-opus-4-7",
         "messages": [
@@ -160,9 +160,9 @@ def test_detect_substring_no_false_positive() -> None:
 
 
 def test_sticky_harness_across_calls() -> None:
-    """同一 session_state 下，首轮识别结果应被锁定，避免后续翻转。"""
+    """Under the same session_state, the first-turn detection result should be locked to avoid later flipping."""
     state = BridgeSessionState()
-    # 第一轮：典型的 Claude Code 请求
+    # turn 1: a typical Claude Code request
     hermes_req = {
         "model": "claude-opus-4-7",
         "max_tokens": 1024,
@@ -179,7 +179,7 @@ def test_sticky_harness_across_calls() -> None:
     assert r1.harness == "hermes"
     assert state.sticky_harness == "hermes"
 
-    # 第二轮：构造一个会被裸检测识别成 openclaw 的请求（无任何 hermes 指纹）
+    # turn 2: construct a request that bare detection would identify as openclaw (no hermes fingerprint at all)
     follow_up = {
         "model": "claude-opus-4-7",
         "max_tokens": 1024,
@@ -190,21 +190,21 @@ def test_sticky_harness_across_calls() -> None:
     }
     r2 = process_anthropic_request(follow_up, session_id="t-sticky",
                                      session_state=state)
-    # session 已锁定 → 应仍是 hermes
+    # the session is already locked → it should still be hermes
     assert r2.harness == "hermes", \
-        f"sticky_harness 应让后续 call 仍走 hermes，得到 {r2.harness}"
+        f"sticky_harness should keep subsequent calls on hermes, got {r2.harness}"
     print("✓ test_sticky_harness_across_calls")
 
 
 def test_explicit_harness_overrides_sticky() -> None:
-    """显式 harness_name 必须能覆盖 sticky_harness。"""
+    """An explicit harness_name must be able to override sticky_harness."""
     state = BridgeSessionState(sticky_harness="hermes")
     req = dict(_OPENCLAW_REQ)
     r = process_anthropic_request(req, session_id="t-ov2",
                                     session_state=state,
                                     harness_name="openclaw")
     assert r.harness == "openclaw"
-    # 显式覆盖时**不**改写 sticky_harness（保留 session 的"自然"识别）
+    # an explicit override does **not** rewrite sticky_harness (preserving the session's "natural" detection)
     assert state.sticky_harness == "hermes"
     print("✓ test_explicit_harness_overrides_sticky")
 

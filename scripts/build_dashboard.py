@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""生成一份 self-contained 的 HTML dashboard，可视化 prompt_trace + cache 命中。
+"""Generate a self-contained HTML dashboard that visualizes prompt_trace + cache hits.
 
-用法::
+Usage::
 
     python -m telos.scripts.build_dashboard \\
         --results-dir /tmp/telos-telos-runs \\
         [--instance pallets__flask-5014]... \\
         [--out /tmp/telos-telos-runs/benchmark/dashboard.html]
 
-默认扫描 ``<results-dir>/telos-*.prompt_trace.jsonl``，同名配件
-``.usage.jsonl / .result.json / .eval.json`` 会被自动带入。输出一个
-纯静态 HTML（inline SVG + CSS，零 JS 依赖，可离线打开）。
+By default it scans ``<results-dir>/telos-*.prompt_trace.jsonl``, and the
+companion files ``.usage.jsonl / .result.json / .eval.json`` of the same name
+are pulled in automatically. Outputs a purely static HTML (inline SVG + CSS,
+zero JS dependencies, opens offline).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ SEGMENTS = ("tools", "system", "messages")
 
 
 # ---------------------------------------------------------------------------
-# 加载一个 instance 的所有制品
+# Load all artifacts of one instance
 # ---------------------------------------------------------------------------
 
 def _read_jsonl(p: Path) -> list[dict[str, Any]]:
@@ -594,7 +595,7 @@ def render_dashboard(instances: list[dict[str, Any]]) -> str:
     n_eval = sum(1 for i in instances if i["resolved"] is not None)
     n_resolved = sum(1 for i in instances if i["resolved"] is True)
 
-    # ---- aggregates EXCLUDING anomalous (主指标) ----
+    # ---- aggregates EXCLUDING anomalous (primary metrics) ----
     sum_raw = sum(i["totals"]["raw_input"] for i in completed)
     sum_cache = sum(i["totals"]["cache_read"] for i in completed)
     sum_out = sum(i["totals"]["output"] for i in completed)
@@ -619,7 +620,7 @@ def render_dashboard(instances: list[dict[str, Any]]) -> str:
         '<div class="sub">(none)</div>'
     taxonomy_html = render_taxonomy(instances)
 
-    # 异常原因聚合
+    # Aggregate anomaly reasons
     reason_counter: dict[str, int] = defaultdict(int)
     for i in anomalous:
         key = (i.get("anomaly_reason") or "unknown").split(":")[0]
@@ -683,11 +684,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--results-dir", default="/tmp/telos-telos-runs",
-                    help="扫描该目录下的 telos-*.prompt_trace.jsonl")
+                    help="scan this directory for telos-*.prompt_trace.jsonl")
     ap.add_argument("--out", default=None,
-                    help="输出 HTML 路径（默认 <results-dir>/benchmark/dashboard.html）")
+                    help="output HTML path (default: <results-dir>/benchmark/dashboard.html)")
     ap.add_argument("--instance", action="append",
-                    help="只包含指定 instance_id（可重复）")
+                    help="include only the specified instance_id (repeatable)")
     args = ap.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -700,7 +701,7 @@ def main() -> None:
         raise SystemExit(f"no telos-*.prompt_trace.jsonl under {results_dir}")
 
     instances = [load_instance(t) for t in traces]
-    # 异常在前 → 未 resolved 次 → 字典序
+    # anomalous first → unresolved next → lexicographic order
     instances.sort(key=lambda x: (
         x["status"] == "completed",   # anomalous first
         x["resolved"] is True,

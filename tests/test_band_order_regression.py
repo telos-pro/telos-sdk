@@ -1,11 +1,11 @@
-"""回归测试：Claude Code / Hermes 风格的多 content-block user message。
+"""Regression test: Claude Code / Hermes-style multi-content-block user messages.
 
-§5 顺序不变量：message 段里 ``tool_result`` 块必须物理居首，其后
-``pin* → fold* → drop*``。
+§5 ordering invariant: in the message segment, ``tool_result`` blocks must physically
+come first, followed by ``pin* → fold* → drop*``.
 
-历史 bug：harness 把 ``tool_result`` 定为 FOLD、用户提问 text 定为 PIN，
-``enforce_band_order`` 按纯 band 排序会把 tool_result 排到 text 之后，
-而 Anthropic 要求 user message 的 tool_result 物理居首 → API 400。
+Historical bug: the harness classifies ``tool_result`` as FOLD and the user's question text
+as PIN; ``enforce_band_order`` sorting purely by band would place tool_result after the text,
+whereas Anthropic requires the tool_result of a user message to come physically first → API 400.
 """
 
 from __future__ import annotations
@@ -18,12 +18,12 @@ from telos.proxy.pipeline import process_anthropic_request
 _CLAUDE_CODE_USER_MSG = {
     "role": "user",
     "content": [
-        # 上一轮的 tool_result（FOLD）—— 源序在前
+        # the tool_result from the previous turn (FOLD) -- comes first in source order
         {"type": "tool_result", "tool_use_id": "toolu_x",
          "content": [{"type": "text", "text": "<file content...>"}]},
-        # 本轮新提问（PIN）+ envelope（DROP）
+        # this turn's new question (PIN) + envelope (DROP)
         {"type": "text",
-         "text": "请继续修改\n<system-reminder>cwd=/repo</system-reminder>"},
+         "text": "Please continue editing\n<system-reminder>cwd=/repo</system-reminder>"},
     ],
 }
 
@@ -36,7 +36,7 @@ _CLAUDE_CODE_REQ = {
 
 
 def _assert_tool_result_first(msg, where: str) -> None:
-    """断言一条 TelosMessage 里 tool_result 块都排在非 tool_result 之前。"""
+    """Assert that within a TelosMessage all tool_result blocks come before non-tool_result blocks."""
     kinds = [b.kind for b in msg.blocks]
     tr_idx = [i for i, k in enumerate(kinds) if k == "tool_result"]
     if tr_idx:
@@ -51,11 +51,11 @@ def test_hermes_tool_result_stays_first() -> None:
     assert_ir_invariants(ir)  # §5 invariant must hold
 
     user_msg = ir.messages[0]
-    # tool_result 必须是首个 block —— Anthropic 协议硬约束
+    # tool_result must be the first block -- a hard constraint of the Anthropic protocol
     assert user_msg.blocks[0].kind == "tool_result", \
         f"first block must be tool_result, got {[b.kind for b in user_msg.blocks]}"
     _assert_tool_result_first(user_msg, "hermes user_msg")
-    # tool_result 仍是 FOLD band（band 归属不变，只改物理顺序）
+    # tool_result is still the FOLD band (band membership is unchanged, only the physical order)
     assert user_msg.blocks[0].band is Band.FOLD
     print("✓ test_hermes_tool_result_stays_first")
 
@@ -70,10 +70,10 @@ def test_openclaw_tool_result_stays_first() -> None:
 
 
 def test_wire_user_message_leads_with_tool_result() -> None:
-    """端到端：跑完整 TELOS 管线，wire 里 user message 必须 tool_result 居首。
+    """End-to-end: run the full TELOS pipeline; the user message in the wire must have tool_result first.
 
-    这是 Anthropic 400 "tool use concurrency" 的直接回归——修复前 wire 会把
-    tool_result 排到 text 之后。
+    This is a direct regression for the Anthropic 400 "tool use concurrency" error -- before the fix
+    the wire would place tool_result after the text.
     """
     res = process_anthropic_request(
         _CLAUDE_CODE_REQ, session_id="r-w", session_state=None, harness_name=None,
@@ -91,7 +91,7 @@ def test_wire_user_message_leads_with_tool_result() -> None:
 
 
 def test_bridge_accepts_reordered_message() -> None:
-    """Bridge 构造不应抛 TelosInvariantError。"""
+    """Bridge construction should not raise TelosInvariantError."""
     harness = load_harness("hermes")
     engine = load_engine("anthropic")
     ir = harness.parse(_CLAUDE_CODE_REQ, session_id="r-b",
@@ -103,10 +103,10 @@ def test_bridge_accepts_reordered_message() -> None:
 
 
 def test_deeply_interleaved_content() -> None:
-    """病态用例：text, tool_result, text, text, tool_result, text。
+    """Pathological case: text, tool_result, text, text, tool_result, text.
 
-    每个 text 切成 PIN+DROP，每个 tool_result 是 FOLD。重排后必须是
-    tool_result* 居首，其后非 tool_result 块按 pin* → fold* → drop*。
+    Each text splits into PIN+DROP, each tool_result is FOLD. After reordering it must be
+    tool_result* first, followed by non-tool_result blocks in pin* → fold* → drop* order.
     """
     req = {
         "model": "claude-opus-4-7",
@@ -130,7 +130,7 @@ def test_deeply_interleaved_content() -> None:
 
     msg = ir.messages[0]
     _assert_tool_result_first(msg, "interleaved user_msg")
-    # 非 tool_result 块仍严格 pin* → fold* → drop*
+    # non-tool_result blocks are still strictly pin* → fold* → drop*
     rest = [b.band.value for b in msg.blocks if b.kind != "tool_result"]
     assert rest == sorted(rest, key=lambda b: {"pin": 0, "fold": 1, "drop": 2}[b]), \
         f"non-tool_result bands not sorted: {rest}"

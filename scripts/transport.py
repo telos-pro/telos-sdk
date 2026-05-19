@@ -1,22 +1,22 @@
-"""统一 SDK Transport 入口 —— 一键接入 openclaw / hermes / claude-code。
+"""Unified SDK Transport entry point — one-click integration of openclaw / hermes / claude-code.
 
-用法：
+Usage:
 
     from telos.scripts.transport import TelosTransport
 
-    # 方式 1：直接选 harness（推荐）
+    # Option 1: pick a harness directly (recommended)
     transport = TelosTransport.for_harness("claude-code")
     resp = transport.messages.create(model="claude-opus-4-7", system=[...], messages=[...], tools=[...])
 
-    # 方式 2：自动检测（从请求内容猜 harness）
+    # Option 2: auto-detect (guess the harness from request content)
     transport = TelosTransport.auto(session_id="my-session")
 
-每个 harness preset 预配好了：
-- 对应的 harness plugin（请求解析）
-- 默认 engine adapter（wire 生成 + cache 策略）
-- 默认 base_url 和 API key 环境变量
+Each harness preset comes pre-configured with:
+- the corresponding harness plugin (request parsing)
+- the default engine adapter (wire generation + cache policy)
+- the default base_url and API key environment variable
 
-也可以通过 kwargs 覆盖任何默认值。
+Any default can also be overridden via kwargs.
 """
 
 from __future__ import annotations
@@ -29,12 +29,12 @@ from telos.bridge import BridgeSessionState
 
 
 # ---------------------------------------------------------------------------
-# Harness preset 定义
+# Harness preset definitions
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class HarnessPreset:
-    """某个 harness 的完整默认配置。"""
+    """The complete default configuration of a harness."""
     harness_name: str
     engine_name: str
     wire_protocol: Literal["anthropic", "openai"]
@@ -72,14 +72,15 @@ PRESETS: dict[str, HarnessPreset] = {
 
 
 # ---------------------------------------------------------------------------
-# 统一 Transport
+# Unified Transport
 # ---------------------------------------------------------------------------
 
 class TelosTransport:
-    """统一 SDK Transport —— 一键接入 openclaw / hermes / claude-code。
+    """Unified SDK Transport — one-click integration of openclaw / hermes / claude-code.
 
-    ``for_harness("claude-code")`` 返回的实例带 ``messages.create()`` 接口，
-    也统一暴露 ``create(**kwargs)`` 方法。
+    The instance returned by ``for_harness("claude-code")`` carries the
+    ``messages.create()`` interface, and also uniformly exposes a
+    ``create(**kwargs)`` method.
     """
 
     def __init__(
@@ -124,11 +125,11 @@ class TelosTransport:
         return self._preset
 
     def create(self, **kwargs) -> Any:
-        """统一调用入口 —— 路由到 messages.create()。"""
+        """Unified call entry point — routes to messages.create()."""
         return self.messages.create(**kwargs)
 
     # ------------------------------------------------------------------
-    # 工厂方法
+    # Factory methods
     # ------------------------------------------------------------------
 
     @classmethod
@@ -144,14 +145,14 @@ class TelosTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ) -> "TelosTransport":
-        """按 harness 名一键创建 transport。
+        """Create a transport with one click by harness name.
 
-        支持的 harness 名：
+        Supported harness names:
         - ``"openclaw"``    — OpenClaw agent
         - ``"hermes"``      — Claude Code / Hermes
-        - ``"claude-code"`` — 同 hermes
+        - ``"claude-code"`` — same as hermes
 
-        所有配置项都有合理默认值；传 kwargs 覆盖。
+        All configuration items have sensible defaults; pass kwargs to override.
 
         Example::
 
@@ -191,9 +192,9 @@ class TelosTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ) -> "TelosTransport":
-        """自动检测模式 —— harness_name=None，首次请求时从内容推断。
+        """Auto-detect mode — harness_name=None, inferred from content on the first request.
 
-        默认走 Anthropic wire（openclaw / hermes 自动切换）。
+        Defaults to the Anthropic wire (openclaw / hermes switch automatically).
         """
         from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
         preset = HarnessPreset(
@@ -225,5 +226,5 @@ class TelosTransport:
 
     @staticmethod
     def available_presets() -> dict[str, str]:
-        """返回所有可用 preset 名 → 描述的映射。"""
+        """Return a mapping of all available preset names → descriptions."""
         return {name: p.description for name, p in PRESETS.items()}

@@ -1,4 +1,4 @@
-"""``telos.corpus`` 单测：录制 / 加载 / 列举会话语料。"""
+"""``telos.corpus`` unit tests: recording / loading / listing session corpora."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def test_record_and_load_roundtrip() -> None:
 
 
 def test_load_session_sorts_by_call_index() -> None:
-    """乱序写入也应按 call_index 升序读出。"""
+    """Out-of-order writes should still be read back in ascending call_index order."""
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
         record_call(cd, "s", 3, _sample_request("c"))
@@ -54,12 +54,12 @@ def test_list_sessions() -> None:
 
 
 def test_load_by_inner_id_when_filename_differs() -> None:
-    """session_id 含特殊字符 → 文件名被 sanitize；仍应能按真实 id 加载。"""
+    """session_id with special characters → filename is sanitized; should still load by the real id."""
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
         weird = "client/key:abc 123"
         record_call(cd, weird, 1, _sample_request("hi"))
-        # 文件名被 sanitize，但 load_session 能按内部 session_id 回找
+        # the filename is sanitized, but load_session can find it back by the internal session_id
         turns = load_session(cd, weird)
         assert len(turns) == 1
         assert turns[0]["session_id"] == weird
@@ -73,7 +73,7 @@ def test_load_missing_session_raises() -> None:
         except FileNotFoundError:
             print("✓ test_load_missing_session_raises")
             return
-        raise AssertionError("应抛 FileNotFoundError")
+        raise AssertionError("should raise FileNotFoundError")
 
 
 def test_empty_corpus_lists_nothing() -> None:

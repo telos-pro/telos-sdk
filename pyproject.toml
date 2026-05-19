@@ -20,6 +20,7 @@ keywords = [
     "anthropic",
     "openai",
     "proxy",
+    "gateway",
     "agent",
 ]
 classifiers = [
@@ -59,6 +60,7 @@ packages = [
     "telos.tests",
     "telos.scripts",
     "telos.proxy",
+    "telos.gateway",
     "telos.init",
     "telos.output_filter",
     "telos.replay",

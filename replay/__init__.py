@@ -1,30 +1,36 @@
-"""``telos replay`` —— 录制 → 重放对照引擎。
+"""``telos replay`` —— record → replay comparison engine.
 
-原理
-----
-从语料库取出某个真实会话录下的「请求序列」，对每一种 mode
-（none / telos / rtk / both）把**逐字节相同**的轮次重新跑一遍管线、发到
-上游，只取 usage。因为每个 mode 看到的输入完全一致，唯一变量就是优化
-开关本身 —— 这是受控实验，比「跑两个独立 session」少了 trajectory 分叉
-的混杂。
+Principle
+---------
+Take the "request sequence" recorded from a real session in the corpus, and for
+each mode (none / telos / rtk / both) re-run the **byte-for-byte identical**
+turns through the pipeline and send them upstream, taking only the usage. Because
+every mode sees exactly the same input, the only variable is the optimization
+switch itself —— this is a controlled experiment, with less confounding from
+trajectory divergence than "running two independent sessions".
 
-为压低成本，重放时把 ``max_tokens`` 强制设成 1（并去掉 ``stream`` /
-``tool_choice`` / ``thinking``）：我们只关心 prompt / prefill 侧的
-``cache_read`` / ``cache_write`` 计费，输出生成被刻意阉割。一次完整真实
-会话 + 每 mode 一串廉价 prefill，比「N 个 mode 各跑完整 agent 会话」便宜
-一两个数量级。
+To keep cost down, replay forces ``max_tokens`` to 1 (and strips ``stream`` /
+``tool_choice`` / ``thinking``): we only care about the ``cache_read`` /
+``cache_write`` billing on the prompt / prefill side, and output generation is
+deliberately stubbed. One full real session + a string of cheap prefills per mode
+is one or two orders of magnitude cheaper than "running a full agent session for
+each of N modes".
 
-边界
-----
-- replay 把 trajectory **钉死**了。它测的是「同一段对话在不同编码下的
-  成本」，不是「同一个任务在不同配置下的成本」。捕捉不到二阶效应——比如
-  RTK 缩短工具结果后，真实运行里 agent 下一步可能做出不同决策。
-- 跨 mode 的缓存隔离：默认给每个 mode 注入一个唯一的 system 前缀块
-  （``[telos-replay ns=...]``），让 Anthropic 端的前缀缓存各自独立，
-  避免「先重放的 mode 把缓存暖好、后重放的 mode 白蹭命中」。这块前缀
-  本身只有几个 token、各 mode 等长，不影响相对对照；``cache_isolation=
-  False`` 可关。
-- 测的是 prefill / 缓存计费，不是端到端任务成本。要后者得跑独立 session。
+Limitations
+-----------
+- Replay **pins** the trajectory. It measures "the cost of the same conversation
+  under different encodings", not "the cost of the same task under different
+  configurations". It cannot capture second-order effects —— for example, after
+  RTK shortens a tool result, the agent might make a different decision on the
+  next step in a real run.
+- Cross-mode cache isolation: by default each mode is injected with a unique
+  system prefix block (``[telos-replay ns=...]``), so prefix caching on the
+  Anthropic side is independent per mode, avoiding "an earlier-replayed mode
+  warms the cache and a later-replayed mode freeloads on the hits". This prefix
+  is only a few tokens, equal-length across modes, and does not affect the
+  relative comparison; it can be disabled with ``cache_isolation=False``.
+- It measures prefill / cache billing, not end-to-end task cost. For the latter
+  you must run independent sessions.
 """
 
 from __future__ import annotations
@@ -41,13 +47,14 @@ from telos.proxy.pipeline import process_anthropic_request
 
 _log = logging.getLogger("telos.replay")
 
-# 上游 sender：吃一个 wire dict，返回 Anthropic 风格的 raw usage dict
-# （或 None 表示该轮调用失败）。注入式设计——测试传假 sender，不打网络。
+# Upstream sender: takes a wire dict, returns an Anthropic-style raw usage dict
+# (or None to indicate that turn's call failed). Injection-style design —— tests
+# pass a fake sender and hit no network.
 Sender = Callable[[Mapping[str, Any]], "dict[str, Any] | None"]
 
 
 # ---------------------------------------------------------------------------
-# usage 归一化
+# usage normalization
 # ---------------------------------------------------------------------------
 
 def _normalize(raw: Mapping[str, Any]) -> dict[str, int]:
@@ -60,7 +67,7 @@ def _normalize(raw: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _usage_obj_to_raw(usage: Any) -> dict[str, Any]:
-    """把 Anthropic SDK 的 ``Usage`` 对象转成 dashboard 认的 raw_usage dict。"""
+    """Convert the Anthropic SDK ``Usage`` object into the raw_usage dict the dashboard expects."""
     raw: dict[str, Any] = {
         "input_tokens": getattr(usage, "input_tokens", 0) or 0,
         "output_tokens": getattr(usage, "output_tokens", 0) or 0,
@@ -80,12 +87,12 @@ def _usage_obj_to_raw(usage: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 上游 sender 工厂
+# upstream sender factory
 # ---------------------------------------------------------------------------
 
 def anthropic_sender(*, api_key: str | None = None,
                      upstream: str | None = None) -> Sender:
-    """构造一个走 Anthropic SDK 的真实 sender。"""
+    """Construct a real sender that goes through the Anthropic SDK."""
     from anthropic import Anthropic
 
     kwargs: dict[str, Any] = {}
@@ -99,7 +106,7 @@ def anthropic_sender(*, api_key: str | None = None,
         try:
             resp = client.messages.create(**dict(wire))
         except Exception as e:  # noqa: BLE001
-            _log.warning("replay 上游调用失败: %s", e)
+            _log.warning("replay upstream call failed: %s", e)
             return None
         return _usage_obj_to_raw(resp.usage)
 
@@ -107,14 +114,15 @@ def anthropic_sender(*, api_key: str | None = None,
 
 
 # ---------------------------------------------------------------------------
-# 缓存隔离：给每个 mode 注入唯一 system 前缀
+# Cache isolation: inject a unique system prefix per mode
 # ---------------------------------------------------------------------------
 
 def _inject_namespace(raw: dict[str, Any], session_id: str, mode_label: str) -> None:
-    """就地在 ``system`` 段最前面插一个 mode 专属的命名空间块。
+    """Insert a mode-specific namespace block in place at the very front of the ``system`` band.
 
-    各 mode 的前缀因此互不相同 → Anthropic 端缓存各自独立，重放顺序不再
-    污染对照数字。块本身只有 ~10 token、各 mode 等长。
+    Each mode's prefix is therefore different → the Anthropic-side caches are
+    independent, and replay order no longer pollutes the comparison numbers. The
+    block itself is only ~10 tokens, equal-length across modes.
     """
     tag = {"type": "text", "text": f"[telos-replay ns={session_id}/{mode_label}]"}
     system = raw.get("system")
@@ -127,12 +135,12 @@ def _inject_namespace(raw: dict[str, Any], session_id: str, mode_label: str) -> 
 
 
 # ---------------------------------------------------------------------------
-# 单 mode 重放
+# single-mode replay
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ReplayResult:
-    """一个 (session, mode) 重放完的汇总。"""
+    """A summary of one finished (session, mode) replay."""
 
     mode: str
     session_id: str
@@ -164,16 +172,16 @@ def replay_session(
     flt: ToolResultFilter | None = None,
     cache_isolation: bool = True,
 ) -> ReplayResult:
-    """把一个会话的轮次序列按 ``mode`` 重放一遍。
+    """Replay a session's turn sequence once under ``mode``.
 
     Args:
-        turns:           语料里的轮次记录列表（每个含 ``request``）。
-        mode:            本次重放用的开关组合。
-        session_id:      原会话 id（usage_log 里写 ``<id>/<mode>``）。
-        compare_group:   对比分组键（dashboard 按此并排）。
-        sender:          wire → raw_usage 的可调用；测试可注入假实现。
-        flt:             RTK 过滤器；``None`` 时按需 ``build_filter()``。
-        cache_isolation: 是否给每个 mode 注入唯一 system 前缀（见模块 docstring）。
+        turns:           the list of turn records from the corpus (each contains ``request``).
+        mode:            the switch combination used for this replay.
+        session_id:      the original session id (usage_log records ``<id>/<mode>``).
+        compare_group:   the comparison group key (the dashboard places these side by side).
+        sender:          the wire → raw_usage callable; tests can inject a fake implementation.
+        flt:             the RTK filter; ``build_filter()`` is called on demand when ``None``.
+        cache_isolation: whether to inject a unique system prefix per mode (see the module docstring).
     """
     if flt is None:
         flt = build_filter()
@@ -203,14 +211,14 @@ def replay_session(
                 wire = dict(pr.wire)
                 harness = pr.harness
             except Exception:  # noqa: BLE001
-                _log.exception("replay 管线失败，退回 passthrough")
+                _log.exception("replay pipeline failed, falling back to passthrough")
                 wire = dict(effective)
                 harness = "passthrough"
         else:
             wire = dict(effective)
             harness = "rtk-only" if mode.rtk else "passthrough"
 
-        # 阉割输出生成：只测 prompt / prefill 侧成本。
+        # Stub output generation: only measure prompt / prefill side cost.
         wire["max_tokens"] = 1
         for k in ("stream", "tool_choice", "thinking"):
             wire.pop(k, None)

@@ -1,16 +1,17 @@
-"""``TelosMode`` —— 两个独立开关（TELOS / RTK）的 4 态组合。
+"""``TelosMode`` — the 4-state combination of two independent switches (TELOS / RTK).
 
-四态对照：
+Four-state table:
 
-| label   | telos | rtk  | 含义                                       |
-|---------|-------|------|--------------------------------------------|
-| ``none``  | ✗   | ✗  | 纯透传，proxy 不改写任何字节                |
-| ``telos`` | ✓   | ✗  | 只跑 TELOS 管线（cache_control / ref-pool） |
-| ``rtk``   | ✗   | ✓  | 只过 RTK 工具输出过滤，不打 cache 标记      |
-| ``both``  | ✓   | ✓  | RTK 先缩工具结果，TELOS 再稳前缀（默认推荐）|
+| label   | telos | rtk  | meaning                                       |
+|---------|-------|------|-----------------------------------------------|
+| ``none``  | ✗   | ✗  | pure passthrough, the proxy rewrites no bytes  |
+| ``telos`` | ✓   | ✗  | run the TELOS pipeline only (cache_control / ref-pool) |
+| ``rtk``   | ✗   | ✓  | only run RTK tool-output filtering, apply no cache marks |
+| ``both``  | ✓   | ✓  | RTK shrinks tool results first, then TELOS stabilizes the prefix (recommended default) |
 
-设计成「两个布尔」而非单个枚举：proxy / dashboard 各自只关心其中一维时
-不用反复 match 4 个分支，``mode.telos`` / ``mode.rtk`` 直接取。
+Designed as "two booleans" rather than a single enum: when the proxy /
+dashboard each only care about one dimension, they do not have to repeatedly
+match all 4 branches — ``mode.telos`` / ``mode.rtk`` can be read directly.
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ _LABEL_TO_FLAGS: dict[str, tuple[bool, bool]] = {
     "both": (True, True),
 }
 
-# 所有合法 label，CLI / argparse choices 用。
+# all valid labels, used for CLI / argparse choices.
 MODE_LABELS: tuple[str, ...] = ("none", "telos", "rtk", "both")
 
 
 @dataclass(frozen=True)
 class TelosMode:
-    """一次请求要启用哪些优化层。不可变，可安全跨 session 复用。"""
+    """Which optimization layers a request enables. Immutable, safe to reuse across sessions."""
 
     telos: bool = True
     rtk: bool = False
@@ -40,15 +41,16 @@ class TelosMode:
         for name, flags in _LABEL_TO_FLAGS.items():
             if flags == (self.telos, self.rtk):
                 return name
-        # 理论不可达：两个布尔必落在 4 态之一。
+        # In theory unreachable: two booleans must fall into one of the 4 states.
         return f"telos={self.telos},rtk={self.rtk}"
 
     @classmethod
     def from_label(cls, label: str | None) -> "TelosMode":
-        """把 ``none|telos|rtk|both`` 解析成 ``TelosMode``。
+        """Parse ``none|telos|rtk|both`` into a ``TelosMode``.
 
-        ``None`` / 空串 / 未知值都退化到默认 ``telos``（保持历史行为：
-        proxy 在引入开关前等价于「只有 TELOS」）。
+        ``None`` / an empty string / an unknown value all degrade to the
+        default ``telos`` (preserving the historical behavior: before the
+        switch was introduced, the proxy was equivalent to "TELOS only").
         """
         if not label:
             return cls()

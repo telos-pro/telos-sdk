@@ -1,11 +1,11 @@
-"""``_derive_session_id`` 稳定性回归。
+"""``_derive_session_id`` stability regression.
 
-期望行为：
-- 同一对话的多轮（只在 ``messages[]`` 尾部追加）→ 同一 session_id
-- 不同 ``messages[0]`` 的对话 → 不同 session_id
-- 不同 ``system`` / ``tools`` 配置 → 不同 session_id
-- 不同 ``x-api-key`` → 不同 session_id（多租户隔离）
-- 显式 ``x-telos-session`` header 永远覆盖（最高优先级）
+Expected behavior:
+- multiple turns of the same conversation (only appending to the tail of ``messages[]``) → the same session_id
+- conversations with different ``messages[0]`` → different session_ids
+- different ``system`` / ``tools`` configurations → different session_ids
+- different ``x-api-key`` → different session_ids (multi-tenant isolation)
+- an explicit ``x-telos-session`` header always overrides (highest priority)
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from telos.proxy.server import _derive_session_id, make_app
 
 
 # ---------------------------------------------------------------------------
-# 纯函数单测
+# pure-function unit tests
 # ---------------------------------------------------------------------------
 
 _BASE_REQ = {
@@ -35,7 +35,7 @@ _HDR = {"x-api-key": "sk-ant-test"}
 
 
 def test_stable_across_turns() -> None:
-    """conversation 增长（assistant + user 追加）必须保持同一 session_id。"""
+    """A growing conversation (appending assistant + user) must keep the same session_id."""
     turn1 = dict(_BASE_REQ)
     turn2 = dict(_BASE_REQ, messages=[
         _BASE_REQ["messages"][0],
@@ -54,7 +54,7 @@ def test_stable_across_turns() -> None:
 
 
 def test_different_first_message_different_session() -> None:
-    """同 api-key、同 system+tools，但 messages[0] 不同 → 不同 session。"""
+    """Same api-key, same system+tools, but different messages[0] → different session."""
     req_a = dict(_BASE_REQ)
     req_b = dict(_BASE_REQ, messages=[
         {"role": "user", "content": [{"type": "text", "text": "DIFFERENT initial"}]},
@@ -85,7 +85,7 @@ def test_different_tools_different_session() -> None:
 
 
 def test_bearer_auth_normalized() -> None:
-    """``authorization: Bearer X`` 与 ``x-api-key: X`` 应被识别为同 client。"""
+    """``authorization: Bearer X`` and ``x-api-key: X`` should be recognized as the same client."""
     sid_a = _derive_session_id(_BASE_REQ, {"x-api-key": "sk-same"})
     sid_b = _derive_session_id(_BASE_REQ, {"authorization": "Bearer sk-same"})
     assert sid_a == sid_b, f"{sid_a} != {sid_b}"
@@ -100,7 +100,7 @@ def test_empty_messages_does_not_crash() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 端到端：通过 proxy server 验证 session_id 出现在 usage_log 里
+# end-to-end: verify via the proxy server that session_id appears in the usage_log
 # ---------------------------------------------------------------------------
 
 class _CapturingUpstream:
@@ -152,12 +152,12 @@ async def _test_end_to_end_multi_turn_same_session_id(tmp_log) -> None:
                                     json=turn2, headers=headers) as r:
                 assert r.status == 200
 
-        # 两轮都该有同 session_id
+        # both turns should have the same session_id
         lines = tmp_log.read_text().strip().splitlines()
         assert len(lines) >= 2
         sids = [json.loads(l)["session_id"] for l in lines]
         assert sids[0] == sids[1], \
-            f"两轮 session_id 漂移：{sids[0]} != {sids[1]}"
+            f"session_id drifted between turns: {sids[0]} != {sids[1]}"
         assert sids[0].startswith("telos-")
         print(f"✓ test_end_to_end_multi_turn_same_session_id ({sids[0]})")
     finally:
@@ -166,7 +166,7 @@ async def _test_end_to_end_multi_turn_same_session_id(tmp_log) -> None:
 
 
 async def _test_explicit_header_overrides_derivation() -> None:
-    """``x-telos-session`` header 必须永远胜过派生算法。"""
+    """The ``x-telos-session`` header must always win over the derivation algorithm."""
     import json
     import tempfile
     from pathlib import Path

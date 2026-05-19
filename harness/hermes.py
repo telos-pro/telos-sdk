@@ -1,12 +1,15 @@
-"""Hermes (Claude Code) harness plugin。
+"""Hermes (Claude Code) harness plugin.
 
-输入约定：与 OpenClaw 同形（Anthropic ``/v1/messages`` 兼容），但 envelope
-模式不同——``<system-reminder>`` / ``<command-message>`` 是 Hermes 的标志。
+Input contract: same shape as OpenClaw (Anthropic ``/v1/messages``
+compatible), but the envelope pattern differs — ``<system-reminder>`` /
+``<command-message>`` are Hermes's hallmarks.
 
-差异（vs OpenClaw 的逐项对照）见 [TELOS 协议 §7.2]：
-- 大 ``<file>...</file>`` 块（>2KB）→ ref-pool，slug 用文件路径
-- 子 agent (Agent tool) 的 result 在父 IR 里走 FOLD；子 IR 由 caller 单独走
-  这个 plugin 再 parse 一次，session_id 不同
+Differences (vs the item-by-item comparison with OpenClaw) see
+[TELOS protocol §7.2]:
+- a large ``<file>...</file>`` block (>2KB) → ref-pool, with the slug being the file path
+- the result of a sub-agent (the Agent tool) goes through FOLD in the parent
+  IR; the sub-IR is parsed separately by the caller through this plugin
+  again, with a different session_id
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ class HermesPlugin(HarnessPlugin):
         system_blocks: list[TelosBlock] = []
         for i, item in enumerate(raw_request.get("system", [])):
             text = item.get("text", "") if isinstance(item, dict) else str(item)
-            # Hermes 的 system 里也可能含 <file> 块；先抽走、放 ref-pool
+            # Hermes's system may also contain <file> blocks; extract them first and put them in the ref-pool
             stripped = text
             for m in _FILE_BLOCK_RE.finditer(text):
                 path, body = m.group(1), m.group(2)
@@ -130,7 +133,7 @@ class HermesPlugin(HarnessPlugin):
                         source_tag="hermes/assistant-tool-use",
                     ))
                 elif role == "assistant" and t == "thinking":
-                    # 修复 R6：thinking 块默认 FOLD，不能直接挂 cache_control
+                    # Fix R6: thinking blocks default to FOLD and cannot have cache_control attached directly
                     blocks.append(TelosBlock(
                         id=f"msg{mi}/th{ci}",
                         band=Band.FOLD,
@@ -146,7 +149,7 @@ class HermesPlugin(HarnessPlugin):
                         payload=item,
                         source_tag="hermes/other",
                     ))
-            # 修复：多 content block 拼接会让 (PIN,DROP,PIN,DROP,...) 违反 §5。
+            # Fix: concatenating multiple content blocks would make (PIN,DROP,PIN,DROP,...) violate §5.
             messages.append(TelosMessage(role=role, blocks=enforce_band_order(blocks)))
 
         return TelosIR(
@@ -164,5 +167,5 @@ class HermesPlugin(HarnessPlugin):
 
 
 def _slug_from_path(path: str) -> str:
-    """``src/auth/login.py`` → ``src.auth.login.py``；保持人类可读、跨会话稳定。"""
+    """``src/auth/login.py`` → ``src.auth.login.py``; stays human-readable and stable across sessions."""
     return path.replace("/", ".")

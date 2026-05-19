@@ -1,4 +1,4 @@
-"""``telos.init.claude_code`` installer 测试（操作隔离的临时 settings.json）。"""
+"""``telos.init.claude_code`` installer tests (operating on an isolated temporary settings.json)."""
 
 from __future__ import annotations
 
@@ -38,9 +38,9 @@ def test_install_preserves_existing_settings() -> None:
     }))
     inst = ClaudeCodeInstaller(settings_path=p, proxy_url="http://127.0.0.1:7171")
     r = inst.install()
-    assert r.backups, "应生成 .telos.bak 备份"
+    assert r.backups, "should generate a .telos.bak backup"
     data = _read(p)
-    assert data["permissions"]["defaultMode"] == "ask"  # 未动
+    assert data["permissions"]["defaultMode"] == "ask"  # untouched
     assert data["env"]["FOO"] == "bar"
     assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:7171"
     print("✓ test_install_preserves_existing_settings")
@@ -117,10 +117,51 @@ def test_install_rejects_non_object_env() -> None:
     raise AssertionError("expected RuntimeError")
 
 
+def test_install_preserves_other_tool_with_same_url() -> None:
+    """Regression: when another tool sets ANTHROPIC_BASE_URL to the same URL as ours,
+
+    install must still record it into __telos_previous_base_url so that uninstall
+    can restore it, without deleting the other tool's configuration along with it.
+    """
+    p = _new_settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    same = "http://127.0.0.1:7171"
+    p.write_text(json.dumps({"env": {
+        "ANTHROPIC_BASE_URL": same, "__other_tool": "true"}}))
+    inst = ClaudeCodeInstaller(settings_path=p, proxy_url=same)
+    inst.install()
+    data = _read(p)
+    assert data["env"]["__telos_previous_base_url"] == same
+    inst.uninstall()
+    data = _read(p)
+    assert data["env"]["ANTHROPIC_BASE_URL"] == same  # the other tool's config is restored intact
+    assert data["env"]["__other_tool"] == "true"
+    print("✓ test_install_preserves_other_tool_with_same_url")
+
+
+def test_reinstall_with_new_url_keeps_original_previous() -> None:
+    """Regression: when telos is reinstalled with a new proxy_url, it must not overwrite
+
+    __telos_previous_base_url with telos's own old value (that would lose the true original value).
+    """
+    p = _new_settings_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://orig/"}}))
+    ClaudeCodeInstaller(settings_path=p, proxy_url="http://127.0.0.1:7171").install()
+    # install again with a different url
+    ClaudeCodeInstaller(settings_path=p, proxy_url="http://127.0.0.1:9999").install()
+    data = _read(p)
+    assert data["env"]["__telos_previous_base_url"] == "https://orig/"
+    assert data["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9999"
+    print("✓ test_reinstall_with_new_url_keeps_original_previous")
+
+
 def main() -> None:
     test_install_on_missing_file()
     test_install_preserves_existing_settings()
     test_install_preserves_user_anthropic_base_url()
+    test_install_preserves_other_tool_with_same_url()
+    test_reinstall_with_new_url_keeps_original_previous()
     test_install_is_idempotent()
     test_uninstall_restores_state()
     test_uninstall_removes_env_block_if_empty()

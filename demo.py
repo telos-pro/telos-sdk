@@ -1,6 +1,6 @@
-"""端到端 demo：OpenClaw 风格请求 → TELOS IR → 三种 engine 各自的 wire 请求。
+"""End-to-end demo: OpenClaw-style request → TELOS IR → the wire requests for three engines.
 
-运行方式：
+How to run:
     python -m telos.demo
 """
 
@@ -11,7 +11,7 @@ import json
 from telos import Bridge, load_engine, load_harness
 
 
-# 一个简化的"OpenClaw 风格"请求
+# A simplified "OpenClaw-style" request
 RAW_REQUEST = {
     "model": "claude-opus-4-7",
     "tools": [
@@ -22,14 +22,14 @@ RAW_REQUEST = {
     ],
     "system": [
         {"type": "text", "text": "You are a senior engineer agent."},
-        # 模拟一段大文档（>2KB → 自动进 ref-pool）
-        {"type": "text", "text": "AUTH SPEC:\n" + ("规则细节…\n" * 400)},
+        # Simulate a large document (>2KB → automatically goes into the ref-pool)
+        {"type": "text", "text": "AUTH SPEC:\n" + ("rule details…\n" * 400)},
     ],
     "messages": [
         {
             "role": "user",
             "content": [{"type": "text", "text": (
-                "请基于上文重构 login.py。\n"
+                "Please refactor login.py based on the above.\n"
                 "<environment_info>cwd=/repo, branch=main, dirty=3 files</environment_info>\n"
                 "Current time: 2026-05-06 14:32:07"
             )}],
@@ -37,7 +37,7 @@ RAW_REQUEST = {
         {
             "role": "assistant",
             "content": [
-                {"type": "text", "text": "好的，我先读取文件。"},
+                {"type": "text", "text": "Sure, I'll read the file first."},
                 {"type": "tool_use", "id": "toolu_01", "name": "Read",
                  "input": {"path": "login.py"}},
             ],
@@ -45,7 +45,7 @@ RAW_REQUEST = {
         {
             "role": "user",
             "content": [{"type": "tool_result", "tool_use_id": "toolu_01",
-                         "content": [{"type": "text", "text": "<login.py 内容…>"}]}],
+                         "content": [{"type": "text", "text": "<contents of login.py…>"}]}],
         },
     ],
 }
@@ -71,7 +71,7 @@ def run_for_engine(engine_name: str) -> None:
     )
 
     bridge = Bridge(ir, engine)
-    print("\n--- IR layout (band 分布) ---")
+    print("\n--- IR layout (band distribution) ---")
     print(bridge.dump_layout())
 
     plan = bridge.mark()
@@ -81,11 +81,11 @@ def run_for_engine(engine_name: str) -> None:
               f"  msg={s.message_index}  ttl={s.ttl_class}")
 
     wire = bridge.emit()
-    # 只打前 600 字符以免刷屏
+    # Print only the first 600 chars to avoid flooding the screen
     rendered = json.dumps(wire, ensure_ascii=False, indent=2)
-    print(f"\n--- Wire request (前 600 字符) ---\n{rendered[:600]}\n…")
+    print(f"\n--- Wire request (first 600 chars) ---\n{rendered[:600]}\n…")
 
-    # 模拟一次回流：engine 返回的 usage
+    # Simulate a feedback loop: the usage returned by the engine
     fake_response = {
         "anthropic": {"usage": {"input_tokens": 80, "cache_read_input_tokens": 21043,
                                 "cache_creation_input_tokens": 250, "output_tokens": 120}},
@@ -102,23 +102,23 @@ def run_for_engine(engine_name: str) -> None:
                                     "gpu": 18000, "cpu": 2800, "disk": 0}}},
     }[engine_name]
     report = bridge.absorb_usage(fake_response)
-    print(f"\n--- 归一化 usage ---\n{report}")
+    print(f"\n--- normalized usage ---\n{report}")
 
-    # 仅对开源推理引擎演示双向操作
+    # Demonstrate bidirectional operations only for open-source inference engines
     if bridge.is_bidirectional:
-        print("\n--- 双向操作演示 ---")
+        print("\n--- bidirectional operation demo ---")
         probe = bridge.probe_cache()
         print(f"  probe → hit={probe.hit} cached={probe.cached_token_count} tier={probe.tier}")
-        # 协同 fold：把 msg[1..3] 折成一段摘要，并拿到 server 端 cache 控制片段
+        # Cooperative fold: fold msg[1..3] into a summary, and obtain the server-side cache control fragment
         if len(bridge.snapshot_ir().messages) >= 3:
             ctrl = bridge.cooperative_fold(
                 message_range=(1, 3),
-                summary="<上一轮 Read login.py 已完成，文件已读>",
+                summary="<the previous turn's Read login.py is done, the file has been read>",
             )
-            print(f"  cooperative_fold → 服务端 cache 指令片段：{ctrl}")
+            print(f"  cooperative_fold → server-side cache instruction fragment: {ctrl}")
             wire2 = bridge.emit_with_extras(ctrl)
             ext_field = "cache_policy" if engine_name == "vllm" else "cache_control"
-            print(f"  下次 emit 中的 {ext_field}：")
+            print(f"  {ext_field} in the next emit:")
             print(f"    {json.dumps(wire2.get(ext_field, {}), ensure_ascii=False, indent=2)}")
 
 

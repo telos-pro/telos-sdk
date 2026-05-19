@@ -1,17 +1,21 @@
-"""vLLM 适配器（开源推理引擎，APC = Automatic Prefix Caching）。
+"""vLLM adapter (open-source inference engine, APC = Automatic Prefix Caching).
 
-依据：
-- vLLM 启用 ``--enable-prefix-caching`` 后，按 16-token 块做 radix-hash 命中。
-- 0.6+ 起暴露 ``cache_salt``（请求级命名空间）和 KV offload（GPU→CPU→disk）。
-- usage 字段 ``prompt_tokens`` + ``cached_tokens``（需 ``--collect-detailed-traces``）。
+Basis:
+- With ``--enable-prefix-caching`` enabled, vLLM matches hits via radix-hash
+  over 16-token blocks.
+- Since 0.6+ it exposes ``cache_salt`` (a request-level namespace) and KV
+  offload (GPU→CPU→disk).
+- usage fields ``prompt_tokens`` + ``cached_tokens`` (requires
+  ``--collect-detailed-traces``).
 
-TELOS 在 vLLM 上获得"双向感知"：
-- read：``probe`` 调 ``HEAD /v1/cache/prefix?hash=...``
-- write：``cache_policy.{pin_prefix_until, evict_span}`` 嵌进请求体
-- prewarm：``max_tokens=1`` 真触发 KV 物化
+On vLLM, TELOS gains "bidirectional awareness":
+- read: ``probe`` calls ``HEAD /v1/cache/prefix?hash=...``
+- write: ``cache_policy.{pin_prefix_until, evict_span}`` embedded in the request body
+- prewarm: ``max_tokens=1`` actually triggers KV materialization
 
-由于 vLLM 的 cache 控制面字段名仍在演化（O5），这里把字段集中在
-``_VLLM_EXT`` 常量里，未来 rename 只动一处。
+Because vLLM's cache-control field names are still evolving (O5), the field
+names are centralized in the ``_VLLM_EXT`` constant, so a future rename only
+touches one place.
 """
 
 from __future__ import annotations
@@ -30,39 +34,39 @@ from telos.engine.base import (
 from telos.ir import Band, TelosIR, UsageReport
 
 
-_VLLM_EXT = "cache_policy"  # vLLM 私有扩展字段名（统一在此）
+_VLLM_EXT = "cache_policy"  # vLLM private extension field name (centralized here)
 
 
 class VLLMAdapter(BidirectionalEngineAdapter):
     @property
     def capabilities(self) -> EngineCapabilities:
         return EngineCapabilities(
-            explicit_breakpoints=True,        # pin index 算显式 BP
+            explicit_breakpoints=True,        # a pin index counts as an explicit BP
             ttl_control="none",
             prewarmable=True,
-            routing_key=True,                 # cache_salt 充当
+            routing_key=True,                 # served by cache_salt
             retention_policy="configurable",
             max_breakpoints=2,                # pin_until + rolling tail
             cache_probe=True,
             span_eviction=True,
-            fork_and_replace=False,           # vLLM 仅部分支持，保守关掉
+            fork_and_replace=False,           # vLLM only partially supports it, conservatively off
             tier_hint=False,
             pin_unpin=True,
         )
 
     # ------------------------------------------------------------------
-    # plan：找到 system 段最后一个 PIN 块作为 pin_until 边界
+    # plan: find the last PIN block in the system segment as the pin_until boundary
     # ------------------------------------------------------------------
     def plan_marks(self, ir: TelosIR) -> EmitPlan:
         slots: list[MarkSlot] = []
-        # 锚 1：system 段尾部 PIN 块 → 永久 pin
+        # Anchor 1: trailing PIN block of the system segment → permanent pin
         last_sys_pin = _last_index(ir.system, Band.PIN)
         if last_sys_pin is not None:
             slots.append(MarkSlot(
                 name="pin_until", segment="system", index=last_sys_pin,
                 ttl_class="long",
             ))
-        # 锚 2：最近一条 message 的最后一个非-DROP 块 → 滚动锚（不 pin）
+        # Anchor 2: the last non-DROP block of the most recent message → rolling anchor (not pinned)
         if ir.messages:
             mi = len(ir.messages) - 1
             blocks = ir.messages[mi].blocks
@@ -79,10 +83,10 @@ class VLLMAdapter(BidirectionalEngineAdapter):
         )
 
     # ------------------------------------------------------------------
-    # emit：OpenAI-compatible body + cache_policy / cache_salt 扩展
+    # emit: OpenAI-compatible body + cache_policy / cache_salt extensions
     # ------------------------------------------------------------------
     def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
-        # 复用 OpenAI 风格的扁平 messages 数组
+        # Reuse the OpenAI-style flat messages array
         wire_messages: list[dict[str, Any]] = []
         sys_text = "\n\n".join(
             str(b.payload) for b in _band_sorted(ir.system)
@@ -99,16 +103,16 @@ class VLLMAdapter(BidirectionalEngineAdapter):
                                  else json.dumps(blk.payload, sort_keys=True))
             wire_messages.append({"role": msg.role, "content": "\n".join(parts)})
 
-        # cache_policy：把 plan 翻译成 vLLM 私有字段
+        # cache_policy: translate the plan into vLLM private fields
         policy: dict[str, Any] = {}
         for slot in plan.slots:
             if slot.name == "pin_until":
-                # vLLM 用 token-block index 寻址；这里给逻辑 hint，
-                # 真实 token 计算由 server-side hashing 完成
+                # vLLM addresses by token-block index; here we give a logical hint,
+                # the real token computation is done by server-side hashing
                 policy["pin_prefix_until_block"] = self._estimate_block_index(
                     ir, slot.segment, slot.index, slot.message_index,
                 )
-        # extras 里允许 bridge 注入 evict_span（来自 fold 操作）
+        # extras allows the bridge to inject evict_span (from a fold operation)
         if "evict_span" in plan.extras:
             policy["evict_span"] = plan.extras["evict_span"]
 
@@ -131,57 +135,60 @@ class VLLMAdapter(BidirectionalEngineAdapter):
         return UsageReport(
             raw_input=max(0, prompt - cached),
             cache_read=cached,
-            cache_write=0,                    # vLLM 不区分；并入 raw_input
+            cache_write=0,                    # vLLM does not distinguish; folded into raw_input
             output=int(usage.get("completion_tokens", 0)),
             raw=usage,
         )
 
     # ------------------------------------------------------------------
-    # 双向操作
+    # Bidirectional operations
     # ------------------------------------------------------------------
     def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
-        """构造一个 prefix probe 请求；调用方负责 HTTP 发送。
+        """Construct a prefix probe request; the caller is responsible for the HTTP send.
 
-        返回值仅在 demo / 测试里用 fake；真实环境会被 caller 替换为带网
-        络 IO 的版本。这里给出 ``ProbeResult`` 的占位，并把要查询的 hash
-        附在 ``raw`` 上以便上层取用。
+        The return value is only used as a fake in demos / tests; in a real
+        environment the caller replaces it with a version that does network
+        IO. Here we provide a placeholder ``ProbeResult`` and attach the hash
+        to query on ``raw`` so the upper layer can use it.
         """
         prefix_hash = self._prefix_hash(ir)
-        # 真实实现：``http.head(f"/v1/cache/prefix?hash={prefix_hash}")``
+        # Real implementation: ``http.head(f"/v1/cache/prefix?hash={prefix_hash}")``
         return ProbeResult(hit=False, cached_token_count=0, tier="none")
 
     def evict_span(
         self, ir: TelosIR, start_block: int, end_block: int,
     ) -> Mapping[str, Any]:
-        """返回一段嵌进下次 emit 的 ``cache_policy`` 片段。
+        """Return a ``cache_policy`` fragment to embed into the next emit.
 
-        bridge 在 ``Bridge.fold`` 之后会把这个 dict 合并进 ``EmitPlan.extras``。
+        After ``Bridge.fold`` the bridge merges this dict into ``EmitPlan.extras``.
         """
         return {"evict_span": [start_block, end_block]}
 
     def refresh(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
-        """返回 prewarm 请求体；调用方真正 POST。
+        """Return the prewarm request body; the caller actually POSTs it.
 
-        与 ``EngineAdapter.refresh`` 不同（基类返回 None），这里返回 dict 是
-        因为我们想让 caller 看到 prewarm 请求长什么样、便于审计。
+        Unlike ``EngineAdapter.refresh`` (the base class returns None), this
+        returns a dict because we want the caller to see what the prewarm
+        request looks like, for auditing.
         """
         body = dict(self.emit(ir, plan))
         body["max_tokens"] = 1
         body["stream"] = False
-        # vLLM 没有 ``ignore_eos`` 必要性，但加上确保不会因为意外 EOS 提前停
+        # vLLM has no need for ``ignore_eos``, but we add it to make sure an accidental EOS does not stop early
         body["ignore_eos"] = True
         return body
 
     # ------------------------------------------------------------------
-    # 内部
+    # Internal
     # ------------------------------------------------------------------
     def _estimate_block_index(
         self, ir: TelosIR, segment: str, index: int, message_index: int | None,
     ) -> int:
-        """粗估 token block 边界。vLLM 默认 16 token / block。
+        """Roughly estimate the token block boundary. vLLM defaults to 16 tokens / block.
 
-        粗估足够了——server 端会按真实 tokenization 命中前缀；这里的数字
-        只是给 ``pin_prefix_until_block`` 一个保守上界。
+        A rough estimate is sufficient — the server hits the prefix by real
+        tokenization; the number here only gives ``pin_prefix_until_block`` a
+        conservative upper bound.
         """
         BLOCK = 16
         char_count = 0
@@ -201,12 +208,12 @@ class VLLMAdapter(BidirectionalEngineAdapter):
                     char_count += len(str(b.payload))
             for b in ir.messages[message_index].blocks[: index + 1]:
                 char_count += len(str(b.payload))
-        # 4 chars ≈ 1 token 是英文经验值；中文偏低，宁取保守
+        # 4 chars ≈ 1 token is an empirical value for English; Chinese is lower, so we stay conservative
         approx_tokens = char_count // 4
         return approx_tokens // BLOCK
 
     def _prefix_hash(self, ir: TelosIR) -> str:
-        """前缀 hash：给 probe 用。tools + system 的 PIN 段。"""
+        """Prefix hash: used by probe. The PIN span of tools + system."""
         h = hashlib.sha256()
         for b in ir.tools:
             h.update(json.dumps(b.payload, sort_keys=True).encode())
@@ -225,6 +232,6 @@ def _last_index(blocks, band) -> int | None:
 
 
 def _band_sorted(blocks):
-    """§5 顺序的稳定排序键：PIN(0) < FOLD(1) < DROP(2)。"""
+    """The stable sort key for the §5 order: PIN(0) < FOLD(1) < DROP(2)."""
     rank = {Band.PIN: 0, Band.FOLD: 1, Band.DROP: 2}
     return sorted(blocks, key=lambda b: rank[b.band])

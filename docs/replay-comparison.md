@@ -66,10 +66,30 @@ telos replay --list
 telos replay --session telos-ab12cd34
 #    or pick modes:
 telos replay --session telos-ab12cd34 --modes none,both
+#    or record an asciinema cast of the savings dashboard updating live:
+telos replay --session telos-ab12cd34 --cast
 
 # 4. view the comparison (the dashboard "A/B comparison" panel, cards tagged with the `replay` badge)
 telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html
 ```
+
+### `--cast` — record the dashboard changing
+
+`telos replay --cast [PATH]` writes an [asciinema](https://asciinema.org) v2
+cast (default `~/.telos/replay-cast.cast`) while the replay runs. After every
+turn it re-aggregates the usage so far and emits one full-screen frame of the
+savings dashboard — so on playback you watch `cache_read`, token cost and saved
+dollars fill in per mode, turn by turn:
+
+```bash
+telos replay --session <id> --cast              # → ~/.telos/replay-cast.cast
+telos replay --session <id> --cast demo.cast    # → ./demo.cast
+asciinema play ~/.telos/replay-cast.cast        # play it back
+```
+
+The cast runs on a virtual clock (total playback ≈ 40 s regardless of how long
+the real replay took), and each frame replaces the previous one in place, so it
+plays as a single live-updating panel.
 
 Replay requires `ANTHROPIC_API_KEY` (or `--api-key`). Results are appended to `--usage-log`
 (default `~/.telos/usage.jsonl`), with `compare_group` = the original session id, and the dashboard

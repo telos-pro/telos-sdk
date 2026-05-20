@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     if subcommand == "replay":
         from telos.replay.__main__ import main as replay_main
         return replay_main(rest)
+    if subcommand == "showcase":
+        from telos.scripts.showcase import main as showcase_main
+        return showcase_main(rest)
     if subcommand in HARNESS_NAMES:
         return _cmd_launch_harness(subcommand)
 
@@ -422,6 +425,7 @@ def _print_usage() -> None:
         "  mode        switch the optimization mode (none|telos|rtk|both), hot-updates the running gateway\n"
         "  alias       set the harness the bare telos enters by default\n"
         "  replay      replay a recorded session across multiple modes for a controlled A/B comparison\n"
+        "  showcase    offline narrated demo + interactive playground (--interactive / --cast)\n"
         "\n"
         "examples:\n"
         "  telos init\n"

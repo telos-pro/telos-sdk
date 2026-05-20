@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
@@ -90,12 +91,32 @@ def _usage_obj_to_raw(usage: Any) -> dict[str, Any]:
 # upstream sender factory
 # ---------------------------------------------------------------------------
 
+# transient HTTP statuses worth retrying (429 rate-limit, 529 overloaded, 5xx).
+_RETRYABLE_STATUS = {408, 409, 425, 429}
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """True for transient upstream failures (overload / rate-limit / 5xx / network)."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _RETRYABLE_STATUS or status >= 500
+    name = type(exc).__name__
+    return "Connection" in name or "Timeout" in name
+
+
 def anthropic_sender(*, api_key: str | None = None,
-                     upstream: str | None = None) -> Sender:
-    """Construct a real sender that goes through the Anthropic SDK."""
+                     upstream: str | None = None,
+                     max_retries: int = 6) -> Sender:
+    """Construct a real sender that goes through the Anthropic SDK.
+
+    ``max_retries`` bounds how many times a single turn is retried on a
+    *transient* upstream failure (HTTP 429 / 529 overloaded / 5xx / network),
+    with exponential backoff — so a server-overload window does not leave the
+    replay dataset full of holes.
+    """
     from anthropic import Anthropic
 
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"max_retries": 4}  # the SDK's own inner retries
     if api_key:
         kwargs["api_key"] = api_key
     if upstream:
@@ -103,12 +124,37 @@ def anthropic_sender(*, api_key: str | None = None,
     client = Anthropic(**kwargs)
 
     def send(wire: Mapping[str, Any]) -> dict[str, Any] | None:
-        try:
-            resp = client.messages.create(**dict(wire))
-        except Exception as e:  # noqa: BLE001
-            _log.warning("replay upstream call failed: %s", e)
-            return None
-        return _usage_obj_to_raw(resp.usage)
+        # Recorded requests may carry newer fields (e.g. ``context_management``)
+        # an older installed SDK rejects as an unexpected kwarg — drop and retry.
+        body = dict(wire)
+        retries = 0
+        delay = 4.0
+        for _ in range(max_retries + len(body) + 2):
+            try:
+                resp = client.messages.create(**body)
+                return _usage_obj_to_raw(resp.usage)
+            except TypeError as e:
+                m = re.search(r"unexpected keyword argument '([^']+)'", str(e))
+                if m and m.group(1) in body:
+                    dropped = m.group(1)
+                    body.pop(dropped, None)
+                    _log.info("replay: dropped SDK-unsupported request field %r",
+                              dropped)
+                    continue
+                _log.warning("replay upstream call failed: %s", e)
+                return None
+            except Exception as e:  # noqa: BLE001
+                if _is_retryable(e) and retries < max_retries:
+                    retries += 1
+                    _log.warning("replay upstream transient error (%s) — "
+                                 "retry %d/%d in %.0fs",
+                                 e, retries, max_retries, delay)
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60.0)
+                    continue
+                _log.warning("replay upstream call failed: %s", e)
+                return None
+        return None
 
     return send
 
@@ -171,6 +217,7 @@ def replay_session(
     sender: Sender,
     flt: ToolResultFilter | None = None,
     cache_isolation: bool = True,
+    on_turn: "Callable[[ReplayResult, int, int], None] | None" = None,
 ) -> ReplayResult:
     """Replay a session's turn sequence once under ``mode``.
 
@@ -182,6 +229,9 @@ def replay_session(
         sender:          the wire → raw_usage callable; tests can inject a fake implementation.
         flt:             the RTK filter; ``build_filter()`` is called on demand when ``None``.
         cache_isolation: whether to inject a unique system prefix per mode (see the module docstring).
+        on_turn:         optional callback invoked after every turn as
+                         ``on_turn(result, turn_index, total_turns)`` — used by
+                         ``telos replay --cast`` to record the dashboard changing.
     """
     if flt is None:
         flt = build_filter()
@@ -189,58 +239,64 @@ def replay_session(
     result = ReplayResult(mode=mode.label, session_id=session_id,
                           compare_group=compare_group)
     replay_sid = f"{session_id}/{mode.label}"
+    total = len(turns)
 
-    for turn in turns:
+    for idx, turn in enumerate(turns, start=1):
         request = turn.get("request")
-        if not isinstance(request, Mapping):
-            continue
-        raw = copy.deepcopy(dict(request))
-        if cache_isolation:
-            _inject_namespace(raw, session_id, mode.label)
+        if isinstance(request, Mapping):
+            raw = copy.deepcopy(dict(request))
+            if cache_isolation:
+                _inject_namespace(raw, session_id, mode.label)
 
-        reduction: dict[str, Any] = {}
-        effective: Mapping[str, Any] = raw
-        if mode.rtk:
-            effective, fstats = apply_filter(raw, flt)
-            reduction = fstats.as_dict()
+            reduction: dict[str, Any] = {}
+            effective: Mapping[str, Any] = raw
+            if mode.rtk:
+                effective, fstats = apply_filter(raw, flt)
+                reduction = fstats.as_dict()
 
-        if mode.telos:
-            try:
-                pr = process_anthropic_request(
-                    effective, session_id=replay_sid, session_state=state)
-                wire = dict(pr.wire)
-                harness = pr.harness
-            except Exception:  # noqa: BLE001
-                _log.exception("replay pipeline failed, falling back to passthrough")
+            if mode.telos:
+                try:
+                    pr = process_anthropic_request(
+                        effective, session_id=replay_sid, session_state=state)
+                    wire = dict(pr.wire)
+                    harness = pr.harness
+                except Exception:  # noqa: BLE001
+                    _log.exception("replay pipeline failed, falling back to passthrough")
+                    wire = dict(effective)
+                    harness = "passthrough"
+            else:
                 wire = dict(effective)
-                harness = "passthrough"
-        else:
-            wire = dict(effective)
-            harness = "rtk-only" if mode.rtk else "passthrough"
+                harness = "rtk-only" if mode.rtk else "passthrough"
 
-        # Stub output generation: only measure prompt / prefill side cost.
-        wire["max_tokens"] = 1
-        for k in ("stream", "tool_choice", "thinking"):
-            wire.pop(k, None)
+            # Stub output generation: only measure prompt / prefill side cost.
+            wire["max_tokens"] = 1
+            for k in ("stream", "tool_choice", "thinking"):
+                wire.pop(k, None)
+            # Server-side context management would edit the prompt out from
+            # under the measurement (and older SDKs reject the field); replay
+            # measures the encoded prefix as-is, so drop it.
+            wire.pop("context_management", None)
 
-        raw_usage = sender(wire)
-        if raw_usage is None:
-            result.turns_failed += 1
-            continue
+            raw_usage = sender(wire)
+            if raw_usage is None:
+                result.turns_failed += 1
+            else:
+                result.turns_ok += 1
+                result.records.append({
+                    "ts": time.time(),
+                    "session_id": replay_sid,
+                    "call_index": int(turn.get("call_index") or len(result.records) + 1),
+                    "model": wire.get("model") or request.get("model") or "",
+                    "harness": harness,
+                    "mode": mode.label,
+                    "compare_group": compare_group,
+                    "replay": True,
+                    "tool_output_reduction": reduction,
+                    "raw_usage": raw_usage,
+                    "normalized": _normalize(raw_usage),
+                })
 
-        result.turns_ok += 1
-        result.records.append({
-            "ts": time.time(),
-            "session_id": replay_sid,
-            "call_index": int(turn.get("call_index") or len(result.records) + 1),
-            "model": wire.get("model") or request.get("model") or "",
-            "harness": harness,
-            "mode": mode.label,
-            "compare_group": compare_group,
-            "replay": True,
-            "tool_output_reduction": reduction,
-            "raw_usage": raw_usage,
-            "normalized": _normalize(raw_usage),
-        })
+        if on_turn is not None:
+            on_turn(result, idx, total)
 
     return result

@@ -83,6 +83,58 @@ def test_empty_corpus_lists_nothing() -> None:
     print("✓ test_empty_corpus_lists_nothing")
 
 
+def _harness_id(inner: str) -> str:
+    """A harness-style session id: a JSON blob with a long device/account prefix."""
+    return ('{"device_id":"7efd78cb9133b717bf13b90aa9293a58d1bfed1c531f6436'
+            'df592fea146d6426","account_uuid":"e2346e67-8b7b-4efa-80a9-'
+            f'ca1fcb8d60e4","session_id":"{inner}"}}')
+
+
+def test_long_session_ids_do_not_collide() -> None:
+    """Regression: two conversations sharing a device/account prefix but with
+    different inner session_ids must land in separate corpus files."""
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        a = _harness_id("0ccc5ec7-ac71-44ee-ad40-0ae9555a26b5")
+        b = _harness_id("11111111-2222-3333-4444-555555555555")
+        record_call(cd, a, 1, _sample_request("conv-a"))
+        record_call(cd, b, 1, _sample_request("conv-b"))
+        record_call(cd, b, 2, _sample_request("conv-b2"))
+        # the bug collapsed both into one file → list_sessions saw 1 session
+        assert len(list_sessions(cd)) == 2
+        assert len(load_session(cd, a)) == 1
+        assert len(load_session(cd, b)) == 2
+        # each session is still loadable by its full id
+        assert load_session(cd, a)[0]["session_id"] == a
+    print("✓ test_long_session_ids_do_not_collide")
+
+
+def test_load_by_handle_stem() -> None:
+    """A session is loadable by the short filename stem shown in `replay --list`."""
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        sid = _harness_id("abcdef01-2345-6789-abcd-ef0123456789")
+        record_call(cd, sid, 1, _sample_request("hi"))
+        handle = list_sessions(cd)[0].handle
+        assert load_session(cd, handle)[0]["session_id"] == sid
+    print("✓ test_load_by_handle_stem")
+
+
+def test_load_by_inner_display_id() -> None:
+    """`replay --list` shows the inner session id; `--session <that>` must resolve."""
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        inner = "70939675-ebcc-4b34-b835-9badef95aee1"
+        sid = _harness_id(inner)
+        record_call(cd, sid, 1, _sample_request("a"))
+        record_call(cd, sid, 2, _sample_request("b"))
+        # the pretty id from the --list "session" column resolves
+        turns = load_session(cd, inner)
+        assert len(turns) == 2
+        assert turns[0]["session_id"] == sid
+    print("✓ test_load_by_inner_display_id")
+
+
 def main() -> None:
     test_record_and_load_roundtrip()
     test_load_session_sorts_by_call_index()
@@ -90,6 +142,9 @@ def main() -> None:
     test_load_by_inner_id_when_filename_differs()
     test_load_missing_session_raises()
     test_empty_corpus_lists_nothing()
+    test_long_session_ids_do_not_collide()
+    test_load_by_handle_stem()
+    test_load_by_inner_display_id()
     print("\nall corpus tests passed.")
 
 

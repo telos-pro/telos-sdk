@@ -128,12 +128,63 @@ def test_replay_output_feeds_dashboard_compare_panel() -> None:
     print("✓ test_replay_output_feeds_dashboard_compare_panel")
 
 
+def test_replay_on_turn_callback_fires_per_turn() -> None:
+    """``on_turn`` is invoked once per turn with a monotonic (idx, total)."""
+    sender, _ = _make_sender()
+    seen: list[tuple[int, int, int]] = []
+
+    def on_turn(result, idx, total):
+        seen.append((idx, total, len(result.records)))
+
+    r = replay_session(_turns(), TelosMode.from_label("both"),
+                       session_id="s", compare_group="g", sender=sender,
+                       on_turn=on_turn)
+    assert [s[0] for s in seen] == [1, 2]      # idx counts up
+    assert all(s[1] == 2 for s in seen)        # total is the turn count
+    assert seen[-1][2] == len(r.records) == 2  # records accumulate
+    print("✓ test_replay_on_turn_callback_fires_per_turn")
+
+
+def test_replay_strips_context_management() -> None:
+    """`context_management` is dropped before sending (newer field; not needed for prefill)."""
+    turns = _turns()
+    turns[0]["request"]["context_management"] = {"edits": [{"type": "clear_tool_uses"}]}
+    sender, seen = _make_sender()
+    replay_session(turns, TelosMode.from_label("none"),
+                   session_id="s", compare_group="g", sender=sender)
+    assert all("context_management" not in wire for wire in seen)
+    print("✓ test_replay_strips_context_management")
+
+
+def test_replay_retryable_classification() -> None:
+    """Transient upstream failures (529 / 5xx / 429 / network) are retryable; 4xx is not."""
+    from telos.replay import _is_retryable
+
+    class _Status(Exception):
+        def __init__(self, code): self.status_code = code
+
+    class APITimeoutError(Exception):
+        pass
+
+    assert _is_retryable(_Status(529))   # overloaded
+    assert _is_retryable(_Status(500))   # internal error
+    assert _is_retryable(_Status(429))   # rate limited
+    assert _is_retryable(APITimeoutError())
+    assert not _is_retryable(_Status(400))   # bad request — do not retry
+    assert not _is_retryable(_Status(404))
+    assert not _is_retryable(ValueError("boom"))
+    print("✓ test_replay_retryable_classification")
+
+
 def main() -> None:
     test_replay_records_carry_mode_and_compare_group()
     test_replay_forces_max_tokens_and_strips_streaming()
     test_replay_injects_cache_namespace()
     test_replay_rtk_mode_shrinks_and_records_reduction()
     test_replay_output_feeds_dashboard_compare_panel()
+    test_replay_on_turn_callback_fires_per_turn()
+    test_replay_strips_context_management()
+    test_replay_retryable_classification()
     print("\nall replay tests passed.")
 
 

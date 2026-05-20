@@ -17,6 +17,7 @@ The default directory is ``~/.telos/corpus/``, one ``<session>.jsonl`` per sessi
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -26,11 +27,27 @@ from typing import Any
 
 DEFAULT_CORPUS_DIR = Path.home() / ".telos" / "corpus"
 
+_MAX_NAME_LEN = 120  # filesystem-friendly cap for a corpus filename stem
+
 
 def _safe_name(session_id: str) -> str:
-    """Turn a session_id into a safe filename (anything not alphanumeric . _ - is replaced with _)."""
-    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:120]
-    return cleaned or "anon"
+    """Turn a session_id into a safe, **collision-free** filename stem.
+
+    Anything outside ``[A-Za-z0-9._-]`` becomes ``_``. A plain truncation is not
+    enough: harness session ids can be long JSON blobs (``device_id`` +
+    ``account_uuid`` + the real ``session_id``), and the stable device/account
+    prefix alone already overruns the length cap — truncating there would map
+    *every* conversation of one account onto a single file. So when the cleaned
+    name is too long, keep a readable prefix and append a hash of the **full**
+    id, which keeps distinct sessions in distinct files.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    if not cleaned:
+        return "anon"
+    if len(cleaned) <= _MAX_NAME_LEN:
+        return cleaned
+    digest = hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:16]
+    return cleaned[: _MAX_NAME_LEN - len(digest) - 1] + "-" + digest
 
 
 def record_call(
@@ -66,6 +83,25 @@ class CorpusSessionInfo:
     n_calls: int
     first_ts: float
     last_ts: float
+    handle: str = ""        #: the filename stem — a short, copy-pasteable id for ``--session``
+
+
+def display_session(session_id: str) -> str:
+    """A short, human-readable label for a session id.
+
+    Harness session ids are often a JSON blob carrying ``device_id`` /
+    ``account_uuid`` / the real ``session_id``; show just the inner
+    ``session_id`` when present, otherwise the id as-is (clipped).
+    """
+    sid = (session_id or "").strip()
+    if sid.startswith("{"):
+        try:
+            inner = json.loads(sid).get("session_id")
+        except (json.JSONDecodeError, AttributeError):
+            inner = None
+        if inner:
+            return str(inner)
+    return sid if len(sid) <= 48 else sid[:45] + "..."
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:
@@ -80,6 +116,19 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
     return out
+
+
+def _first_record(path: Path) -> dict[str, Any] | None:
+    """Read just the first JSON line of a corpus file (cheap id probe)."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    return json.loads(line)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
 
 
 def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
@@ -99,6 +148,7 @@ def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
             n_calls=len(recs),
             first_ts=min(ts_vals) if ts_vals else 0.0,
             last_ts=max(ts_vals) if ts_vals else 0.0,
+            handle=path.stem,
         ))
     infos.sort(key=lambda i: i.last_ts, reverse=True)
     return infos
@@ -107,21 +157,33 @@ def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
 def load_session(corpus_dir: Path, session_id: str) -> list[dict[str, Any]]:
     """Read all turns of a session, in ascending ``call_index`` order.
 
-    ``session_id`` can be either a real id or a filename stem —— both will match.
-    Raises ``FileNotFoundError`` if not found.
+    ``session_id`` resolves flexibly — any of these work:
+
+    - the full stored id (the harness JSON blob);
+    - the short ``handle`` / filename stem shown by ``telos replay --list``;
+    - the inner per-conversation id shown in the ``session`` column
+      (e.g. ``70939675-...``), see :func:`display_session`.
+
+    Raises ``FileNotFoundError`` if nothing matches.
     """
-    candidates = [corpus_dir / f"{_safe_name(session_id)}.jsonl"]
-    # When the real id and the safe filename differ, fall back to scanning the whole directory for the internal session_id.
-    if not candidates[0].exists() and corpus_dir.exists():
-        for path in corpus_dir.glob("*.jsonl"):
-            recs = _read_lines(path)
-            if recs and recs[0].get("session_id") == session_id:
-                candidates = [path]
-                break
-    for path in candidates:
-        if path.exists():
-            recs = _read_lines(path)
-            recs.sort(key=lambda r: int(r.get("call_index") or 0))
-            return recs
+    # 1. fast path: the file named directly after the (sanitized) id.
+    direct = corpus_dir / f"{_safe_name(session_id)}.jsonl"
+    if direct.exists():
+        recs = _read_lines(direct)
+        recs.sort(key=lambda r: int(r.get("call_index") or 0))
+        return recs
+
+    # 2. scan: match by filename stem, full stored id, or inner display id.
+    if corpus_dir.exists():
+        for path in sorted(corpus_dir.glob("*.jsonl")):
+            first = _first_record(path)
+            stored = (first or {}).get("session_id") or ""
+            if (path.stem == session_id
+                    or stored == session_id
+                    or display_session(stored) == session_id):
+                recs = _read_lines(path)
+                recs.sort(key=lambda r: int(r.get("call_index") or 0))
+                return recs
+
     raise FileNotFoundError(
         f"session {session_id!r} not found in corpus (directory {corpus_dir})")

@@ -1,7 +1,18 @@
-"""TELOS processing pipeline -- a pure function, producing a wire request from a raw Anthropic request.
+"""TELOS processing pipeline -- pure functions, producing wire requests from raw inputs.
 
-Extracts the parse → bridge → emit section out of ``TelosAnthropicTransport._do_create``,
-so the proxy and the transport share one implementation and there is no wire-behavior drift.
+Two protocol-specific entry points share the same parse → bridge → canonicalize
+core and the same ``PipelineResult``:
+
+- ``process_anthropic_request`` for ``/v1/messages``-shaped input
+  (openclaw / hermes harnesses, anthropic engine).
+- ``process_openai_request``    for ``/v1/chat/completions``-shaped input
+  (telos harness parses OpenAI shape; engine is configurable, defaults to
+  ``deepseek`` for OpenRouter-style upstreams).
+
+This split mirrors the existing two transports (``TelosAnthropicTransport`` and
+``TelosOpenAITransport`` in ``telos.scripts``); the proxy uses these so the
+wire produced by an in-process SDK call and a request through the gateway are
+identical.
 """
 
 from __future__ import annotations
@@ -10,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from telos import Bridge, load_engine, load_harness
-from telos.bridge import BridgeSessionState
+from telos.bridge import BridgeSessionState, _canonicalize_ir
 from telos.ir import Band, TelosIR
 from telos.registry import canonical_harness
 from telos.scripts.telos_anthropic_transport import _detect_harness
@@ -20,6 +31,14 @@ from telos.scripts.telos_anthropic_transport import _detect_harness
 _PASSTHROUGH_FIELDS = (
     "max_tokens", "temperature", "top_p", "stream", "stop_sequences",
     "tool_choice", "thinking", "metadata", "service_tier", "top_k",
+)
+
+# Fields passed through on the OpenAI ChatCompletions path.
+_OPENAI_PASSTHROUGH_FIELDS = (
+    "temperature", "top_p", "max_tokens", "stream", "stop",
+    "tool_choice", "response_format", "frequency_penalty", "presence_penalty",
+    "seed", "stream_options", "logit_bias", "logprobs", "top_logprobs", "n",
+    "user",
 )
 
 
@@ -137,6 +156,87 @@ def process_anthropic_request(
         plan_slots=[s.name for s in plan.slots],
         routing_key=plan.routing_key,
         model=raw.get("model", ""),
+        cumulative_cache_creation=state.stats.cumulative_cache_creation,
+        real_requests_since_refresh=state.stats.real_requests_since_refresh,
+        ir_layout=layout,
+        tool_uses=tool_uses,
+        tool_results=tool_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI ChatCompletions pipeline
+# ---------------------------------------------------------------------------
+
+def process_openai_request(
+    raw: Mapping[str, Any],
+    *,
+    session_id: str,
+    session_state: BridgeSessionState | None = None,
+    engine_name: str = "deepseek",
+) -> "PipelineResult":
+    """Run the TELOS pipeline once for an OpenAI ChatCompletions request.
+
+    Args:
+        raw:           the raw ``/v1/chat/completions`` request body (dict).
+        session_id:    the TELOS session identifier (used inside the Bridge).
+        session_state: cross-turn persisted Bridge state. **When passed, the
+                       ref-pool / R8 counter accumulate across calls**.
+        engine_name:   the engine adapter used by ``Bridge.mark`` (for routing
+                       key derivation and ``parse_usage`` later). Defaults to
+                       ``"deepseek"`` because OpenRouter / DeepSeek expose the
+                       most informative cache fields; ``"openai"`` also works.
+
+    Returns:
+        ``PipelineResult`` whose ``wire`` is a ChatCompletions-shaped dict
+        ready to POST to ``<upstream>/v1/chat/completions``. ``harness`` is
+        always ``"telos"`` (this is what the dashboard expects for OpenAI
+        traffic; the ``telos`` harness is the one that parses OpenAI shape).
+    """
+    # Imported here to avoid a top-level cycle (scripts.telos_transport itself
+    # imports from telos, which transitively imports proxy.pipeline in tests).
+    from telos.scripts.telos_transport import _ir_to_chat_completions
+
+    harness = load_harness("telos")
+    engine = load_engine(engine_name)
+    model = str(raw.get("model", ""))
+
+    ir = harness.parse(
+        raw,
+        session_id=session_id,
+        engine=engine_name,
+        model=model,
+    )
+    bridge = Bridge(ir, engine, session_state=session_state)
+
+    # The OpenAI path does NOT go through engine.emit (which produces the
+    # Responses API shape); it uses _ir_to_chat_completions instead. So we
+    # must drive Bridge by hand: mark + canonicalize the IR, then build the
+    # chat-completions wire ourselves. This mirrors TelosOpenAITransport._do_create.
+    plan = bridge.mark()
+    ir2 = _canonicalize_ir(bridge.snapshot_ir())
+    wire = _ir_to_chat_completions(ir2, model=model)
+
+    # Pass through the caller's non-TELOS fields (temperature, stream, etc.).
+    for k in _OPENAI_PASSTHROUGH_FIELDS:
+        if k in raw and raw[k] is not None:
+            wire[k] = raw[k]
+
+    # Mirror TelosOpenAITransport: bump the real-request counter (engine.emit
+    # would have done it; the chat-completions path bypasses that, so do it
+    # explicitly to keep R8 visibility consistent).
+    state = bridge.session_state
+    state.stats.real_requests_since_refresh += 1
+
+    snapshot = bridge.snapshot_ir()
+    layout = _summarize_ir_layout(snapshot)
+    tool_uses, tool_results = _extract_tool_calls(snapshot)
+    return PipelineResult(
+        wire=wire,
+        harness="telos",
+        plan_slots=[s.name for s in plan.slots],
+        routing_key=plan.routing_key,
+        model=model,
         cumulative_cache_creation=state.stats.cumulative_cache_creation,
         real_requests_since_refresh=state.stats.real_requests_since_refresh,
         ir_layout=layout,

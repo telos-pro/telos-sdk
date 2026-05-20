@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from telos.config import load_config
 from telos.corpus import DEFAULT_CORPUS_DIR
 from telos.output_filter import MODE_LABELS, TelosMode
 from telos.proxy.server import run
@@ -48,10 +49,20 @@ def main(argv: list[str] | None = None) -> int:
                              "0 = disable auto-refresh (default 5 seconds)")
     args = parser.parse_args(argv)
 
+    # Load the named upstream table from the user config so /upstreams/<slug>/...
+    # works out of the box (anthropic / openrouter / deepseek by default).
+    cfg = load_config()
+    # Legacy /v1/messages forwards to ``args.upstream``. When the user has not
+    # overridden it on the command line, take the URL from the anthropic entry
+    # of the upstream table so a single config edit changes both routes.
+    if args.upstream == parser.get_default("upstream"):
+        args.upstream = cfg.anthropic_upstream_url()
+
     run(
         host=args.host,
         port=args.port,
         upstream=args.upstream,
+        upstreams=cfg.upstreams,
         usage_log=args.usage_log,
         harness_override=args.harness,
         strict=args.strict,

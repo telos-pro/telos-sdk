@@ -37,7 +37,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 
 import aiohttp
 from aiohttp import web
@@ -51,9 +51,16 @@ from telos.proxy.inspector import (
     ToolStat as _ToolStat,
     entry_to_json as _inspector_entry_to_json,
 )
-from telos.proxy.pipeline import PipelineResult, process_anthropic_request
+from telos.proxy.pipeline import (
+    PipelineResult,
+    process_anthropic_request,
+    process_openai_request,
+)
 from telos.registry import canonical_harness
 from telos.scripts.telos_anthropic_transport import _detect_harness_signal
+
+if TYPE_CHECKING:
+    from telos.config import UpstreamConfig
 
 
 _DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -200,6 +207,41 @@ def _normalize_usage(u: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _normalize_openai_usage(u: Mapping[str, Any]) -> dict[str, int]:
+    """OpenAI / DeepSeek / OpenRouter usage → the same 4-bucket schema.
+
+    Two competing field conventions across upstreams:
+    - DeepSeek (passed through by OpenRouter):
+        ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
+    - OpenAI native:
+        ``prompt_tokens`` + ``prompt_tokens_details.cached_tokens``
+    Neither side bills for cache-write separately on the OpenAI ecosystem, so
+    that bucket is always 0. ``output`` comes from ``completion_tokens``.
+    """
+    if not u:
+        return {"raw_input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    if "prompt_cache_hit_tokens" in u or "prompt_cache_miss_tokens" in u:
+        hit = int(u.get("prompt_cache_hit_tokens") or 0)
+        miss = int(u.get("prompt_cache_miss_tokens") or 0)
+        return {
+            "raw_input": miss,
+            "cache_read": hit,
+            "cache_write": 0,
+            "output": int(u.get("completion_tokens") or 0),
+        }
+    pt = int(u.get("prompt_tokens") or 0)
+    cached = int(
+        (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        or u.get("cached_tokens", 0)
+    )
+    return {
+        "raw_input": max(pt - cached, 0),
+        "cache_read": cached,
+        "cache_write": 0,
+        "output": int(u.get("completion_tokens") or 0),
+    }
+
+
 def _anthropic_error(status: int, err_type: str, message: str) -> web.Response:
     return web.json_response(
         {"type": "error", "error": {"type": err_type, "message": message}},
@@ -281,6 +323,53 @@ def _summarize_raw_messages(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _summarize_openai_messages(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """OpenAI ChatCompletions counterpart of ``_summarize_raw_messages``.
+
+    OpenAI's ``content`` is usually a flat string; ``tool_calls`` is attached
+    on the assistant message; ``role=tool`` carries ``tool_call_id``. We
+    surface enough for the developer panel to render without needing the IR.
+    """
+    messages = raw.get("messages")
+    if not isinstance(messages, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, Mapping):
+            continue
+        role = str(msg.get("role", "?"))
+        content = msg.get("content")
+        blocks: list[dict[str, Any]] = []
+        if isinstance(content, str) and content:
+            blocks.append({
+                "type": "text",
+                "chars": len(content),
+                "preview": content[:_RAW_MSG_PREVIEW_CHARS],
+                "truncated": len(content) > _RAW_MSG_PREVIEW_CHARS,
+                "extra": "",
+            })
+        elif isinstance(content, list):
+            for blk in content:
+                if isinstance(blk, Mapping):
+                    blocks.append(_summarize_raw_block(blk))
+        for tc in msg.get("tool_calls") or []:
+            if isinstance(tc, Mapping):
+                fn = (tc.get("function") or {}).get("name", "?")
+                blocks.append({
+                    "type": "tool_call",
+                    "chars": 0, "preview": "", "truncated": False,
+                    "extra": f"name={fn}",
+                })
+        if role == "tool":
+            blocks.append({
+                "type": "tool_result",
+                "chars": 0, "preview": "", "truncated": False,
+                "extra": f"id={msg.get('tool_call_id', '')}",
+            })
+        out.append({"role": role, "blocks": blocks})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ProxyApp: holds the shared session + the request handlers
 # ---------------------------------------------------------------------------
@@ -290,6 +379,7 @@ class ProxyApp:
         self,
         *,
         upstream: str = _DEFAULT_UPSTREAM,
+        upstreams: Mapping[str, "UpstreamConfig"] | None = None,
         usage_log: Path | None = None,
         harness_override: str | None = None,
         request_timeout: float = 600.0,
@@ -301,6 +391,10 @@ class ProxyApp:
         record: bool = True,
     ):
         self.upstream = upstream.rstrip("/")
+        # Named upstream table for the multi-backend ``/upstreams/<slug>/...``
+        # path. Empty by default (legacy ``/v1/messages`` -> ``self.upstream``
+        # still works); callers pass in ``cfg.upstreams`` to enable.
+        self.upstreams: dict[str, "UpstreamConfig"] = dict(upstreams or {})
         self.usage_log = usage_log
         self.harness_override = harness_override
         self.request_timeout = request_timeout
@@ -1077,6 +1171,382 @@ class ProxyApp:
         return web.Response(body=body_bytes, status=status, headers={"Content-Type": ct})
 
     # ------------------------------------------------------------------
+    # POST /upstreams/{slug}/{tail:.*}  -- multi-backend route
+    # ------------------------------------------------------------------
+
+    async def handle_upstream_route(self, request: web.Request) -> web.StreamResponse:
+        """Dispatch ``/upstreams/<slug>/<...>`` requests.
+
+        - ``<slug>`` must be registered in ``self.upstreams``; otherwise 404.
+        - If the upstream is an ``openai-chat`` protocol and the tail is
+          ``v1/chat/completions``, run the TELOS OpenAI pipeline and forward.
+        - If the upstream is an ``anthropic-messages`` protocol and the tail
+          is ``v1/messages``, run the existing anthropic pipeline (via the
+          slug's upstream rather than ``self.upstream``).
+        - Anything else under the same slug is passthrough to ``<url>/<tail>``
+          (so users can hit ``/v1/models``, ``/v1/embeddings``, etc.).
+        """
+        slug = request.match_info["slug"]
+        tail = request.match_info["tail"]
+
+        upstream_cfg = self.upstreams.get(slug)
+        if upstream_cfg is None:
+            return _anthropic_error(
+                404, "not_found",
+                f"unknown upstream slug: {slug!r}. "
+                f"Known: {sorted(self.upstreams)}",
+            )
+
+        # Normalize tail (no leading slash).
+        tail = tail.lstrip("/")
+
+        if (upstream_cfg.protocol == "openai-chat"
+                and tail == "v1/chat/completions"
+                and request.method == "POST"):
+            return await self._handle_openai_chat(request, slug, upstream_cfg)
+        if (upstream_cfg.protocol == "anthropic-messages"
+                and tail == "v1/messages"
+                and request.method == "POST"):
+            # The anthropic pipeline already runs through handle_messages;
+            # temporarily swap self.upstream so the forward target is this
+            # slug's url, then delegate. Per-request override is OK because
+            # handle_messages reads self.upstream synchronously in body.
+            saved = self.upstream
+            self.upstream = upstream_cfg.url.rstrip("/")
+            try:
+                return await self.handle_messages(request)
+            finally:
+                self.upstream = saved
+        # Default: transparent passthrough to <slug.url>/<tail>
+        return await self._passthrough_to_upstream(
+            request, upstream_cfg.url.rstrip("/"), tail,
+        )
+
+    async def _passthrough_to_upstream(
+        self,
+        request: web.Request,
+        upstream_url: str,
+        tail: str,
+    ) -> web.StreamResponse:
+        url = f"{upstream_url}/{tail}"
+        if request.query_string:
+            url = f"{url}?{request.query_string}"
+        headers = self._forward_headers(request)
+        body = await request.read()
+        session = await self._session_get()
+        try:
+            upstream = await session.request(
+                request.method, url, headers=headers, data=body,
+            )
+        except aiohttp.ClientError as e:
+            return _anthropic_error(502, "api_error", f"Upstream error: {e}")
+        try:
+            body_bytes = await upstream.read()
+            status = upstream.status
+            ct = upstream.headers.get("content-type", "application/octet-stream")
+        finally:
+            upstream.release()
+        return web.Response(body=body_bytes, status=status,
+                            headers={"Content-Type": ct})
+
+    async def _handle_openai_chat(
+        self,
+        request: web.Request,
+        slug: str,
+        upstream_cfg: "UpstreamConfig",
+    ) -> web.StreamResponse:
+        """``POST /upstreams/<slug>/v1/chat/completions`` — TELOS-process, forward,
+        log usage to dashboard.
+        """
+        self._call_count += 1
+        call_index = self._call_count
+
+        try:
+            raw = await request.json()
+        except web.HTTPRequestEntityTooLarge as e:  # noqa: BLE001
+            _log.warning("request body too large (call=%d): %s", call_index, e)
+            return _anthropic_error(413, "request_too_large", str(e))
+        except Exception as e:  # noqa: BLE001
+            return _anthropic_error(400, "invalid_request_error",
+                                    f"Invalid JSON: {e}")
+
+        session_id = (
+            request.headers.get("x-telos-session")
+            or _derive_session_id(raw, request.headers)
+        )
+        session_state = self._registry.get_or_create(session_id)
+
+        # Corpus recording (raw, pre-rewrite).
+        if self._corpus_dir is not None:
+            try:
+                record_call(self._corpus_dir, session_id, call_index, raw)
+            except Exception:  # noqa: BLE001
+                _log.exception("corpus record failed (call=%d)", call_index)
+
+        mode = self._resolve_mode(request, session_state)
+        compare_group = self._resolve_compare_group(request, session_state)
+
+        # ---- TELOS pipeline (mode.telos only; rtk is anthropic-shaped, skip) ----
+        if mode.telos:
+            try:
+                result = process_openai_request(
+                    raw,
+                    session_id=session_id,
+                    session_state=session_state,
+                    engine_name=upstream_cfg.engine,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._pipeline_failures += 1
+                if self._pipeline_failures == 1:
+                    _log.exception("TELOS openai pipeline failed (call=%d) — "
+                                   "falling back to passthrough", call_index)
+                else:
+                    _log.warning("TELOS openai pipeline failed (call=%d): %s",
+                                 call_index, e)
+                if self.strict:
+                    return _anthropic_error(500, "api_error",
+                                            f"TELOS pipeline failed: {e}")
+                result = PipelineResult(
+                    wire=dict(raw),
+                    harness="passthrough",
+                    plan_slots=[],
+                    routing_key=None,
+                    model=raw.get("model", ""),
+                )
+        else:
+            result = PipelineResult(
+                wire=dict(raw),
+                harness="passthrough",
+                plan_slots=[],
+                routing_key=None,
+                model=raw.get("model", ""),
+            )
+
+        result.mode = mode.label
+        result.compare_group = compare_group
+        # raw_messages summary: OpenAI shape is flat strings most of the time,
+        # so just record role + content length, mirroring the anthropic-side summary.
+        result.raw_messages = _summarize_openai_messages(raw)
+
+        is_streaming = bool(raw.get("stream", False))
+        url = f"{upstream_cfg.url.rstrip('/')}/v1/chat/completions"
+        headers = self._forward_headers(request)
+        body_bytes = json.dumps(result.wire).encode("utf-8")
+        # Force JSON content-type; some clients send chunked.
+        headers["content-type"] = "application/json"
+
+        session = await self._session_get()
+        t0 = time.time()
+        try:
+            upstream = await self._post_upstream(
+                session, url, body_bytes, headers, call_index)
+        except aiohttp.ClientError as e:
+            _log.error("Upstream connection failed (call=%d): %s",
+                       call_index, e)
+            return _anthropic_error(502, "api_error", f"Upstream error: {e}")
+
+        if is_streaming:
+            return await self._stream_openai_response(
+                request, upstream, session_id, result, session_state,
+                call_index, t0,
+            )
+        return await self._buffered_openai_response(
+            upstream, session_id, result, session_state, call_index, t0,
+        )
+
+    async def _buffered_openai_response(
+        self,
+        upstream: aiohttp.ClientResponse,
+        session_id: str,
+        result: PipelineResult,
+        session_state: BridgeSessionState,
+        call_index: int,
+        t0: float,
+    ) -> web.Response:
+        """Non-streaming chat completions response: read body, extract usage, log."""
+        try:
+            body = await upstream.read()
+            status = upstream.status
+            ct = upstream.headers.get("content-type", "application/json")
+        finally:
+            upstream.release()
+
+        usage: dict[str, Any] = {}
+        if status == 200:
+            try:
+                parsed = json.loads(body.decode("utf-8"))
+                usage = parsed.get("usage") or {}
+            except Exception:  # noqa: BLE001
+                pass
+        elif status >= 400:
+            _log.warning("upstream %d (call=%d): %s", status, call_index,
+                         body[:2000].decode("utf-8", "replace"))
+
+        latency_s = time.time() - t0
+        self._log_openai_usage(
+            session_id, result, usage, session_state,
+            latency_s=latency_s,
+            streaming=False,
+            status=status,
+            call_index=call_index,
+        )
+        # ``_update_inspector`` reads usage via the anthropic normalizer; for
+        # OpenAI traffic the dashboard's openai-side metrics are owned by
+        # ``_log_openai_usage``, so we skip inspector here in Phase 1.
+        return web.Response(body=body, status=status,
+                            headers={"Content-Type": ct})
+
+    async def _stream_openai_response(
+        self,
+        request: web.Request,
+        upstream: aiohttp.ClientResponse,
+        session_id: str,
+        result: PipelineResult,
+        session_state: BridgeSessionState,
+        call_index: int,
+        t0: float,
+    ) -> web.StreamResponse:
+        """OpenAI ChatCompletions SSE: byte-forward chunks; extract usage from
+        the trailing chunk if ``stream_options.include_usage`` was set.
+        """
+        status = upstream.status
+        if status != 200:
+            try:
+                body = await upstream.read()
+                ct = upstream.headers.get("content-type", "application/json")
+            finally:
+                upstream.release()
+            if status >= 400:
+                _log.warning("upstream %d (call=%d): %s", status, call_index,
+                             body[:2000].decode("utf-8", "replace"))
+            self._log_openai_usage(
+                session_id, result, {}, session_state,
+                latency_s=time.time() - t0,
+                streaming=True,
+                status=status,
+                call_index=call_index,
+            )
+            return web.Response(body=body, status=status,
+                                headers={"Content-Type": ct})
+
+        downstream = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": upstream.headers.get(
+                    "content-type", "text/event-stream"),
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        try:
+            await downstream.prepare(request)
+        except (ConnectionResetError, asyncio.CancelledError) as e:
+            _log.info("downstream disconnected before stream start (call=%d): %s",
+                      call_index, e)
+            upstream.release()
+            return downstream
+
+        usage_aggregate: dict[str, Any] = {}
+        sse_buf = b""
+        try:
+            async for chunk in upstream.content.iter_any():
+                try:
+                    await downstream.write(chunk)
+                except (ConnectionResetError, asyncio.CancelledError):
+                    _log.info("downstream disconnected mid-stream (call=%d)",
+                              call_index)
+                    break
+                sse_buf += chunk
+                while b"\n\n" in sse_buf:
+                    block, sse_buf = sse_buf.split(b"\n\n", 1)
+                    self._peek_openai_sse_block(block, usage_aggregate)
+        except aiohttp.ClientPayloadError:
+            _log.warning("upstream closed connection mid-stream (call=%d)",
+                         call_index)
+
+        try:
+            await downstream.write_eof()
+        except Exception:
+            pass
+        finally:
+            upstream.release()
+
+        latency_s = time.time() - t0
+        self._log_openai_usage(
+            session_id, result, usage_aggregate, session_state,
+            latency_s=latency_s,
+            streaming=True,
+            status=200,
+            call_index=call_index,
+        )
+        return downstream
+
+    def _peek_openai_sse_block(
+        self, block: bytes, usage: dict[str, Any],
+    ) -> None:
+        """OpenAI SSE chunk format: ``data: {...}\\n\\n``. The terminal chunk
+        when ``stream_options.include_usage=true`` carries the full ``usage``.
+        Silently swallow errors — proxying must never break on bad chunks.
+        """
+        for line in block.split(b"\n"):
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == b"[DONE]" or not payload:
+                continue
+            try:
+                data = json.loads(payload.decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            u = data.get("usage")
+            if isinstance(u, dict):
+                usage.update(u)
+
+    def _log_openai_usage(
+        self,
+        session_id: str,
+        result: PipelineResult,
+        usage: Mapping[str, Any],
+        session_state: BridgeSessionState,
+        *,
+        latency_s: float,
+        streaming: bool,
+        status: int,
+        call_index: int,
+    ) -> None:
+        """Append one OpenAI-side usage line to the usage log (dashboard input)."""
+        if self.usage_log is None:
+            return
+        try:
+            with self.usage_log.open("a") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "session_id": session_id,
+                    "call_index": call_index,
+                    "model": result.model,
+                    "harness": result.harness,
+                    "mode": result.mode,
+                    "compare_group": result.compare_group,
+                    "tool_output_reduction": {},
+                    "n_slots": len(result.plan_slots),
+                    "slots": result.plan_slots,
+                    "latency_s": round(latency_s, 3),
+                    "streaming": streaming,
+                    "status": status,
+                    "raw_usage": dict(usage),
+                    "normalized": _normalize_openai_usage(usage),
+                    "cumulative": {
+                        "cache_creation":
+                            session_state.stats.cumulative_cache_creation,
+                        "real_requests_since_refresh":
+                            session_state.stats.real_requests_since_refresh,
+                        "refpool_slugs": sorted(session_state.refpool.slugs),
+                    },
+                }, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001
+            _log.exception("usage log write failed")
+
+    # ------------------------------------------------------------------
     # Logging
     # ------------------------------------------------------------------
 
@@ -1143,6 +1613,7 @@ class ProxyApp:
 def make_app(
     *,
     upstream: str = _DEFAULT_UPSTREAM,
+    upstreams: Mapping[str, "UpstreamConfig"] | None = None,
     usage_log: Path | None = None,
     harness_override: str | None = None,
     strict: bool = False,
@@ -1154,6 +1625,7 @@ def make_app(
     """Construct a complete aiohttp application. Reusable for tests / ASGI embedding."""
     proxy = ProxyApp(
         upstream=upstream,
+        upstreams=upstreams,
         usage_log=usage_log,
         harness_override=harness_override,
         strict=strict,
@@ -1169,6 +1641,11 @@ def make_app(
     # to 1 GiB is effectively unlimited.
     app = web.Application(client_max_size=1024 ** 3)
     app.router.add_post("/v1/messages", proxy.handle_messages)
+    # Multi-backend route: /upstreams/<slug>/<tail>. Registered before the
+    # catch-all passthrough so the slug dispatch wins.
+    app.router.add_route(
+        "*", "/upstreams/{slug}/{tail:.*}", proxy.handle_upstream_route,
+    )
     # Must be registered before the catch-all passthrough, otherwise it gets swallowed.
     app.router.add_get("/__telos/dashboard", proxy.handle_dashboard)
     app.router.add_route("GET", "/__telos/control/mode", proxy.handle_control_mode)
@@ -1187,6 +1664,7 @@ def run(
     host: str = "127.0.0.1",
     port: int = 7171,
     upstream: str = _DEFAULT_UPSTREAM,
+    upstreams: Mapping[str, "UpstreamConfig"] | None = None,
     usage_log: Path | None = None,
     harness_override: str | None = None,
     strict: bool = False,
@@ -1203,6 +1681,7 @@ def run(
     mode = mode or TelosMode()
     app = make_app(
         upstream=upstream,
+        upstreams=upstreams,
         usage_log=usage_log,
         harness_override=harness_override,
         strict=strict,

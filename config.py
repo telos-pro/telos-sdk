@@ -7,6 +7,10 @@ A lightweight JSON config file that records:
 - ``favorite_harness``     the harness the bare ``telos`` command enters by default
 - ``harness_executables``  harness name → custom executable name (overrides the
   default guess)
+- ``upstreams``            slug → {url, engine, path}; the gateway forwards
+  ``/upstreams/<slug>/<...>`` requests to ``url``, using ``engine`` to drive the
+  TELOS pipeline. Defaults cover anthropic / openrouter / deepseek; user-added
+  entries are preserved verbatim.
 
 Design principles:
 - Missing file → all defaults, no error (zero-config first use).
@@ -58,6 +62,92 @@ class GatewayConfig:
         return f"http://{self.host}:{self.port}"
 
 
+@dataclass(frozen=True)
+class UpstreamConfig:
+    """One named forward target.
+
+    Attributes:
+        url:    upstream base URL (no trailing slash).
+        engine: ``EngineAdapter`` name used by the TELOS pipeline (``anthropic``
+                / ``openai`` / ``deepseek`` / ``vllm`` / ``sglang``). Drives both
+                emit and ``parse_usage`` of responses.
+        protocol: wire protocol the upstream expects on its request endpoint:
+                ``anthropic-messages``  → POST ``/v1/messages``
+                ``openai-chat``         → POST ``/v1/chat/completions``
+                The gateway dispatches incoming ``/upstreams/<slug>/...`` requests
+                onto the matching pipeline based on this.
+    """
+
+    url: str
+    engine: str
+    protocol: str  # "anthropic-messages" | "openai-chat"
+
+
+_DEFAULT_UPSTREAMS: dict[str, UpstreamConfig] = {
+    "anthropic": UpstreamConfig(
+        url="https://api.anthropic.com",
+        engine="anthropic",
+        protocol="anthropic-messages",
+    ),
+    "openrouter": UpstreamConfig(
+        url="https://openrouter.ai/api/v1",
+        engine="deepseek",            # DS-style usage fields pass through OpenRouter
+        protocol="openai-chat",
+    ),
+    "deepseek": UpstreamConfig(
+        url="https://api.deepseek.com",
+        engine="deepseek",
+        protocol="openai-chat",
+    ),
+}
+
+
+def default_upstreams() -> dict[str, UpstreamConfig]:
+    """Fresh copy of the built-in upstreams table."""
+    return dict(_DEFAULT_UPSTREAMS)
+
+
+_VALID_PROTOCOLS = ("anthropic-messages", "openai-chat")
+
+
+def _parse_upstreams(raw: Any) -> dict[str, UpstreamConfig]:
+    """Merge user-supplied upstreams over the defaults.
+
+    Tolerates a missing / malformed section by falling back to defaults: this
+    matches the "never block on user data" principle of the rest of the file.
+    """
+    out = default_upstreams()
+    if not isinstance(raw, dict):
+        return out
+    for slug, entry in raw.items():
+        if not isinstance(slug, str) or not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        engine = entry.get("engine")
+        protocol = entry.get("protocol")
+        if not isinstance(url, str) or not isinstance(engine, str):
+            continue
+        if protocol not in _VALID_PROTOCOLS:
+            # Backfill from the default of the same slug if any; otherwise skip.
+            if slug in _DEFAULT_UPSTREAMS:
+                protocol = _DEFAULT_UPSTREAMS[slug].protocol
+            else:
+                continue
+        out[slug] = UpstreamConfig(
+            url=url.rstrip("/"),
+            engine=engine,
+            protocol=protocol,
+        )
+    return out
+
+
+def _serialize_upstreams(upstreams: dict[str, UpstreamConfig]) -> dict[str, Any]:
+    return {
+        slug: {"url": u.url, "engine": u.engine, "protocol": u.protocol}
+        for slug, u in upstreams.items()
+    }
+
+
 @dataclass
 class TelosConfig:
     """telos global config. ``_extra`` preserves unknown keys so they are not lost on write-back."""
@@ -66,7 +156,17 @@ class TelosConfig:
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     favorite_harness: str | None = None
     harness_executables: dict[str, str] = field(default_factory=dict)
+    upstreams: dict[str, UpstreamConfig] = field(default_factory=default_upstreams)
     _extra: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def anthropic_upstream_url(self) -> str:
+        """The URL the legacy ``/v1/messages`` route forwards to.
+
+        Read from ``upstreams.anthropic.url``; falls back to
+        ``https://api.anthropic.com`` if the user removed that entry.
+        """
+        anth = self.upstreams.get("anthropic")
+        return anth.url if anth is not None else "https://api.anthropic.com"
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = dict(self._extra)
@@ -79,10 +179,12 @@ class TelosConfig:
         }
         data["favorite_harness"] = self.favorite_harness
         data["harness_executables"] = dict(self.harness_executables)
+        data["upstreams"] = _serialize_upstreams(self.upstreams)
         return data
 
 
-_KNOWN_KEYS = {"_schema", "mode", "gateway", "favorite_harness", "harness_executables"}
+_KNOWN_KEYS = {"_schema", "mode", "gateway", "favorite_harness",
+               "harness_executables", "upstreams"}
 
 
 def load_config() -> TelosConfig:
@@ -113,12 +215,14 @@ def load_config() -> TelosConfig:
         if isinstance(execs_raw, dict) else {}
     )
     fav = data.get("favorite_harness")
+    upstreams = _parse_upstreams(data.get("upstreams"))
     extra = {k: v for k, v in data.items() if k not in _KNOWN_KEYS}
     return TelosConfig(
         mode=str(data.get("mode", DEFAULT_MODE)),
         gateway=gateway,
         favorite_harness=str(fav) if fav else None,
         harness_executables=harness_executables,
+        upstreams=upstreams,
         _extra=extra,
     )
 

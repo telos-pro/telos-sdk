@@ -469,6 +469,49 @@ def _resolve_inputs(patterns: list[str]) -> list[Path]:
 # Rendering
 # ---------------------------------------------------------------------------
 
+# Inline TELOS brand logo (see branding/logo.svg). The svg <style> block uses
+# {} which would collide with f-string interpolation, so it lives as a plain
+# constant and is injected via {LOGO_SVG}.
+LOGO_SVG = """\
+<svg class="brand-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 140" role="img" aria-label="TELOS — Portable Agent Context">
+  <title>TELOS</title>
+  <style>
+    .telos-wm    { fill: #EAF7F9; }
+    .telos-tg    { fill: #82A6AB; }
+    .telos-stone { stroke: #EAF7F9; }
+    .telos-feet  { fill: #4FB3BF; }
+  </style>
+  <defs>
+    <clipPath id="telos-body">
+      <path d="M34 122 L34 45 Q34 15 74 15 Q114 15 114 45 L114 122 Z"/>
+    </clipPath>
+  </defs>
+  <g class="telos-feet">
+    <rect x="42" y="120" width="22" height="10" rx="5"/>
+    <rect x="84" y="120" width="22" height="10" rx="5"/>
+  </g>
+  <g clip-path="url(#telos-body)">
+    <rect x="30" y="10" width="88" height="58" fill="#7FD8E0"/>
+    <rect x="30" y="68" width="88" height="27" fill="#4FB3BF"/>
+    <rect x="30" y="95" width="88" height="35" fill="#2C5F66"/>
+    <g stroke="#1F4A50" stroke-width="3" stroke-linecap="round" opacity="0.30">
+      <line x1="49" y1="74" x2="93" y2="74"/>
+      <line x1="49" y1="85" x2="84" y2="85"/>
+    </g>
+    <line x1="30" y1="95" x2="118" y2="95" stroke="#7FD8E0" stroke-width="2" opacity="0.55"/>
+  </g>
+  <g>
+    <circle cx="60" cy="40" r="8.5" fill="#1F4A50"/>
+    <circle cx="88" cy="40" r="8.5" fill="#1F4A50"/>
+    <circle cx="62.6" cy="37.4" r="2.8" fill="#EAF7F9"/>
+    <circle cx="90.6" cy="37.4" r="2.8" fill="#EAF7F9"/>
+    <path d="M64 53 Q74 61 84 53" fill="none" stroke="#1F4A50" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+  <path class="telos-stone" d="M34 122 L34 45 Q34 15 74 15 Q114 15 114 45 L114 122 Z" fill="none" stroke-width="2.5"/>
+  <text class="telos-wm" x="166" y="78" font-family="'Helvetica Neue', Arial, sans-serif" font-size="62" font-weight="700" letter-spacing="3">TELOS</text>
+  <text class="telos-tg" x="168" y="104" font-family="'Helvetica Neue', Arial, sans-serif" font-size="12" font-weight="500" letter-spacing="3.4">PORTABLE AGENT CONTEXT</text>
+</svg>"""
+
 CSS = """
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -491,6 +534,7 @@ header h1 { margin: 0 0 6px 0; font-size: 28px; font-weight: 700;
   letter-spacing: -0.01em; display: flex; align-items: center; gap: 12px;
   flex-wrap: wrap;
 }
+.brand-logo { height: 48px; width: auto; display: block; }
 
 /* ---- reset / 清零 button ---- */
 .reset-btn {
@@ -1052,7 +1096,7 @@ def render_dashboard(
 <header>
   <div class="header-row">
     <div>
-      <h1><span class="grad">TELOS · Token Savings</span> {mode_badge}</h1>
+      <h1>{LOGO_SVG} {mode_badge}</h1>
       <div class="sub">
         {n_calls:,} calls · {n_sessions:,} sessions · span {span_s}
         · generated {ts_now}{refresh_note}

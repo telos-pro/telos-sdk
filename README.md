@@ -15,7 +15,7 @@
 [![Status](https://img.shields.io/badge/status-Beta-d8851f?style=flat-square)](CHANGELOG.md)
 [![Protocol](https://img.shields.io/badge/protocol-TELOS%20IR-7FD8E0?style=flat-square)](docs/2026-05-06-telos-protocol.md)
 
-[**Quickstart**](#-3-step-start) · [**Why**](#-the-problem--two-broken-legs) · [**Protocol**](#-the-protocol-not-compression-but-never-breaking-the-prefix) · [**Engines**](#-engines--one-ir-five-backends) · [**Docs**](#-going-deeper)
+[**Quickstart**](#-3-step-start) · [**Support Matrix**](#-support-matrix) · [**Why**](#-the-problem--two-broken-legs) · [**Protocol**](#-the-protocol-not-compression-but-never-breaking-the-prefix) · [**Engines**](#-engines--one-ir-five-backends) · [**Roadmap**](#--roadmap) · [**Docs**](#-going-deeper)
 
 <sub>📖 &nbsp;**English** · [Simplified Chinese](README.zh-CN.md)</sub>
 
@@ -39,20 +39,71 @@ Scale to 1,000 sessions: **$362 → $26**. In a controlled A/B/C/D run (`showcas
 **Stop measuring in "X× fewer tokens."** In 2026, the pricing gap between tiers of the same model family already spans **80×–150×**. Anyone can inflate a ratio by stuffing the cheapest tier in the denominator — absolute dollars are the only number that doesn't lie.
 
 <p align="center">
-  <img src="promo-assets/01-waste.svg" alt="Today's agent token efficiency is only 25%" width="100%"/>
+  <img src="promo-assets/01-waste.en.svg" alt="Today's agent token efficiency is only 25%" width="100%"/>
 </p>
+
+## ⬢ &nbsp;3-step to save 90%
+
+#### ❶ &nbsp;Install
+
+```bash
+pip install telos-sdk
+```
+
+#### ❷ &nbsp;Connect
+
+```bash
+telos init
+```
+
+Auto-detects **claude-code / codex / openclaw / hermes** on this machine, injects config into each, and starts the local gateway in the background (state written to `~/.telos/gateway.json`). No changes to your agent code.
+
+#### ❸ &nbsp;Observe
+
+```bash
+telos dashboard
+```
+
+Opens an offline HTML dashboard in your browser showing savings per call in absolute dollars. Every invocation is automatically appended to `~/.telos/usage.jsonl` and aggregated in real time.
+
+<p align="center">
+  <img src="promo-assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
+</p>
+
+<p align="center"><sub><strong>Every saving pinned to an absolute dollar figure</strong> · No cloud server required · Opens offline · <code>~/.telos/usage.jsonl</code> fed directly into a single-file HTML page</sub></p>
+
+
+**TELOS is open source. Run it on your own workflow — see whether that 92% is real, or just another "X× tokens" claim.**
 
 ---
 
-## ⬢ &nbsp;The problem — two broken legs
+## ⬢ &nbsp;Support Matrix
 
-**Leg one: Token burn, fast and needless.** In a 20-turn session, that 4,000-token system prompt gets read 20 times verbatim. Anthropic's cache hit costs 10%, a miss costs 100% — and all it takes to invalidate a full-session PIN is a single `currentDate: 2026-05-20` slipped into the system prompt. That gate has never been closed for you.
+### Harness support
 
-**Leg two: Your context isn't yours.** The persona you spent a day tuning, the tool-chain you wired up, the 20-turn thread you're mid-way through — all of it is trapped on someone else's server. Want to try DeepSeek instead? Their first response: *"Tell me about your project."* Want to hand a task segment to a model that's better at it? Can't be done. The bill arrives as a percentage diluted by whatever denominator they chose. **You're not the agent's owner — you're a tenant inside someone else's agent.**
+| Harness | Typical usage | `telos init` auto-connect | Status |
+|---|---|:---:|:---:|
+| Claude Code | Anthropic-native coding agent workflow | ✅ | 🟢 First-class |
+| OpenClaw | Open-source agent runtime with TELOS parser integration | ✅ | 🟢 First-class |
+| Hermes | Multi-agent orchestration with independent sub-IR handling | ✅ | 🟢 First-class |
+| Codex | OpenAI-style coding workflow via local gateway injection | ✅ | 🟢 Supported |
 
-<p align="center">
-  <img src="promo-assets/02-pain-points.svg" alt="Four walls" width="100%"/>
-</p>
+### Frontier model support
+
+| Model family | Provider | Through TELOS engine adapter | Notes |
+|---|---|:---:|---|
+| Claude (4.x / 4.6+) | Anthropic | ✅ | Explicit breakpoints and prewarm path |
+| GPT (4+/5.x) | OpenAI | ✅ | Uses `prompt_cache_key` routing strategy |
+| DeepSeek (V3+) | DeepSeek | ✅ | Deterministic byte-stable prefix behavior |
+
+### Inference framework support
+
+| Framework | Deployment style | Through TELOS | Cache-aware capabilities |
+|---|---|:---:|---|
+| vLLM | Self-hosted OpenAI-compatible serving | ✅ | Explicit anchors, prewarm, cache probe/evict, partial fork-and-replace |
+| SGLang | Self-hosted high-throughput serving | ✅ | Explicit anchors, prewarm, cache probe/evict, full fork-and-replace |
+
+<sub>Need another harness or model backend? TELOS is adapter-driven: keep the same IR and add an engine/harness adapter without rewriting your agent logic.</sub>
 
 ---
 
@@ -98,152 +149,35 @@ The prompt is an **append-only stream**. New turns only add blocks to the tail �
 
 Because earlier blocks are immutable and bytes are identical across turns, the inference engine's prefix-matching algorithm finds the longest common prefix on **every** request — not by luck, but by construction. **Cache hit rate is therefore a monotonically non-decreasing function of session length: longer sessions, more reuse, never regression.**
 
-### One IR, five backends
-
-The same `TelosIR` lands on different engines via **deterministic capability degradation**: Anthropic's explicit BPs, OpenAI's `prompt_cache_key`, DeepSeek's byte-stable prefix, vLLM's cooperative eviction, SGLang's RadixAttention — each engine pushed to its actual cache ceiling, while your agent code changes nothing.
-
-<p align="center">
-  <img src="promo-assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
-</p>
-
-<p align="center"><sub><strong>Every saving pinned to an absolute dollar figure</strong> · No cloud server required · Opens offline · <code>~/.telos/usage.jsonl</code> fed directly into a single-file HTML page</sub></p>
-
 ---
 
-## ⬢ &nbsp;3-step start
+## ⬢ &nbsp;Roadmap
 
-#### ❶ &nbsp;Install
+TELOS makes exactly one claim: **context is yours, agents are hired.** The current roadmap stays entirely within the *cost-saving gateway* narrative, with the seed of *trajectory as a portable asset* planted only in the last phase. **Anything that can be checked off goes on the roadmap; anything that can't, doesn't.**
 
-```bash
-pip install telos-sdk
-```
-
-#### ❷ &nbsp;Connect
-
-```bash
-telos init
-```
-
-Auto-detects **claude-code / codex / openclaw / hermes** on this machine, injects config into each, and starts the local gateway in the background (state written to `~/.telos/gateway.json`). No changes to your agent code.
-
-#### ❸ &nbsp;Observe
-
-```bash
-telos dashboard
-```
-
-Opens an offline HTML dashboard in your browser showing savings per call in absolute dollars. Every invocation is automatically appended to `~/.telos/usage.jsonl` and aggregated in real time.
-
-**TELOS is open source. Run it on your own workflow — see whether that 92% is real, or just another "X× tokens" claim.**
-
----
-
-## ⬢ &nbsp;Engines — one IR, five backends
-
-TELOS is normative: it defines how context *should* be represented, and engines align by capability. One `TelosIR` on different engines is degraded **deterministically** by the adapter — never silently, never lossily in meaning.
-
-| Capability | Anthropic 4.6+ | OpenAI 4+/5.x | DeepSeek V3+ | vLLM | SGLang |
-|---|:---:|:---:|:---:|:---:|:---:|
-| explicit BP / anchors | ✓ (≤4) | ✗ | ✗ | ✓ | ✓ |
-| explicit prewarm | ✓ | ✗ | ✗ | ✓ | ✓ |
-| routing key | ✗ | `prompt_cache_key` | ✗ | `cache_salt` | `affinity_key` |
-| cache probe / segment evict | ✗ | ✗ | ✗ | ✓ | ✓ |
-| fork-and-replace | ✗ | ✗ | ✗ | partial | ✓ |
-
-> **Bidirectional capability** (`BidirectionalEngineAdapter`, open-source inference engines only): `cooperative_fold()` lets the server keep the prefix KV untouched and recompute only the summary tail — a closed API's `fold` is a client-side rewrite that forces re-prefill of the whole span every time. Full matrix in [protocol §6](docs/2026-05-06-telos-protocol.md).
-
----
-
-## ⬢ &nbsp;Architecture
-
-```
-agent harness ──► TELOS Bridge ──► engine adapter ──► LLM service
-   (parse)          (5 primitives)   (capability-aware)
-```
-
-| Layer | Files | Responsibility |
-|---|---|---|
-| harness | [`harness/openclaw.py`](harness/) `hermes.py` | split envelope, large docs into ref-pool, produce `TelosIR` |
-| bridge | [`bridge.py`](bridge.py) [`ir.py`](ir.py) [`refpool.py`](refpool.py) | 5 primitives, invariant checks, frozen ref-pool slugs, canonicalize |
-| engine | [`engine/anthropic.py`](engine/) `openai.py` `deepseek.py` | capability-aware Mark, wire serialization, usage parsing |
-
-The bridge is pure Python with no LLM SDK dependency. `TelosIR` is the single data structure passing between all three layers — frozen, narrow-fielded, engine-agnostic.
-
----
-
-## ⬢ &nbsp;One invariant
-
-The whole protocol has exactly one hard constraint. Within each segment (`tools` / `system` / a single `message`), blocks must be in physical order:
-
-```
-PIN*  →  FOLD*  →  DROP*
-```
-
-<sub>(In a `message`, `tool_result` blocks always come first — required by the Anthropic protocol.)</sub>
-
-| Band | Meaning | Typical content |
-|---|---|---|
-| **PIN** | long-lived stable segment | tool definitions, system prompt, current question |
-| **FOLD** | cacheable but droppable on compact | assistant replies, tool_result, large ref-pool docs |
-| **DROP** | never enters the cache hash | timestamp, cwd, git status, envelope |
-
-Violate it and `TelosInvariantError` is raised. Everything else is a soft suggestion.
-
-### Five primitives &nbsp;<sub>(`Bridge` methods)</sub>
-
-| Primitive | Purpose |
+| Phase | Thesis |
 |---|---|
-| `place(segment, blocks)` | put blocks into tools / system / the current message |
-| `pin(slug, payload)` | write a PIN block into the system segment |
-| `mark()` | let the engine produce this turn's BP / routing-key plan |
-| `fold(slugs= / message_range=, summary=)` | fold old turns into ref-pool references |
-| `refresh(plan)` | once throttling allows, send a `max_tokens=0` prewarm (Anthropic only) |
-
-### ref-pool — a "pointer table" for context
-
-A slug is **frozen** the moment `register()` is called: content can change (`fold()`), the slug cannot. `fold()` swaps the payload, not the slug → every `[ref:slug]` reference stays byte-identical → BPs still hit after a fold. **Stable pointers, flowing content** — portable context realized in the protocol.
+| **Phase 1** · Protocol correctness hardening | Turn "cache cannot be invalidated" from a slogan into a CI red/green light |
+| **Phase 2** · Production reliability & observability | Make the gateway safe to leave on someone else's prod traffic |
+| **Phase 3** · Take over the call chain | Go from prompt rewriter to the agent's traffic plane |
+| **Phase 4** · Context becomes an asset | Trajectories are no longer logs — they're forkable code |
 
 ---
 
-## ⬢ &nbsp;Appendix: R1–R8 protocol-hazard fixes
+## Citation
 
-Review surfaced 8 design hazards in the protocol; the Python implementation fixes all of them:
+Core contributors: Zheng Wang, Shenzhi Wang, Yue Wu, Shiji Song, Gao Huang
 
-| ID | Problem | Fix location |
-|---|---|---|
-| R1 | OpenAI `prompt_cache_key` only widens slots at ≥15 RPM per key | `engine/openai.py :: KEY_RPM_SOFT_CAP = 12` + `shard()` |
-| R2 | Anthropic's 4 BPs cover only head + tail, leaving mid turns uncached | `engine/anthropic.py :: _MID_ANCHOR_STRIDE = 19` |
-| R3 | sub-agent IR and parent IR sharing a `session_id` | `harness/hermes.py` — sub-IR parsed independently |
-| R4 | after `fold()`, a Mark slot can land in a folded span | `bridge.py :: fold()` — re-run `mark()` |
-| R5 | tool field / array order not stably canonicalized | `bridge.py :: _canonicalize_ir()` |
-| R6 | thinking blocks lost across non-tool_result calls | `engine/base.py :: thinking_preserved_across_non_tool_result` |
-| R7 | no explicit priority when Anthropic BP candidates > 4 | `engine/anthropic.py :: plan_marks` priority + truncation |
-| R8 | refresh unthrottled, can saturate quota in reverse | `bridge.py :: REFRESH_THRESHOLD = 11` adaptive gate |
-
----
-
-## ⬢ &nbsp;Going deeper
-
-| What you want | Where |
-|---|---|
-| Get started (install, integration, CLI, troubleshooting) | [`docs/User-guide.md`](docs/User-guide.md) |
-| Understand the protocol | [`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md) |
-| See the architecture | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| See the change history | [`CHANGELOG.md`](CHANGELOG.md) |
-
----
-
-## ⬢ &nbsp;License
-
-Apache-2.0 — the protocol core is open source, forever. See [LICENSE](LICENSE).
+```
+@misc{wang2026telos-agent,
+  title        = {Telos: A Cost-Aware Inference Infrastructure for AI Agent},
+  author       = {Zheng Wang, Shenzhi Wang, HongTao Zhong, Shiji Song, Gao Huang},
+  howpublished = {\url{https://github.com/telos-pro/telos-sdk.git}},
+  year         = {2026}
+}
+```
 
 ---
 
 <div align="center">
 <a href="https://github.com/telos-pro/telos-sdk"><img src="https://img.shields.io/badge/⭐%20Star%20on%20GitHub-telos--pro%2Ftelos--sdk-1F4A50?style=for-the-badge&logo=github&logoColor=white" alt="Star on GitHub"/></a>
-
-**[github.com/telos-pro/telos-sdk](https://github.com/telos-pro/telos-sdk)** &nbsp;·&nbsp; Apache 2.0
-
-<sub>Token efficiency is not about compression — it's about never breaking the prefix.</sub>
-
-</div>

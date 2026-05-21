@@ -92,7 +92,7 @@ def test_install_mirrors_url_into_telos_upstreams(tmp_path: Path) -> None:
         assert telos_cfg_path.exists()
         telos_data = json.loads(telos_cfg_path.read_text())
         upstream = telos_data["upstreams"]["openrouter"]
-        assert upstream["url"] == "https://openrouter.ai/api/v1"
+        assert upstream["url"] == "https://openrouter.ai/api"
         assert upstream["protocol"] == "openai-chat"
         assert upstream["engine"] == "deepseek"
         # Phase 2.6: dashboard attribution via slug-tagged identity.

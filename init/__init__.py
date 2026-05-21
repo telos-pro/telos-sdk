@@ -1,16 +1,20 @@
 """TELOS agent connectors —— ``python -m telos.init``.
 
-One installer per harness: makes the harness point ``ANTHROPIC_BASE_URL`` /
-``OPENAI_BASE_URL`` at the local gateway when it starts.
-
-Supported harnesses:
+One installer per harness:
 
 - ``claude-code``: patches the ``env`` field of ``~/.claude/settings.json``
-- ``codex``:       environment variable injection (``OPENAI_BASE_URL``)
-- ``openclaw``:    environment variable injection (``ANTHROPIC_BASE_URL``)
-- ``hermes``:      environment variable injection (``ANTHROPIC_BASE_URL``)
-- ``generic``:     prints a set of shell export commands for the user to add to
-  their rc file
+  (Claude Code reads ``ANTHROPIC_BASE_URL`` from there at launch).
+- ``openclaw``: patches the primary provider's ``baseUrl`` in
+  ``~/.openclaw/openclaw.json`` to route through the local telos gateway
+  (and mirrors the original URL into telos's upstream table so the gateway
+  can forward verbatim).
+- ``hermes``: patches the top-level ``model.base_url`` in
+  ``~/.hermes/config.yaml`` (analogous pattern).
+- ``codex``: launcher-only — codex does not honor a base-URL env var; the
+  ``telos codex`` launcher injects ``OPENAI_BASE_URL`` into the subprocess
+  at startup.
+- ``generic``: prints a set of shell ``export`` commands the user can add
+  to their rc file.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from telos.init.anthropic_env import make_env_installer
 from telos.init.base import AgentInstaller, InstallResult
 from telos.init.claude_code import ClaudeCodeInstaller
 from telos.init.generic import GenericInstaller
+from telos.init.hermes import HermesInstaller
+from telos.init.openclaw import OpenClawInstaller
 
 # name → factory; the factory signature is uniformly ``(*, proxy_url=...) -> AgentInstaller``.
 InstallerFactory = Callable[..., AgentInstaller]
@@ -28,8 +34,8 @@ InstallerFactory = Callable[..., AgentInstaller]
 INSTALLERS: dict[str, InstallerFactory] = {
     "claude-code": ClaudeCodeInstaller,
     "codex": make_env_installer("codex", "OPENAI_BASE_URL"),
-    "openclaw": make_env_installer("openclaw", "ANTHROPIC_BASE_URL"),
-    "hermes": make_env_installer("hermes", "ANTHROPIC_BASE_URL"),
+    "openclaw": OpenClawInstaller,
+    "hermes": HermesInstaller,
     "generic": GenericInstaller,
 }
 

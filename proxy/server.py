@@ -1201,11 +1201,13 @@ class ProxyApp:
         tail = tail.lstrip("/")
 
         if (upstream_cfg.protocol == "openai-chat"
-                and tail == "v1/chat/completions"
+                and tail.endswith("chat/completions")
                 and request.method == "POST"):
-            return await self._handle_openai_chat(request, slug, upstream_cfg)
+            return await self._handle_openai_chat(
+                request, slug, upstream_cfg, tail,
+            )
         if (upstream_cfg.protocol == "anthropic-messages"
-                and tail == "v1/messages"
+                and tail.endswith("v1/messages")
                 and request.method == "POST"):
             # The anthropic pipeline already runs through handle_messages;
             # temporarily swap self.upstream so the forward target is this
@@ -1254,9 +1256,17 @@ class ProxyApp:
         request: web.Request,
         slug: str,
         upstream_cfg: "UpstreamConfig",
+        tail: str,
     ) -> web.StreamResponse:
-        """``POST /upstreams/<slug>/v1/chat/completions`` — TELOS-process, forward,
-        log usage to dashboard.
+        """``POST /upstreams/<slug>/<tail>`` (tail ends in ``chat/completions``) —
+        TELOS-process, forward verbatim to ``<upstream.url>/<tail>``, log usage.
+
+        ``tail`` is whatever path the client put after the slug prefix. This is
+        passed through unchanged: if the client sent ``v1/chat/completions``,
+        the forward goes to ``<url>/v1/chat/completions``; if it sent
+        ``chat/completions``, the forward goes to ``<url>/chat/completions``.
+        The slug's ``url`` should be the OpenAI-SDK-style ``base_url`` (with or
+        without ``/v1``) that matches the path convention the client appends.
         """
         self._call_count += 1
         call_index = self._call_count
@@ -1329,7 +1339,9 @@ class ProxyApp:
         result.raw_messages = _summarize_openai_messages(raw)
 
         is_streaming = bool(raw.get("stream", False))
-        url = f"{upstream_cfg.url.rstrip('/')}/v1/chat/completions"
+        url = f"{upstream_cfg.url.rstrip('/')}/{tail}"
+        if request.query_string:
+            url = f"{url}?{request.query_string}"
         headers = self._forward_headers(request)
         body_bytes = json.dumps(result.wire).encode("utf-8")
         # Force JSON content-type; some clients send chunked.

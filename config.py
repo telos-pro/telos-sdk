@@ -90,7 +90,10 @@ _DEFAULT_UPSTREAMS: dict[str, UpstreamConfig] = {
         protocol="anthropic-messages",
     ),
     "openrouter": UpstreamConfig(
-        url="https://openrouter.ai/api/v1",
+        # No ``/v1`` suffix: the gateway forwards the inbound tail verbatim,
+        # so the client supplies the version segment (``/v1/chat/completions``).
+        # This matches the anthropic / deepseek defaults and avoids a double-/v1.
+        url="https://openrouter.ai/api",
         engine="deepseek",            # DS-style usage fields pass through OpenRouter
         protocol="openai-chat",
     ),

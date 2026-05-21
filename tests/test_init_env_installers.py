@@ -116,12 +116,23 @@ def test_status_reports_live_env_mismatch() -> None:
 
 
 def test_factory_from_registry() -> None:
-    inst = INSTALLERS["openclaw"](proxy_url="http://h:1")
-    assert inst.name == "openclaw"
-    assert inst.env_var == "ANTHROPIC_BASE_URL"
+    """``INSTALLERS["codex"]`` is the env-based installer; openclaw and hermes
+    moved to config-patching installers in Phase 2 (see test_init_openclaw /
+    test_init_hermes)."""
+    inst = INSTALLERS["codex"](proxy_url="http://h:1")
+    assert isinstance(inst, EnvInstaller)
+    assert inst.name == "codex"
+    assert inst.env_var == "OPENAI_BASE_URL"
     assert inst.proxy_url == "http://h:1"
-    r = inst.install()
-    assert any("ANTHROPIC_BASE_URL" in n for n in r.notes)
+
+    # openclaw / hermes now use their own installers; the env-installer is no
+    # longer in the registry for them.
+    from telos.init.hermes import HermesInstaller
+    from telos.init.openclaw import OpenClawInstaller
+    assert isinstance(INSTALLERS["openclaw"](proxy_url="http://h:1"),
+                       OpenClawInstaller)
+    assert isinstance(INSTALLERS["hermes"](proxy_url="http://h:1"),
+                       HermesInstaller)
     print("✓ test_factory_from_registry")
 
 

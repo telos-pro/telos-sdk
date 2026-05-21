@@ -180,6 +180,21 @@ class TelosPlugin(HarnessPlugin):
                         payload=text_content,
                         source_tag="telos/assistant-text",
                     ))
+                # Preserve ``reasoning_content`` (DeepSeek / OpenAI o-series
+                # thinking-mode field). Reasoning models REQUIRE the previous
+                # turn's reasoning_content to be echoed back on the next call,
+                # so this block must round-trip verbatim — drop it and the
+                # upstream returns "reasoning_content in the thinking mode
+                # must be passed back to the API" (HTTP 400).
+                reasoning = msg.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    blocks.append(TelosBlock(
+                        id=f"msg{mi}/ar",
+                        band=Band.FOLD,
+                        kind="reasoning",
+                        payload=reasoning,
+                        source_tag="telos/assistant-reasoning",
+                    ))
                 for ti, tc in enumerate(msg.get("tool_calls") or []):
                     blocks.append(TelosBlock(
                         id=f"msg{mi}/au{ti}",

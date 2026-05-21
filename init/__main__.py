@@ -75,6 +75,31 @@ def _start_gateway() -> None:
     print("  open the dashboard: telos dashboard")
 
 
+def _resolve_gateway_url(args_gateway_url: str | None, cfg) -> tuple[str, str]:
+    """Decide which URL the installers should patch user configs to point at.
+
+    Priority:
+      1. Explicit ``--gateway-url`` from the CLI (user override).
+      2. A currently-running daemon's URL (so installer-patched URLs match the
+         port the daemon is actually listening on, even if ``~/.telos/config.json``
+         records a different default).
+      3. ``cfg.gateway.base_url()`` (config default, typically 127.0.0.1:7171).
+
+    Returns ``(url, source)`` — ``source`` is a short label used in startup
+    logs so the user can see where the URL came from.
+    """
+    if args_gateway_url:
+        return args_gateway_url, "--gateway-url"
+    try:
+        from telos.gateway import daemon
+        state = daemon.read_state()
+    except Exception:  # noqa: BLE001 - daemon module is best-effort here
+        state = None
+    if state is not None:
+        return state.base_url(), "running daemon"
+    return cfg.gateway.base_url(), "config default"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="telos init",
@@ -86,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="operate only on the specified harness (default: auto-detect all)")
     parser.add_argument("--gateway-url", "--proxy-url", dest="gateway_url",
                         default=None,
-                        help="gateway address (default: taken from ~/.telos/config.json)")
+                        help="gateway address (default: running daemon if any, else ~/.telos/config.json)")
     parser.add_argument("--uninstall", action="store_true", help="undo the injection")
     parser.add_argument("--status", action="store_true", help="view only, do not change files")
     parser.add_argument("--no-gateway", action="store_true",
@@ -94,7 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = load_config()
-    gateway_url = args.gateway_url or cfg.gateway.base_url()
+    gateway_url, source = _resolve_gateway_url(args.gateway_url, cfg)
+    if source == "running daemon":
+        print(f"using gateway URL {gateway_url} (from {source})")
 
     # ---- Determine the target harness list ----
     if args.harness:

@@ -73,12 +73,21 @@ def _ir_to_chat_completions(ir, *, model: str) -> dict[str, Any]:
         elif m.role == "assistant":
             text_parts = [str(b.payload) for b in ordered if b.kind == "text"]
             tool_calls = [b.payload for b in ordered if b.kind == "tool_use"]
+            reasoning_parts = [str(b.payload) for b in ordered if b.kind == "reasoning"]
             entry: dict[str, Any] = {
                 "role": "assistant",
                 "content": "\n".join(text_parts) if text_parts else None,
             }
             if tool_calls:
                 entry["tool_calls"] = list(tool_calls)
+            if reasoning_parts:
+                # DeepSeek / OpenAI thinking-mode contract: the previous turn's
+                # ``reasoning_content`` must be echoed back verbatim on every
+                # subsequent request, otherwise the upstream rejects with HTTP
+                # 400 ("reasoning_content in the thinking mode must be passed
+                # back to the API"). Concatenation matches the harness's
+                # behavior for multi-text-block messages.
+                entry["reasoning_content"] = "\n".join(reasoning_parts)
             wire_messages.append(entry)
 
     wire: dict[str, Any] = {"model": model, "messages": wire_messages}

@@ -116,6 +116,10 @@ def test_install_mirrors_url_into_telos_upstreams(tmp_path: Path) -> None:
         assert upstream.url == "https://custom.deepseek.example/v1"
         assert upstream.protocol == "openai-chat"
         assert upstream.engine == "deepseek"
+        # Phase 2.6: the installer tags the slug with its own name so the
+        # gateway can label dashboard entries as "openclaw" rather than the
+        # wire-level "telos" harness for OpenAI-shape traffic.
+        assert upstream.via == "openclaw"
     finally:
         _restore_env()
 

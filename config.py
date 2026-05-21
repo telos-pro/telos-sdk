@@ -76,11 +76,19 @@ class UpstreamConfig:
                 ``openai-chat``         → POST ``/v1/chat/completions``
                 The gateway dispatches incoming ``/upstreams/<slug>/...`` requests
                 onto the matching pipeline based on this.
+        via:    optional harness identity attached to this slug at install time
+                (e.g. ``"openclaw"``, ``"hermes"``). When set, the gateway
+                labels usage-log entries for this upstream with this name so
+                the dashboard's "breakdown by harness" attributes traffic to
+                the calling tool rather than the wire-level harness
+                (``"telos"`` for OpenAI-shape traffic). Empty / missing →
+                gateway falls back to its content-detection default.
     """
 
     url: str
     engine: str
     protocol: str  # "anthropic-messages" | "openai-chat"
+    via: str = ""
 
 
 _DEFAULT_UPSTREAMS: dict[str, UpstreamConfig] = {
@@ -128,6 +136,7 @@ def _parse_upstreams(raw: Any) -> dict[str, UpstreamConfig]:
         url = entry.get("url")
         engine = entry.get("engine")
         protocol = entry.get("protocol")
+        via = entry.get("via") or ""
         if not isinstance(url, str) or not isinstance(engine, str):
             continue
         if protocol not in _VALID_PROTOCOLS:
@@ -140,15 +149,25 @@ def _parse_upstreams(raw: Any) -> dict[str, UpstreamConfig]:
             url=url.rstrip("/"),
             engine=engine,
             protocol=protocol,
+            via=str(via),
         )
     return out
 
 
 def _serialize_upstreams(upstreams: dict[str, UpstreamConfig]) -> dict[str, Any]:
-    return {
-        slug: {"url": u.url, "engine": u.engine, "protocol": u.protocol}
-        for slug, u in upstreams.items()
-    }
+    out: dict[str, Any] = {}
+    for slug, u in upstreams.items():
+        entry: dict[str, Any] = {
+            "url": u.url,
+            "engine": u.engine,
+            "protocol": u.protocol,
+        }
+        # Only persist ``via`` when non-empty so old configs / defaults stay
+        # tidy on round-trip.
+        if u.via:
+            entry["via"] = u.via
+        out[slug] = entry
+    return out
 
 
 @dataclass

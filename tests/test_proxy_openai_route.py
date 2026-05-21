@@ -217,6 +217,42 @@ async def _test_openai_route_logs_usage(tmp_log: Path) -> None:
         await up_runner.cleanup()
 
 
+async def _test_openai_route_via_labels_harness(tmp_log: Path) -> None:
+    """When the upstream slug carries ``via``, the usage log records it as
+    the harness — that's how the dashboard attributes traffic to the calling
+    tool (openclaw / hermes / codex) instead of the wire-level ``telos``."""
+    mock = _MockOpenAIUpstream(sse=False)
+    up_runner, up_url = await _start_upstream(mock)
+    # Slug with via="openclaw" simulates a config patched by OpenClawInstaller.
+    extra = {
+        "openclaw_routed": UpstreamConfig(
+            url=up_url, engine="deepseek", protocol="openai-chat",
+            via="openclaw",
+        ),
+    }
+    px_runner, px_url = await _start_proxy(up_url, usage_log=tmp_log,
+                                            extra_slugs=extra)
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{px_url}/upstreams/openclaw_routed/v1/chat/completions",
+                json=_sample_chat_request(),
+                headers={"authorization": "Bearer k",
+                         "x-telos-session": "via-test"},
+            ) as resp:
+                assert resp.status == 200
+
+        line = tmp_log.read_text().strip().splitlines()[-1]
+        record = json.loads(line)
+        assert record["session_id"] == "via-test"
+        # The crucial assertion: harness is the via name, not "telos".
+        assert record["harness"] == "openclaw"
+        print("✓ test_openai_route_via_labels_harness")
+    finally:
+        await px_runner.cleanup()
+        await up_runner.cleanup()
+
+
 async def _test_openai_route_streaming() -> None:
     mock = _MockOpenAIUpstream(sse=True, with_usage=True)
     up_runner, up_url = await _start_upstream(mock)
@@ -369,6 +405,7 @@ async def _test_anthropic_route_still_works() -> None:
 async def _run_all(tmp_log: Path) -> None:
     await _test_openai_route_non_streaming()
     await _test_openai_route_logs_usage(tmp_log)
+    await _test_openai_route_via_labels_harness(tmp_log)
     await _test_openai_route_streaming()
     await _test_unknown_slug_returns_404()
     await _test_per_slug_upstream_url_is_honored()

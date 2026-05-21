@@ -207,7 +207,7 @@ class HermesInstaller(AgentInstaller):
         protocol, engine = _classify_api_mode(api_mode)
         existing = telos_cfg.upstreams.get(slug)
         desired = UpstreamConfig(url=url.rstrip("/"), engine=engine,
-                                  protocol=protocol)
+                                  protocol=protocol, via=self.name)
         if existing == desired:
             return False
         telos_cfg.upstreams[slug] = desired
@@ -261,25 +261,28 @@ class HermesInstaller(AgentInstaller):
         existing_state = _read_state_file(self._state_path)
         state_by_key = {s["key"]: s for s in existing_state if "key" in s}
 
-        to_patch: list[tuple[_Target, str]] = []
-        already_routed: list[str] = []
+        # Resolve each target: figure out (info, original_url, needs_patch).
+        # The two are independent — telos config might need a refresh (e.g.
+        # to add the new ``via`` field on upgrade) even when config.yaml is
+        # already routed correctly.
+        resolved: list[tuple[_Target, str, bool]] = []
         skipped_stale_no_state: list[str] = []
+
         for t in targets:
             route_url = self._telos_route_url(t.provider_id)
-            if t.base_url == route_url:
-                already_routed.append(t.key)
-                continue
-
             existing_rec = state_by_key.get(t.key)
-            if _looks_like_telos_route(t.base_url):
+
+            if t.base_url == route_url:
+                if existing_rec is None:
+                    continue
+                resolved.append((t, existing_rec["previous_base_url"], False))
+            elif _looks_like_telos_route(t.base_url):
                 if existing_rec is None:
                     skipped_stale_no_state.append(t.key)
                     continue
-                original_url = existing_rec["previous_base_url"]
+                resolved.append((t, existing_rec["previous_base_url"], True))
             else:
-                original_url = t.base_url
-
-            to_patch.append((t, original_url))
+                resolved.append((t, t.base_url, True))
 
         for k in skipped_stale_no_state:
             loc = "model.base_url" if k == _PRIMARY_KEY else f"providers.{k}.model.base_url"
@@ -288,24 +291,15 @@ class HermesInstaller(AgentInstaller):
                 f"of the original. Edit it back to the real upstream URL and "
                 f"re-run install."
             )
-        for k in already_routed:
-            loc = "model.base_url" if k == _PRIMARY_KEY else f"providers.{k}.model.base_url"
-            r.notes.append(f"{loc} already routed; no change.")
 
-        if not to_patch:
-            r.already_installed = bool(already_routed)
+        if not resolved:
+            r.notes.append("nothing to patch.")
             return r
 
-        backup = self._config_path.with_suffix(
-            self._config_path.suffix + ".telos.bak"
-        )
-        if not backup.exists():
-            shutil.copy2(self._config_path, backup)
-            r.backups.append(backup)
-
+        # Always refresh telos upstream slugs so via stays current on upgrade.
         telos_cfg = load_config()
         telos_changed = False
-        for info, original_url in to_patch:
+        for info, original_url, _ in resolved:
             if self._ensure_upstream_slug(telos_cfg, info.provider_id,
                                            original_url, info.api_mode):
                 telos_changed = True
@@ -315,6 +309,22 @@ class HermesInstaller(AgentInstaller):
         if telos_changed:
             telos_path = save_config(telos_cfg)
             r.changed_files.append(telos_path)
+
+        to_patch = [(info, orig) for info, orig, needs in resolved if needs]
+        if not to_patch:
+            for info, _, _ in resolved:
+                loc = ("model.base_url" if info.key == _PRIMARY_KEY
+                       else f"providers.{info.key}.model.base_url")
+                r.notes.append(f"{loc} already routed; no change.")
+            r.already_installed = not telos_changed
+            return r
+
+        backup = self._config_path.with_suffix(
+            self._config_path.suffix + ".telos.bak"
+        )
+        if not backup.exists():
+            shutil.copy2(self._config_path, backup)
+            r.backups.append(backup)
 
         for info, original_url in to_patch:
             route_url = self._telos_route_url(info.provider_id)
@@ -333,7 +343,8 @@ class HermesInstaller(AgentInstaller):
         r.changed_files.append(self._config_path)
         _write_state_file(self._state_path, list(state_by_key.values()))
 
-        patched_keys = {info.key for info, _ in to_patch} | set(already_routed)
+        patched_keys = {info.key for info, _ in to_patch}
+        patched_keys.update(info.key for info, _, needs in resolved if not needs)
         other_keys = [k for k in all_keys if k not in patched_keys]
         if other_keys:
             labels = ["model" if k == _PRIMARY_KEY else f"providers.{k}.model"

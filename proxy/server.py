@@ -1211,14 +1211,21 @@ class ProxyApp:
                 and request.method == "POST"):
             # The anthropic pipeline already runs through handle_messages;
             # temporarily swap self.upstream so the forward target is this
-            # slug's url, then delegate. Per-request override is OK because
-            # handle_messages reads self.upstream synchronously in body.
-            saved = self.upstream
+            # slug's url, then delegate. ``upstream.via`` (when set) also
+            # overrides harness detection for the duration of the call so the
+            # dashboard attributes traffic to the calling agent (e.g.
+            # "openclaw") rather than the wire-level "hermes" / "openclaw"
+            # auto-detect default.
+            saved_upstream = self.upstream
+            saved_harness = self.harness_override
             self.upstream = upstream_cfg.url.rstrip("/")
+            if upstream_cfg.via:
+                self.harness_override = upstream_cfg.via
             try:
                 return await self.handle_messages(request)
             finally:
-                self.upstream = saved
+                self.upstream = saved_upstream
+                self.harness_override = saved_harness
         # Default: transparent passthrough to <slug.url>/<tail>
         return await self._passthrough_to_upstream(
             request, upstream_cfg.url.rstrip("/"), tail,
@@ -1331,6 +1338,13 @@ class ProxyApp:
                 routing_key=None,
                 model=raw.get("model", ""),
             )
+
+        # If the upstream slug carries a harness identity (set at install time
+        # by OpenClawInstaller / HermesInstaller), use it to label this entry
+        # in the usage log so the dashboard's "breakdown by harness" attributes
+        # traffic to the calling tool, not the wire-level pipeline harness.
+        if upstream_cfg.via and result.harness != "passthrough":
+            result.harness = upstream_cfg.via
 
         result.mode = mode.label
         result.compare_group = compare_group

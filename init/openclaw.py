@@ -181,7 +181,7 @@ class OpenClawInstaller(AgentInstaller):
         protocol, engine = _classify_api(api)
         existing = telos_cfg.upstreams.get(slug)
         desired = UpstreamConfig(url=url.rstrip("/"), engine=engine,
-                                  protocol=protocol)
+                                  protocol=protocol, via=self.name)
         if existing == desired:
             return False
         telos_cfg.upstreams[slug] = desired
@@ -241,61 +241,53 @@ class OpenClawInstaller(AgentInstaller):
         state_by_id = {s["provider_id"]: s for s in existing_state}
 
         # ---- Decide what actually needs changing ----
-        to_patch: list[tuple[_ProviderInfo, str]] = []  # (info, original_url_to_record)
-        already_routed: list[str] = []
+        # For each target: figure out (a) what the user's TRUE upstream URL is
+        # (needed for telos config), and (b) whether openclaw.json needs a
+        # baseUrl patch. The two are independent — telos config might need a
+        # refresh (e.g. to add the new ``via`` field on upgrade) even when
+        # openclaw.json is already routed correctly.
+        resolved: list[tuple[_ProviderInfo, str, bool]] = []  # (info, original_url, needs_patch)
         skipped_stale_no_state: list[str] = []
 
         for t in targets:
             route_url = self._telos_route_url(t.provider_id)
-            if t.base_url == route_url:
-                already_routed.append(t.provider_id)
-                continue
-
-            # Determine the URL to record as "previous" in state.
             existing_rec = state_by_id.get(t.provider_id)
-            if _looks_like_telos_route(t.base_url):
-                # The current value is a stale telos route (probably from a
-                # previous install on a different port). Recover the original
-                # from state, if recorded; otherwise refuse to patch — patching
-                # would lock the stale URL in as "original" and uninstall could
-                # never restore the user's real upstream.
+
+            if t.base_url == route_url:
+                # Already routed. Recover original from state; if state is
+                # missing, we cannot refresh the telos upstream slug either,
+                # so skip silently (status will surface this).
+                if existing_rec is None:
+                    continue
+                resolved.append((t, existing_rec["previous_base_url"], False))
+            elif _looks_like_telos_route(t.base_url):
+                # Stale route: refuse to patch when we cannot recover the
+                # original, since patching would lock the stale URL in as
+                # "original" and uninstall could never restore the real upstream.
                 if existing_rec is None:
                     skipped_stale_no_state.append(t.provider_id)
                     continue
-                original_url = existing_rec["previous_base_url"]
+                resolved.append((t, existing_rec["previous_base_url"], True))
             else:
-                original_url = t.base_url
+                # Plain original URL.
+                resolved.append((t, t.base_url, True))
 
-            to_patch.append((t, original_url))
-
-        # ---- Report dead-end cases ----
         for pid in skipped_stale_no_state:
             r.notes.append(
                 f"models.providers.{pid}.baseUrl is a stale telos route "
                 f"but state file has no record of the original. "
                 f"Edit it back to your real upstream URL and re-run install."
             )
-        for pid in already_routed:
-            r.notes.append(
-                f"models.providers.{pid}.baseUrl already routed; no change."
-            )
 
-        if not to_patch:
-            r.already_installed = bool(already_routed)
+        if not resolved:
+            r.notes.append("nothing to patch.")
             return r
 
-        # ---- Backup once before any mutation ----
-        backup = self._config_path.with_suffix(
-            self._config_path.suffix + ".telos.bak"
-        )
-        if not backup.exists():
-            shutil.copy2(self._config_path, backup)
-            r.backups.append(backup)
-
-        # ---- Mirror originals into telos upstreams ----
+        # ---- Always refresh telos upstream slugs (even when openclaw.json is
+        # already routed) so the ``via`` field stays current across upgrades. ----
         telos_cfg = load_config()
         telos_changed = False
-        for info, original_url in to_patch:
+        for info, original_url, _ in resolved:
             if self._ensure_upstream_slug(telos_cfg, info.provider_id,
                                            original_url, info.api):
                 telos_changed = True
@@ -305,6 +297,26 @@ class OpenClawInstaller(AgentInstaller):
         if telos_changed:
             telos_path = save_config(telos_cfg)
             r.changed_files.append(telos_path)
+
+        to_patch = [(info, orig) for info, orig, needs in resolved if needs]
+        if not to_patch:
+            # openclaw.json is already correct; only the telos side may have changed.
+            already_routed_ids = [info.provider_id for info, _, needs in resolved
+                                   if not needs]
+            for pid in already_routed_ids:
+                r.notes.append(
+                    f"models.providers.{pid}.baseUrl already routed; no change."
+                )
+            r.already_installed = not telos_changed
+            return r
+
+        # ---- Backup once before any mutation to openclaw.json ----
+        backup = self._config_path.with_suffix(
+            self._config_path.suffix + ".telos.bak"
+        )
+        if not backup.exists():
+            shutil.copy2(self._config_path, backup)
+            r.backups.append(backup)
 
         # ---- Patch openclaw.json ----
         for info, original_url in to_patch:
@@ -325,7 +337,8 @@ class OpenClawInstaller(AgentInstaller):
         _write_state_file(self._state_path, list(state_by_id.values()))
 
         # ---- Informational: list other providers not patched ----
-        patched_ids = {info.provider_id for info, _ in to_patch} | set(already_routed)
+        patched_ids = {info.provider_id for info, _ in to_patch}
+        patched_ids.update(info.provider_id for info, _, needs in resolved if not needs)
         other_ids = [pid for pid in all_ids if pid not in patched_ids]
         if other_ids:
             r.notes.append(

@@ -95,6 +95,8 @@ def test_install_mirrors_url_into_telos_upstreams(tmp_path: Path) -> None:
         assert upstream["url"] == "https://openrouter.ai/api/v1"
         assert upstream["protocol"] == "openai-chat"
         assert upstream["engine"] == "deepseek"
+        # Phase 2.6: dashboard attribution via slug-tagged identity.
+        assert upstream["via"] == "hermes"
     finally:
         _restore_env()
 

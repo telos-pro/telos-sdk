@@ -8,6 +8,8 @@
 
 <sub>一份唯一 IR——tools、system、turns 与 memory——可在 Anthropic · OpenAI · DeepSeek · vLLM · SGLang 上不加修改地运行<br/>真实 6 轮会话节省 -92.3% · 成本按绝对 $/已解决请求 记录——比例可以造，美元不行</sub>
 
+<sub>清华大学 LEAP Lab —— 聚焦机器学习、多模态学习与具身智能的研究团队 · <a href="https://www.leaplab.ai/">leaplab.ai</a></sub>
+
 <br/>
 
 [![Core](https://img.shields.io/badge/core-Apache%202.0-2C5F66?style=flat-square)](LICENSE)

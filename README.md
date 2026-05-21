@@ -8,6 +8,8 @@
 
 <sub>One canonical IR — tools, system, turns, and memory — runs unchanged across Anthropic · OpenAI · DeepSeek · vLLM · SGLang<br/>Real 6-turn session −92.3% · Cost reported in absolute $/query-resolved — ratios can be gamed; dollars can't</sub>
 
+<sub>LEAP Lab @ Tsinghua University — a research group focused on machine learning, multimodal learning, and embodied intelligence · <a href="https://www.leaplab.ai/">leaplab.ai</a></sub>
+
 <br/>
 
 [![Core](https://img.shields.io/badge/core-Apache%202.0-2C5F66?style=flat-square)](LICENSE)

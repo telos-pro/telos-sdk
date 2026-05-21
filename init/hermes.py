@@ -42,10 +42,18 @@ _STATE_VERSION = 2
 _PRIMARY_KEY = "__primary__"  # synthetic id for the top-level model block
 
 _TELOS_ROUTE_RE = re.compile(r"^https?://[^/]+/upstreams/[A-Za-z0-9_\-.]+/?$")
+# Matches credential-pool URLs which include the /v1 version segment.
+_TELOS_POOL_ROUTE_RE = re.compile(
+    r"^https?://[^/]+/upstreams/[A-Za-z0-9_\-.]+/v\d+/?$"
+)
 
 
 def _looks_like_telos_route(url: str) -> bool:
     return bool(_TELOS_ROUTE_RE.match(url))
+
+
+def _looks_like_telos_pool_route(url: str) -> bool:
+    return bool(_TELOS_POOL_ROUTE_RE.match(url))
 
 
 def _default_config_path() -> Path:
@@ -198,8 +206,128 @@ class HermesInstaller(AgentInstaller):
         loaded = yaml.safe_load(self._config_path.read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else None
 
+    def _auth_json_path(self) -> Path:
+        return self._config_path.parent / "auth.json"
+
     def _telos_route_url(self, slug: str) -> str:
         return f"{self.proxy_url.rstrip('/')}/upstreams/{slug}"
+
+    def _telos_pool_url(self, slug: str) -> str:
+        """Credential pool base_url with /v1 suffix.
+
+        Hermes's OpenAI SDK appends /chat/completions to base_url, so the pool
+        entry needs the version segment so the assembled path is correct:
+          http://…/upstreams/<slug>/v1  +  /chat/completions
+          → http://…/upstreams/<slug>/v1/chat/completions  (tail for telos)
+        """
+        return f"{self._telos_route_url(slug)}/v1"
+
+    def _patch_credential_pool(
+        self,
+        provider_id: str,
+        state_record: dict[str, Any],
+    ) -> bool:
+        """Patch auth.json credential pool base_url entries for provider_id.
+
+        Returns True if auth.json was modified.  Records original URLs inside
+        state_record["auth_pool_patches"] so uninstall can restore them.
+        """
+        auth_path = self._auth_json_path()
+        if not auth_path.exists():
+            return False
+        try:
+            auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        pool = auth_data.get("credential_pool")
+        if not isinstance(pool, dict):
+            return False
+        entries = pool.get(provider_id)
+        if not isinstance(entries, list) or not entries:
+            return False
+
+        route_url = self._telos_pool_url(provider_id)
+        # Recover originals from prior state so re-install doesn't lock in
+        # an intermediate telos URL as the "original".
+        existing_patches: dict[str, str] = {
+            p["id"]: p["previous_base_url"]
+            for p in state_record.get("auth_pool_patches", [])
+            if isinstance(p, dict) and "id" in p and "previous_base_url" in p
+        }
+
+        new_patches: list[dict[str, str]] = []
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id", ""))
+            old_url = str(entry.get("base_url") or "")
+
+            if old_url == route_url:
+                # Already patched — preserve state record.
+                prev = existing_patches.get(entry_id, old_url)
+                new_patches.append({"id": entry_id, "previous_base_url": prev})
+                continue
+
+            is_stale = _looks_like_telos_pool_route(old_url)
+            prev_url = existing_patches.get(entry_id) or (None if is_stale else old_url)
+            if prev_url is None:
+                # Stale telos URL with no state record — skip safely.
+                continue
+
+            new_patches.append({"id": entry_id, "previous_base_url": prev_url})
+            entry["base_url"] = route_url
+            changed = True
+
+        if new_patches:
+            state_record["auth_pool_patches"] = new_patches
+        if changed:
+            _atomic_write_json(auth_path, auth_data)
+        return changed
+
+    def _restore_credential_pool(
+        self,
+        provider_id: str,
+        state_record: dict[str, Any],
+    ) -> bool:
+        """Restore auth.json credential pool entries from state.  Returns True if changed."""
+        patches = state_record.get("auth_pool_patches")
+        if not isinstance(patches, list) or not patches:
+            return False
+        auth_path = self._auth_json_path()
+        if not auth_path.exists():
+            return False
+        try:
+            auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        pool = auth_data.get("credential_pool")
+        if not isinstance(pool, dict):
+            return False
+        entries = pool.get(provider_id)
+        if not isinstance(entries, list):
+            return False
+
+        route_url = self._telos_pool_url(provider_id)
+        prev_by_id: dict[str, str] = {
+            p["id"]: p["previous_base_url"]
+            for p in patches
+            if isinstance(p, dict) and "id" in p
+        }
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id", ""))
+            if entry.get("base_url") == route_url and entry_id in prev_by_id:
+                entry["base_url"] = prev_by_id[entry_id]
+                changed = True
+
+        if changed:
+            _atomic_write_json(auth_path, auth_data)
+        return changed
 
     def _ensure_upstream_slug(
         self, telos_cfg: TelosConfig, slug: str, url: str, api_mode: str,
@@ -316,11 +444,24 @@ class HermesInstaller(AgentInstaller):
 
         to_patch = [(info, orig) for info, orig, needs in resolved if needs]
         if not to_patch:
+            # config.yaml is already routed; check if auth.json pool also needs patching.
+            pool_changed = False
+            for info, _, _ in resolved:
+                existing_rec = state_by_key.get(info.key, {})
+                if self._patch_credential_pool(info.provider_id, existing_rec):
+                    pool_changed = True
+                    r.notes.append(
+                        f"patched auth.json credential_pool.{info.provider_id} "
+                        f"base_url → {self._telos_pool_url(info.provider_id)}"
+                    )
+                    state_by_key[info.key] = existing_rec
+            if pool_changed:
+                _write_state_file(self._state_path, list(state_by_key.values()))
             for info, _, _ in resolved:
                 loc = ("model.base_url" if info.key == _PRIMARY_KEY
                        else f"providers.{info.key}.model.base_url")
                 r.notes.append(f"{loc} already routed; no change.")
-            r.already_installed = not telos_changed
+            r.already_installed = not telos_changed and not pool_changed
             return r
 
         backup = self._config_path.with_suffix(
@@ -333,12 +474,20 @@ class HermesInstaller(AgentInstaller):
         for info, original_url in to_patch:
             route_url = self._telos_route_url(info.provider_id)
             _apply_patch(data, info.key, route_url)
-            state_by_key[info.key] = {
+            state_rec: dict[str, Any] = {
                 "key": info.key,
                 "provider_id": info.provider_id,
                 "previous_base_url": original_url,
                 "gateway_route_url": route_url,
             }
+            # Also patch the credential pool entry in auth.json: hermes resolves
+            # the actual request URL from the pool's base_url, not config.yaml.
+            if self._patch_credential_pool(info.provider_id, state_rec):
+                r.notes.append(
+                    f"patched auth.json credential_pool.{info.provider_id} "
+                    f"base_url → {self._telos_pool_url(info.provider_id)}"
+                )
+            state_by_key[info.key] = state_rec
             loc = ("model.base_url" if info.key == _PRIMARY_KEY
                    else f"providers.{info.key}.model.base_url")
             r.notes.append(f"patched {loc} → {route_url}")
@@ -406,6 +555,13 @@ class HermesInstaller(AgentInstaller):
                 continue
             _apply_patch(data, key, prev_url)
             changed = True
+            # Restore credential pool entry too.
+            pid = rec.get("provider_id", "")
+            if pid and self._restore_credential_pool(pid, rec):
+                r.notes.append(
+                    f"restored auth.json credential_pool.{pid} base_url → "
+                    f"(original)"
+                )
             loc = ("model.base_url" if key == _PRIMARY_KEY
                    else f"providers.{key}.model.base_url")
             r.notes.append(f"restored {loc} → {prev_url}")

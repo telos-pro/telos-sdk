@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telos-sdk"
 version = "0.1.2"
-description = "TELOS — cache-friendly prompt protocol: stable prefix, tiered bands, ephemeral tail, layered adapters, anchored marks."
+description = "TELOS SDK: a cache-aware prompt protocol and gateway for portable agent context."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

@@ -113,7 +113,7 @@ def test_install_mirrors_url_into_telos_upstreams(tmp_path: Path) -> None:
         telos_cfg_path = Path(os.environ["TELOS_HOME"]) / "config.json"
         assert telos_cfg_path.exists()
         upstream = _load_telos_config().upstreams["deepseek"]
-        assert upstream.url == "https://custom.deepseek.example/v1"
+        assert upstream.url == "https://custom.deepseek.example"
         assert upstream.protocol == "openai-chat"
         assert upstream.engine == "deepseek"
         # Phase 2.6: the installer tags the slug with its own name so the

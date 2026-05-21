@@ -1,10 +1,12 @@
 <div align="center">
 
-<img src="branding/logo.svg" alt="TELOS — 可移植的 Agent 上下文" width="420"/>
+<img src="branding/logo.svg" alt="TELOS — 可移植 Agent 上下文" width="460"/>
 
-### 一个可移植、cache-友好的 LLM agent 上下文协议。
+### 上下文归你所有 · Agent 是雇来的
 
-<sub>一份规范 IR —— 你的 tools、system、对话轮次与记忆 —— 在 Anthropic、OpenAI、DeepSeek、vLLM、SGLang 上原样运行;跨轮保持 KV-cache 命中,记忆按需取用,成本以绝对美元计。</sub>
+**无需重写。无需压缩。可节省 90% token 账单。**
+
+<sub>一份唯一 IR——tools、system、turns 与 memory——可在 Anthropic · OpenAI · DeepSeek · vLLM · SGLang 上不加修改地运行<br/>真实 6 轮会话节省 -92.3% · 成本按绝对 $/已解决请求 记录——比例可以造，美元不行</sub>
 
 <br/>
 
@@ -13,263 +15,163 @@
 [![Status](https://img.shields.io/badge/status-Beta-d8851f?style=flat-square)](CHANGELOG.md)
 [![Protocol](https://img.shields.io/badge/protocol-TELOS%20IR-7FD8E0?style=flat-square)](docs/2026-05-06-telos-protocol.md)
 
-[**快速上手**](#-30-秒上手) · [**引擎**](#-引擎一份-ir五个后端) · [**为什么**](#-为什么是-telos别再做别人-agent-里的租客) · [**三件事**](#-一个表示三件事) · [**协议**](docs/2026-05-06-telos-protocol.md) · [**User Guide**](docs/User-guide.md)
+[**快速开始**](#-3-step-to-save-90) · [**支持矩阵**](#-support-matrix) · [**为什么**](#-the-problem--two-broken-legs) · [**协议**](#-the-protocol-not-compression-but-never-breaking-the-prefix) · [**引擎**](#-engines--one-ir-five-backends) · [**路线图**](#--roadmap) · [**深入了解**](#-going-deeper)
 
-<sub>📖 &nbsp;[English](README.md) · **简体中文**</sub>
-
-</div>
-
----
-
-## ⬢ &nbsp;30 秒上手
-
-```python
-from telos import Bridge, load_engine, load_harness
-
-harness = load_harness("openclaw")          # or "hermes"
-engine  = load_engine("anthropic")          # or "openai" / "deepseek"
-
-ir = harness.parse(raw_request, session_id="task-001",
-                   engine="anthropic", model="claude-opus-4-7",
-                   expected_turns=20)
-
-bridge = Bridge(ir, engine)
-plan   = bridge.mark()        # 让 engine 决定 BP / routing-key
-wire   = bridge.emit()        # 拿到可发的 wire 请求
-
-response = call_llm(wire)     # 你自己的 HTTP 客户端
-report   = bridge.absorb_usage(response)
-print(report.cache_read, report.raw_input)
-```
-
-完整端到端见 [`telos/demo.py`](demo.py):`python -m telos.demo`。
-
----
-
-## ⬢ &nbsp;长这样
-
-<div align="center">
-
-<img src="branding/dashboard.png" alt="TELOS 节省看板 —— 按 harness、model、session 拆分的绝对美元节省" width="820"/>
-
-<sub>每次 call 的 normalized usage 落进 jsonl,聚合成单文件 HTML 看板。<br/>它算的是<strong>省下的绝对美元</strong> —— 不是靠缩小分母就能作弊的比例。</sub>
+<sub>📖 &nbsp;**English** · [简体中文](README.zh-CN.md)</sub>
 
 </div>
 
 ---
 
-## ⬢ &nbsp;引擎:一份 IR,五个后端
+## ⬢ &nbsp;凌晨 2 点：钱到底花到哪里去了？
 
-TELOS 的姿态是规范性的:它定义上下文应如何表示,引擎按能力对齐。同一份 `TelosIR` 落到不同引擎,由 adapter 做**确定性降级** —— 不悄悄丢、不丢语义。
+凌晨 2 点，agent 还在跑。右下角计数器跳到 2,847,103，你换算成美元后心里一沉。更糟的是，上面一行写着 `cache_read: 0`。一整夜里，每一轮都把同一段 4,000-token 的 system prompt 从头喂给模型，按全价计费。
 
-| 能力 | Anthropic 4.6+ | OpenAI 4+/5.x | DeepSeek V3+ | vLLM | SGLang |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 显式 BP / 锚位 | ✓(≤4) | ✗ | ✗ | ✓ | ✓ |
-| 显式 prewarm | ✓ | ✗ | ✗ | ✓ | ✓ |
-| 路由 key | ✗ | `prompt_cache_key` | ✗ | `cache_salt` | `affinity_key` |
-| 缓存查询 / 段淘汰 | ✗ | ✗ | ✗ | ✓ | ✓ |
-| fork-and-replace | ✗ | ✗ | ✗ | 部分 | ✓ |
+把同一段真实 **6 轮** 会话丢进 openclaw，只改两个开关：
 
-> **双向能力**(`BidirectionalEngineAdapter`,只在开源推理引擎上实现):`cooperative_fold()` 让 server 保留前缀 KV 不动、只重算摘要尾段 —— 闭源 API 的 `fold` 是客户端 rewrite,每次都要 server 重新 prefill 整段,这是它做不到的。完整对照见[协议 §6](docs/2026-05-06-telos-protocol.md)。
+| 模式 | raw input tokens | cache_read | 6 轮总成本 |
+|---|:--:|:--:|:--:|
+| passthrough（今天的默认） | 24,151 | 0 | **$0.3623** |
+| 使用 TELOS | 0 | 18,701 | **$0.0281（-92.3%）** |
 
----
+放大到 1,000 个会话：**$362 → $26**。在一次受控 A/B/C/D 运行中（`showcase/dashboard.html`，2026-05-19）——48 次调用、4 个会话，反事实账单 **$5.90**，实际 **$3.74**——净省 **$2.16（-36.6%）**。一台开发机，一个下午。乘上团队规模，就是每个月能看见的真实服务器账单。
 
-## ⬢ &nbsp;为什么是 TELOS:别再做别人 agent 里的租客
+**不要再用“token 少了几倍”来衡量。** 到 2026 年，同一模型家族不同计费层级之间的价格差已经达到 **80x–150x**。任何人都能把最便宜的层级塞进分母来造出漂亮比例，只有绝对美元不会说谎。
 
 <p align="center">
-  <em>把 agent 接进生产时,所有人都撞上同样的四堵墙。<br/>
-  TELOS 是这四堵墙的同一个答案 —— 一份上下文的规范表示。</em>
+  <img src="promo-assets/01-waste.en.svg" alt="今天的 agent token 效率只有 25%" width="100%"/>
 </p>
 
-<table>
-<tr>
-<td width="50%" valign="top">
+## ⬢ &nbsp;3 步启动
 
-### 🔒 &nbsp;上下文不再锁死在一家
-
-> *"换个模型跑同一个任务,就得从头再来。"*
-
-`TelosIR` 是一份**引擎无关、可序列化、能带走**的上下文表示。Anthropic 的会话原样搬到 DeepSeek、搬到你自己的 vLLM —— 由 adapter 做确定性降级,不丢语义。
-
-<sub>📁 [`telos/ir.py`](ir.py) · [`telos/engine/`](engine/)</sub>
-
-</td>
-<td width="50%" valign="top">
-
-### 💸 &nbsp;不再为同一段开头重复付费
-
-> *"跑了二十轮,每轮都在为相同的前缀重新 prefill。"*
-
-三色带 **PIN · FOLD · DROP** + 一条顺序不变量,把"底座"留在 KV cache 里。记忆按需取用,而非每轮全量塞进 prompt。
-
-<sub>📁 [`telos/bridge.py`](bridge.py) · [`telos/refpool.py`](refpool.py)</sub>
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 🧾 &nbsp;成本看得见,以绝对 $ 计
-
-> *"只拿得到一个被分母稀释过的比例。"*
-
-每次 call 的 normalized usage 落进 jsonl,聚合成单文件 HTML 看板。算的是**绝对量**:cache_read、cost saved —— 比例能靠缩小分母作弊,绝对 $ 不能。
-
-<sub>📁 [`scripts/build_savings_dashboard.py`](scripts/build_savings_dashboard.py)</sub>
-
-</td>
-<td width="50%" valign="top">
-
-### 🎛 &nbsp;控制器在你手上
-
-> *"想把任务交给更擅长它的 agent,做不到。"*
-
-上下文能带走,你才真正握着控制器:一个任务跨 harness 分发,集众家所长。**TELOS 给机制,绝不给政策** —— 永不替你决定、永不为路由烧一次 LLM 调用。
-
-<sub>📁 [`telos/harness/`](harness/)</sub>
-
-</td>
-</tr>
-</table>
-
-<p align="center">
-  <strong>一句话:</strong> TELOS 是 agent 栈里唯一耐久的资产 —— 上下文 —— 的规范表示。<br/>
-  上下文归你,harness 只是雇来的。
-</p>
-
----
-
-## ⬢ &nbsp;一个表示,三件事
-
-**TELOS** —— 希腊语 τέλος,"目的、归宿";也取"石碑"之意。石碑底座的铭文刻一次、用一辈子;上方逐轮题字随时可擦,但动不到底座。而石碑还有第二层意思 —— **石碑是你的**:它可以搬到任何刻字的工匠(harness)、任何拓印作坊(engine)面前。
-
-```
-③ 主权     你握着控制器 —— 任何任务,雇任何 harness、任何模型,不必住进谁的笼子
-                 ▲  唯一能实现它的
-① 可移植   上下文 / 记忆是一份引擎无关、可序列化、能带走的资产
-                 ▼  同一份表示顺带兑现的
-② 效率     极致 KV cache 命中 + 按需记忆;成本以绝对 $ 计,看得见
-```
-
-> **③ 是目的,① 是机制,② 是回报也是楔子。** 三者不是并列,是一个栈。铁律:TELOS 提供机制,绝不提供政策 —— 一旦它替你决定,控制器就被它拿回去了。
-
----
-
-## ⬢ &nbsp;架构
-
-```
-agent harness ──► TELOS Bridge ──► engine adapter ──► LLM 服务
-   (parse)          (5 原语)         (capability-aware)
-```
-
-| 层 | 文件 | 职责 |
-|---|---|---|
-| harness | [`harness/openclaw.py`](harness/) `hermes.py` | envelope 切分、大文档进 ref-pool、生成 `TelosIR` |
-| bridge | [`bridge.py`](bridge.py) [`ir.py`](ir.py) [`refpool.py`](refpool.py) | 5 原语、不变量校验、ref-pool 冻结 slug、canonicalize |
-| engine | [`engine/anthropic.py`](engine/) `openai.py` `deepseek.py` | capability-aware Mark、wire 序列化、usage 解析 |
-
-bridge 是纯 Python,不依赖任何 LLM SDK。`TelosIR` 是三层之间唯一通过的数据结构 —— frozen 不可变、字段窄、引擎无关。
-
----
-
-## ⬢ &nbsp;一个不变量
-
-整个协议只有一条硬约束。每个段(`tools` / `system` / 单条 `message`)内,blocks 必须按物理顺序排列:
-
-```
-PIN*  →  FOLD*  →  DROP*
-```
-
-<sub>（`message` 段里 `tool_result` 块一律居首,Anthropic 协议要求。）</sub>
-
-| 带 | 含义 | 典型内容 |
-|---|---|---|
-| **PIN** | 长寿稳定段 | tools 定义、system prompt、用户当下提问 |
-| **FOLD** | 可缓存但 compact 时可丢弃 | assistant 回答、tool_result、ref-pool 大文档 |
-| **DROP** | 永不进 cache hash | timestamp、cwd、git status、envelope |
-
-违反就抛 `TelosInvariantError`。其余一切都是软建议。
-
-### 五个原语 &nbsp;<sub>(`Bridge` 方法)</sub>
-
-| 原语 | 作用 |
-|---|---|
-| `place(segment, blocks)` | 把 block 放进 tools / system / 当前 message |
-| `pin(slug, payload)` | 在 system 段写一个 PIN 块 |
-| `mark()` | 让 engine 给出本轮的 BP / routing-key 计划 |
-| `fold(slugs= / message_range=, summary=)` | 把旧轮折叠成 ref-pool 引用 |
-| `refresh(plan)` | 满足节流后发 `max_tokens=0` prewarm(仅 Anthropic) |
-
-### ref-pool —— 上下文的"指针表"
-
-slug 一旦 `register()` 就**冻结**:内容可变(`fold()`),slug 不能变。`fold()` 换 payload 不换 slug → 所有 `[ref:slug]` 引用点的字节不变 → 折叠后 BP 仍命中。这是"上下文可移植"在协议里的落地:**指针稳定,内容可流动。**
-
----
-
-## ⬢ &nbsp;看得见的成本 · savings dashboard
-
-任何 TELOS 入口(gateway / SDK transport)都会把每次 call 的 normalized usage 追加进 `usage_log` jsonl,聚合成单文件 HTML(零 JS、离线可开):
+#### ❶ &nbsp;安装
 
 ```bash
-# 一行安装
-pip install telos-sdk          # 或：brew install telos-sdk（见 packaging/）
+pip install telos-sdk
+```
 
-# 自动检测 harness、注入配置、启动 gateway
+#### ❷ &nbsp;连接
+
+```bash
 telos init
+```
 
-# 浏览器打开实时看板
+自动检测本机的 **claude-code / codex / openclaw / hermes**，把配置注入对应工具，并在后台启动本地 gateway（状态写入 `~/.telos/gateway.json`）。不需要改 agent 代码。
+
+#### ❸ &nbsp;观察
+
+```bash
 telos dashboard
 ```
 
-看板算的是**绝对量**:累计 cache_read、cost saved = cache_read ×(input_price − cache_read_price)、token mix、按 harness / model / session 三维拆分。
+会在浏览器中打开一个离线 HTML 看板，以绝对美元展示每次调用的节省。每次调用都会自动追加到 `~/.telos/usage.jsonl`，并实时汇总。
+
+<p align="center">
+  <img src="promo-assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
+</p>
+
+<p align="center"><sub><strong>每一笔节省都固定到绝对美元</strong> · 无需云服务 · 支持离线打开 · <code>~/.telos/usage.jsonl</code> 直接驱动单文件 HTML 页面</sub></p>
+
+**TELOS 是开源的。把它接到你的真实工作流里，看看那 92% 到底是真收益，还是又一个“X 倍 token”说法。**
 
 ---
 
-## ⬢ &nbsp;TELOS 不做什么
+## ⬢ &nbsp;支持矩阵
 
-| | 战略非目标 —— 强愿景必须敢说"永不做" |
+### Harness 支持
+
+| Harness | 典型用途 | `telos init` 自动接入 | 状态 |
+|---|---|:---:|---:|
+| Claude Code | Anthropic 原生 coding agent 工作流 | ✅ | 🟢 一等支持 |
+| OpenClaw | 开源 agent runtime，集成 TELOS parser | ✅ | 🟢 一等支持 |
+| Hermes | 多 agent 编排，子 IR 独立处理 | ✅ | 🟢 一等支持 |
+| Codex | OpenAI 风格 coding 工作流，通过本地 gateway 注入 | ✅ | 🟢 已支持 |
+
+### Frontier model 支持
+
+| 模型家族 | 提供方 | 通过 TELOS 引擎适配器 | 说明 |
+|---|---|:---:|---|
+| Claude（4.x / 4.6+） | Anthropic | ✅ | 显式 breakpoints 和 prewarm 路径 |
+| GPT（4+/5.x） | OpenAI | ✅ | 使用 `prompt_cache_key` 路由策略 |
+| DeepSeek（V3+） | DeepSeek | ✅ | 字节稳定的确定性前缀行为 |
+
+### Inference framework 支持
+
+| Framework | 部署方式 | 通过 TELOS | 缓存能力 |
+|---|---|:---:|---|
+| vLLM | 自托管 OpenAI 兼容服务 | ✅ | 显式锚点、prewarm、cache 探测/驱逐、部分 fork-and-replace |
+| SGLang | 自托管高吞吐推理服务 | ✅ | 显式锚点、prewarm、cache 探测/驱逐、完整 fork-and-replace |
+
+<sub>还想接别的 harness 或模型后端？TELOS 是 adapter 驱动的：保留同一份 IR，新增 engine / harness 适配器即可，不需要重写 agent 逻辑。</sub>
+
+---
+
+## ⬢ &nbsp;TELOS 只解决两件事
+
+**① 把 token 效率推到极限。** 真实 6 轮会话 **-92.3%**；受控 48 次调用 **-36.6%（净省 -$2.16）**。每一分钱都按绝对 $/已解决请求 核算，比例可以造，美元造不了。
+
+**② 把上下文主权还给你。** `TelosIR` 是引擎无关、可序列化、可移植的上下文表示。你的 persona、你的 tools、你的 20 轮中段线程，全都封装在同一块“石碑”里。今天交给 Claude，明天迁到 DeepSeek，今晚跑在本地 vLLM 上。**上下文归你，agent 只是雇员。**
+
+---
+
+## ⬢ &nbsp;协议：不是压缩，而是永不打断前缀
+
+大多数 agent 框架把 KV cache 当成推理引擎“可能给你，也可能不给你”的运行时礼物。TELOS 把逻辑反过来：
+
+> **缓存复用是 prompt 结构本身的属性，而不是运行时运气。只要你不改动已经提交的字节，缓存就不可能被失效。**
+
+这个原则体现在三个互相配合的想法里。
+
+### 三色带
+
+<p align="center">
+  <img src="promo-assets/03-banding.en.svg" alt="PIN / FOLD / DROP bands" width="100%"/>
+</p>
+
+每个内容块在“出生”时就声明自己的缓存寿命，不靠事后启发式，不靠 LLM 猜测，而是一级结构注解：
+
+| 带 | 颜色 | 语义 | 缓存行为 |
+|---|:---:|---|---|
+| **PIN** | 🟢 | 工具定义 · system prompt · 当前问题 | 永久在线。永不驱逐。是每个请求前缀 hash 的不可变底座 |
+| **FOLD** | 🟡 | 对话历史 · 工具结果 · 大文档 | 可缓存、可压缩。压力下可被摘要替换，PIN 前缀字节保持不变 |
+| **DROP** | 🔴 | 时间戳 · CWD · git status · PID | 瞬时信息。**完全不进入前缀 hash。** 必须放在所有 BP 之后，且不能污染上游字节 |
+
+顺序不变量是绝对的：**PIN* → FOLD* → DROP***。消息内如此，整条 prompt 如此，每一层都如此。这是唯一真正能赢下缓存命中的结构规则，其余都是实现细节。
+
+### 单调追加
+
+prompt 是一条**只追加流**。新轮次只向尾部追加块，不会改写任何已经提交的字节。所谓“修改”通过新块表达（摘要、脱敏），绝不做原地重写。
+
+<p align="center">
+  <img src="promo-assets/04-append.en.svg" alt="Monotonic append: cache hit rate is monotonically non-decreasing with session length" width="100%"/>
+</p>
+
+因为早期块不可变，而且跨轮字节完全一致，推理引擎的前缀匹配算法在每次请求里都能找到最长公共前缀。这不是运气，而是结构保证。**因此缓存命中率是会话长度的单调不下降函数：会话越长，复用越多，不会回退。**
+
+---
+
+## ⬢ &nbsp;路线图
+
+TELOS 只做一件事：**上下文是你的，Agent 是雇的。** 当前路线图完全围绕“省钱网关”展开，最后一阶段才埋下 trajectory 作为可移植资产的种子。**能被检查的工程才写进路线图，不能被检查的工程不写。**
+
+| 阶段 | 命题 |
 |---|---|
-| ❌ | 永不跑 agent 的推理循环 —— TELOS 碰上下文,不碰 planning / tool execution |
-| ❌ | 永不变成 orchestration 框架 |
-| ❌ | 路由不是产品,是"拥有可移植上下文"的演示;给机制,不给政策 |
-
-| | 战术非目标 |
-|---|---|
-| ❌ | 不做 token 计数(让 engine 自己回 usage) |
-| ❌ | 不做 retry / backoff(属于 HTTP 客户端) |
-| ❌ | 不做 KV-cache 物理实现(服务侧的事;TELOS 只决定喂什么、按什么顺序喂) |
-| ❌ | 不做 streaming SSE 解析(`absorb_usage` 接受最终 response object) |
+| **Phase 1** · Protocol correctness hardening | 把“缓存不可失效”从口号变成 CI 红绿灯 |
+| **Phase 2** · Production reliability & observability | 让 gateway 足够安全，能承接别人的生产流量 |
+| **Phase 3** · Take over the call chain | 从 prompt 重写器变成 agent 的流量平面 |
+| **Phase 4** · Context becomes an asset | trajectory 不再只是日志，而是可 fork 的代码 |
 
 ---
 
-## ⬢ &nbsp;附录:R1–R8 协议隐患修复
+## Citation
 
-review 阶段发现协议设计有 8 个隐患,Python 实现已全部修掉:
+Core contributors: Zheng Wang, Shenzhi Wang, Yue Wu, Shiji Song, Gao Huang
 
-| 编号 | 问题 | 修复位置 |
-|---|---|---|
-| R1 | OpenAI `prompt_cache_key` 单 key ≥15 RPM 才扩槽位 | `engine/openai.py :: KEY_RPM_SOFT_CAP = 12` + `shard()` |
-| R2 | Anthropic 4 BP 只覆盖 head + tail,中间轮落空 | `engine/anthropic.py :: _MID_ANCHOR_STRIDE = 19` |
-| R3 | 子 agent IR 与父 IR 的 session_id 混用 | `harness/hermes.py` 子 IR 独立 parse |
-| R4 | `fold()` 后 Mark slot 落在已折叠区 | `bridge.py :: fold()`,需重调 `mark()` |
-| R5 | tool 字段 / 数组顺序 canonicalize 未稳 | `bridge.py :: _canonicalize_ir()` |
-| R6 | thinking 块跨非 tool_result 调用失效 | `engine/base.py :: thinking_preserved_across_non_tool_result` |
-| R7 | Anthropic BP 候选 > 4 时无显式优先级 | `engine/anthropic.py :: plan_marks` 优先级 + 截断 |
-| R8 | refresh 频率无节流,可能反向打满 quota | `bridge.py :: REFRESH_THRESHOLD = 11` 自适应门控 |
-
----
-
-## ⬢ &nbsp;深入
-
-| 想做什么 | 去哪 |
-|---|---|
-| 直接上手(安装、接入、CLI、故障排查) | [`docs/User-guide.md`](docs/User-guide.md) |
-| 理解协议 | [`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md) |
-| 看架构 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| 看改动史 | [`CHANGELOG.md`](CHANGELOG.md) |
-
----
-
-## ⬢ &nbsp;License
-
-Apache-2.0 —— 协议核心永远开源。见 [LICENSE](LICENSE)。
+```bibtex
+@misc{wang2026telos-agent,
+  title        = {Telos: A Cost-Aware Inference Infrastructure for AI Agent},
+  author       = {Zheng Wang, Shenzhi Wang, HongTao Zhong, Shiji Song, Gao Huang},
+  howpublished = {\url{https://github.com/telos-pro/telos-sdk.git}},
+  year         = {2026}
+}
+```

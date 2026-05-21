@@ -180,7 +180,11 @@ class OpenClawInstaller(AgentInstaller):
     ) -> bool:
         protocol, engine = _classify_api(api)
         existing = telos_cfg.upstreams.get(slug)
-        desired = UpstreamConfig(url=url.rstrip("/"), engine=engine,
+        # Strip any /vN version suffix so the gateway can construct
+        # {url}/{tail} where tail already includes "v1/" (added by OpenAI SDK
+        # when the patched base_url has no /vN suffix).
+        normalized_url = re.sub(r"/v\d+$", "", url.rstrip("/"))
+        desired = UpstreamConfig(url=normalized_url, engine=engine,
                                   protocol=protocol, via=self.name)
         if existing == desired:
             return False

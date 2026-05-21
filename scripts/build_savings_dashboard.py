@@ -536,7 +536,7 @@ header h1 { margin: 0 0 6px 0; font-size: 28px; font-weight: 700;
 }
 .brand-logo { height: 48px; width: auto; display: block; }
 
-/* ---- reset / 清零 button ---- */
+/* ---- reset button ---- */
 .reset-btn {
   flex: none; cursor: pointer; font: inherit; font-size: 12.5px;
   font-weight: 600; color: #adb6c2;
@@ -1104,7 +1104,7 @@ def render_dashboard(
     </div>
     <button class="reset-btn" type="button" onclick="telosReset(this)"
             title="Clear the usage log and zero this dashboard">
-      ⟲ Reset · 清零
+      ⟲ Reset
     </button>
   </div>
 </header>

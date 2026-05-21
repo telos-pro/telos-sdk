@@ -206,7 +206,11 @@ class HermesInstaller(AgentInstaller):
     ) -> bool:
         protocol, engine = _classify_api_mode(api_mode)
         existing = telos_cfg.upstreams.get(slug)
-        desired = UpstreamConfig(url=url.rstrip("/"), engine=engine,
+        # Strip any /vN version suffix: the gateway constructs {url}/{tail} where
+        # tail already includes the version (e.g. "v1/chat/completions") because the
+        # OpenAI SDK adds it when the patched base_url has no /vN suffix.
+        normalized_url = re.sub(r"/v\d+$", "", url.rstrip("/"))
+        desired = UpstreamConfig(url=normalized_url, engine=engine,
                                   protocol=protocol, via=self.name)
         if existing == desired:
             return False

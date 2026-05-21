@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telos-sdk"
-version = "0.1.1"
+version = "0.1.2"
 description = "TELOS — cache-friendly prompt protocol: stable prefix, tiered bands, ephemeral tail, layered adapters, anchored marks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,8 +52,8 @@ Changelog = "https://github.com/telos-pro/telos-sdk/blob/main/CHANGELOG.md"
 telos = "telos.cli:main"
 
 [tool.setuptools]
-# 当前目录（telos-sdk/）就是 telos 包本身；
-# telos.harness → ./harness/，telos.engine → ./engine/，以此类推。
+# The current directory (telos-sdk/) IS the telos package itself;
+# telos.harness → ./harness/, telos.engine → ./engine/, and so on.
 packages = [
     "telos",
     "telos.harness",

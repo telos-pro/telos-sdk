@@ -180,27 +180,27 @@ tr:hover td { background: #131822; }
 <header>
   <h1>TELOS · Token Savings</h1>
   <div class="sub">
-    64 calls · 8 sessions · span 42.0 分钟
+    64 calls · 8 sessions · span 42.0 minutes
     · generated 2026-05-15 11:42 UTC
   </div>
 </header>
 
-<!-- ===== 视角切换：with TELOS vs. without TELOS ===== -->
+<!-- ===== view toggle: with TELOS vs. without TELOS ===== -->
 <div class="toggle-wrap" role="tablist">
-  <button id="btn-with"    class="active" onclick="setMode('with')">实际（开 TELOS）</button>
-  <button id="btn-without" onclick="setMode('without')">反事实（不开 TELOS）</button>
-  <button id="btn-compare" onclick="setMode('compare')">并排对比</button>
+  <button id="btn-with"    class="active" onclick="setMode('with')">actual (TELOS on)</button>
+  <button id="btn-without" onclick="setMode('without')">counterfactual (TELOS off)</button>
+  <button id="btn-compare" onclick="setMode('compare')">side-by-side</button>
 </div>
 
-<!-- compare 视角下的并排面板 -->
+<!-- side-by-side panel under compare view -->
 <section id="compare-view" style="display:none; margin-bottom: 18px;">
   <div class="compare-grid">
     <div class="compare-cell counter">
       <h3>without TELOS <span class="pill">counterfactual</span></h3>
       <div class="big">$6.42</div>
-      <div class="row"><span>prompt tokens (input 价)</span><b>1.09M</b></div>
+      <div class="row"><span>prompt tokens (input price)</span><b>1.09M</b></div>
       <div class="row"><span>output tokens</span><b>39.28K</b></div>
-      <div class="small">所有 prompt token 按基础 input 价计费；无 cache_read 折扣、无 cache_write 溢价。</div>
+      <div class="small">All prompt tokens billed at base input price; no cache_read discount, no cache_write premium.</div>
     </div>
     <div class="compare-cell actual">
       <h3>with TELOS <span class="pill">actual</span></h3>
@@ -209,11 +209,11 @@ tr:hover td { background: #131822; }
       <div class="row"><span>cache_read · @0.1×input</span><b class="green">427.96K</b></div>
       <div class="row"><span>cache_write · @1.25–2×input</span><b class="gold">71.90K</b></div>
       <div class="row"><span>output · @output</span><b>39.28K</b></div>
-      <div class="small">cache_write 拆分：5m <b class='gold'>71.90K</b> · 1h <b class='gold'>0</b></div>
+      <div class="small">cache_write split: 5m <b class='gold'>71.90K</b> · 1h <b class='gold'>0</b></div>
     </div>
   </div>
   <div class="savings-arrow">
-    净节省：<b>$1.84</b> &nbsp;·&nbsp; <b>28.6%</b> off counterfactual
+    net savings: <b>$1.84</b> &nbsp;·&nbsp; <b>28.6%</b> off counterfactual
   </div>
 </section>
 
@@ -222,17 +222,17 @@ tr:hover td { background: #131822; }
     <div class="label">tokens saved (cache hits)</div>
     <div class="value">427.96K</div>
     <div class="sub">
-      cache hits 占总 prompt tokens 的 <b class="green">39.4%</b>
-      ·  绝对量 <code>427,965</code> tokens
+      cache hits account for <b class="green">39.4%</b> of total prompt tokens
+      ·  absolute <code>427,965</code> tokens
     </div>
   </div>
   <div class="hero-card purple">
     <div class="label">cost saved (estimated)</div>
     <div class="value">$1.84</div>
     <div class="sub">
-      若关 TELOS 预计要付 <b class="lilac">$6.42</b>
-      · 实付 <b>$4.58</b>
-      · 节省 <b class="lilac">28.6%</b>
+      without TELOS would have cost <b class="lilac">$6.42</b>
+      · actual <b>$4.58</b>
+      · saved <b class="lilac">28.6%</b>
     </div>
   </div>
 </section>
@@ -242,8 +242,8 @@ tr:hover td { background: #131822; }
     <div class="label">prompt tokens (no cache)</div>
     <div class="value">1.09M</div>
     <div class="sub">
-      反事实视角：所有 raw_input + cache_read + cache_write 都以
-      base input 价计费 ·
+      counterfactual view: all raw_input + cache_read + cache_write billed at
+      base input price ·
       output <code>39,280</code>
     </div>
   </div>
@@ -251,8 +251,8 @@ tr:hover td { background: #131822; }
     <div class="label">cost (no TELOS)</div>
     <div class="value">$6.42</div>
     <div class="sub">
-      启用 TELOS 后实际只付 <b>$4.58</b>
-      · 节省 <b class="lilac">$1.84</b>（<b class="lilac">28.6%</b>）
+      with TELOS enabled, actual cost is only <b>$4.58</b>
+      · saved <b class="lilac">$1.84</b> (<b class="lilac">28.6%</b>)
     </div>
   </div>
 </section>
@@ -280,7 +280,7 @@ tr:hover td { background: #131822; }
 </div>
 
 <div class="card with-only">
-  <h2>Token mix（with TELOS · 实际）</h2>
+  <h2>Token mix (with TELOS · actual)</h2>
   <div class="seg-bar"><span class="raw_input" style="width:52.12%" title="raw_input: 586,830">586.83K</span><span class="cache_read" style="width:38.01%" title="cache_read: 427,965">427.96K</span><span class="cache_write" style="width:6.39%" title="cache_write: 71,901">71.90K</span><span class="output" style="width:3.49%" title="output: 39,280"></span></div>
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · 586.83K</span>
@@ -291,20 +291,20 @@ tr:hover td { background: #131822; }
 </div>
 
 <div class="card without-only">
-  <h2>Token mix（without TELOS · 反事实）</h2>
+  <h2>Token mix (without TELOS · counterfactual)</h2>
   <div class="seg-bar"><span class="raw_input" style="width:96.51%" title="raw_input (counterfactual): 1,086,696">1.09M</span><span class="output" style="width:3.49%" title="output: 39,280"></span></div>
   <div class="seg-legend">
     <span><span class="sw" style="background:#f0883e"></span>raw_input · 1.09M</span>
     <span><span class="sw" style="background:#79c0ff"></span>output · 39.28K</span>
   </div>
   <p class="muted" style="font-size:11px;margin-top:8px">
-    反事实假设：保持 prompt 内容不变，但移除 ``cache_control``，全量 prompt token
-    按 base input 价计费 → 计费视角下所有 cache_read 与 cache_write 都"塌"成 raw_input。
+    Counterfactual assumption: keep prompt contents unchanged but remove ``cache_control``, so all prompt tokens
+    are billed at base input price → from the billing view, all cache_read and cache_write "collapse" into raw_input.
   </p>
 </div>
 
 <div class="card timeline">
-  <h2>Activity over time（按小时聚合）</h2>
+  <h2>Activity over time (hourly aggregation)</h2>
   
 <svg viewBox="0 0 1100 180" width="100%" preserveAspectRatio="xMidYMid meet">
   <text x="44.0" y="15.0" text-anchor="end" font-size="9" fill="#7d8590">267.91K</text><line x1="50.0" y1="12.0" x2="1086.0" y2="12.0" stroke="#21262d" stroke-width="1"/><text x="44.0" y="87.0" text-anchor="end" font-size="9" fill="#7d8590">133.95K</text><line x1="50.0" y1="84.0" x2="1086.0" y2="84.0" stroke="#21262d" stroke-width="1"/><text x="44.0" y="159.0" text-anchor="end" font-size="9" fill="#7d8590">0</text><line x1="50.0" y1="156.0" x2="1086.0" y2="156.0" stroke="#21262d" stroke-width="1"/>
@@ -328,7 +328,7 @@ saved: $1.15</title></circle>
 
 
 <div class="card" style="background:transparent;border:none;padding:0;margin-bottom:6px">
-  <h2 style="color:#d2a8ff">A/B 对比 · 同任务不同开关</h2>
+  <h2 style="color:#d2a8ff">A/B comparison · same task, different switches</h2>
 </div>
 <div class="card">
   <h2>Compare group · add-csv-export <span style="display:inline-block;margin-left:8px;padding:2px 9px;border-radius:999px;font-size:10px;vertical-align:middle;font-family:sans-serif;letter-spacing:0;background:#1f3a4d;color:#79c0ff">live A/B</span></h2>
@@ -342,7 +342,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.278</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">16.67K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.362</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.526</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.526</b></div>
     </div>
     <div class="compare-cell" style="border-color:#3fb95055">
       <h3><b style="color:#3fb950">telos</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
@@ -352,7 +352,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.434</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.434</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.434</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.434</b></div>
     </div>
     <div class="compare-cell" style="border-color:#f0883e55">
       <h3><b style="color:#f0883e">rtk</b> </h3>
@@ -362,7 +362,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">16.67K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.083</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.247</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.247</b></div>
     </div>
     <div class="compare-cell" style="border-color:#7d859055">
       <h3><b style="color:#7d8590">none</b> </h3>
@@ -372,7 +372,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.0000</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="muted">基线</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="muted">baseline</b></div>
     </div>
   </div>
 </div>
@@ -388,7 +388,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.439</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">24.57K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.562</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.829</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.829</b></div>
     </div>
     <div class="compare-cell" style="border-color:#3fb95055">
       <h3><b style="color:#3fb950">telos</b> <span class="pill" style="background:#1a4d2e;color:#56d364">best</span></h3>
@@ -398,7 +398,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.684</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.684</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.684</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.684</b></div>
     </div>
     <div class="compare-cell" style="border-color:#f0883e55">
       <h3><b style="color:#f0883e">rtk</b> </h3>
@@ -408,7 +408,7 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">24.57K</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.123</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="green">−$0.390</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="green">−$0.390</b></div>
     </div>
     <div class="compare-cell" style="border-color:#7d859055">
       <h3><b style="color:#7d8590">none</b> </h3>
@@ -418,13 +418,13 @@ saved: $1.15</title></circle>
       <div class="row"><span>TELOS saved $</span><b class="green">$0.0000</b></div>
       <div class="row"><span>RTK tokens removed</span><b class="gold">0</b></div>
       <div class="row"><span>combined saved $</span><b class="lilac">$0.0000</b></div>
-      <div class="row"><span>vs 最贵 mode</span><b class="muted">基线</b></div>
+      <div class="row"><span>vs most expensive mode</span><b class="muted">baseline</b></div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <h2>Breakdown by mode（开关对照）</h2>
+  <h2>Breakdown by mode (switch comparison)</h2>
   <table>
     <thead><tr>
       <th class="left">mode</th>
@@ -434,12 +434,12 @@ saved: $1.15</title></circle>
       <th>RTK saved $ (est)</th>
       <th class="left">combined saved $</th>
     </tr></thead>
-    <tbody><tr><td class="left"><b style="color:#d2a8ff">both</b><br><span class="muted" style="font-size:10px">TELOS 前缀缓存 + RTK 工具过滤</span></td><td>16</td><td class="green">$0.717</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:82.6%"></span><span class="label-overlay">$0.924</span></td></tr><tr><td class="left"><b style="color:#3fb950">telos</b><br><span class="muted" style="font-size:10px">只 TELOS 前缀缓存</span></td><td>16</td><td class="green">$1.12</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$1.12</span></td></tr><tr><td class="left"><b style="color:#f0883e">rtk</b><br><span class="muted" style="font-size:10px">只 RTK 工具过滤</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:18.4%"></span><span class="label-overlay">$0.206</span></td></tr><tr><td class="left"><b style="color:#7d8590">none</b><br><span class="muted" style="font-size:10px">纯透传，无优化</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
+    <tbody><tr><td class="left"><b style="color:#d2a8ff">both</b><br><span class="muted" style="font-size:10px">TELOS prefix cache + RTK tool filtering</span></td><td>16</td><td class="green">$0.717</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:82.6%"></span><span class="label-overlay">$0.924</span></td></tr><tr><td class="left"><b style="color:#3fb950">telos</b><br><span class="muted" style="font-size:10px">TELOS prefix cache only</span></td><td>16</td><td class="green">$1.12</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:100.0%"></span><span class="label-overlay">$1.12</span></td></tr><tr><td class="left"><b style="color:#f0883e">rtk</b><br><span class="muted" style="font-size:10px">RTK tool filtering only</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">41.24K</td><td class="gold">$0.206</td><td class="bar-cell"><span class="fill" style="width:18.4%"></span><span class="label-overlay">$0.206</span></td></tr><tr><td class="left"><b style="color:#7d8590">none</b><br><span class="muted" style="font-size:10px">pure passthrough, no optimization</span></td><td>16</td><td class="green">$0.0000</td><td class="gold">0</td><td class="gold">$0.0000</td><td class="bar-cell"><span class="fill" style="width:0.0%"></span><span class="label-overlay">$0.0000</span></td></tr></tbody>
   </table>
   <p class="muted" style="font-size:11px;margin-top:8px">
-    TELOS saved $ = 前缀缓存相对「不开 cache_control」省下的钱；
-    RTK saved $ = 工具输出过滤省下的字符折算 token × input 价（上界估算）。
-    两路相加 = combined。
+    TELOS saved $ = money saved by prefix cache vs "no cache_control";
+    RTK saved $ = filtered tool-output characters converted to tokens × input price (upper-bound estimate).
+    Sum of both = combined.
   </p>
 </div>
 
@@ -496,9 +496,9 @@ saved: $1.15</title></circle>
 
 
 <div class="footer">
-  数据源 · <code>demo: replay 对照 + live A/B</code><br>
-  价格表 = Anthropic / OpenAI / DeepSeek 2026 公开报价（USD / 1M tokens）；未识别 model 走 Sonnet 价位估算。
-  <br>cache_write 拆分按 raw_usage.cache_creation.ephemeral_{5m,1h}_input_tokens；缺失则全计 5m 价（保守）。
+  data source · <code>demo: replay comparison + live A/B</code><br>
+  price table = Anthropic / OpenAI / DeepSeek 2026 public rates (USD / 1M tokens); unrecognized models fall back to Sonnet pricing estimate.
+  <br>cache_write split per raw_usage.cache_creation.ephemeral_{5m,1h}_input_tokens; if missing, billed entirely at 5m price (conservative).
 </div>
 
 </div>
@@ -512,7 +512,7 @@ function setMode(m) {
     if (b) b.classList.toggle('active', k === m);
   });
   if (m === 'compare') {
-    // compare 模式：隐藏 with/without 专属面板，只显示并排
+    // compare mode: hide with/without-specific panels, show only side-by-side
     body.setAttribute('data-mode', '_compare');
     compareView.style.display = 'block';
   } else {
@@ -521,7 +521,7 @@ function setMode(m) {
   }
   try { localStorage.setItem('telos.dashboard.mode', m); } catch(e) {}
 }
-// 恢复上次选择
+// restore last selection
 try {
   var saved = localStorage.getItem('telos.dashboard.mode');
   if (saved && ['with','without','compare'].indexOf(saved) >= 0) setMode(saved);

@@ -1340,12 +1340,29 @@ class ProxyApp:
                 model=raw.get("model", ""),
             )
 
-        # If the upstream slug carries a harness identity (set at install time
-        # by OpenClawInstaller / HermesInstaller), use it to label this entry
-        # in the usage log so the dashboard's "breakdown by harness" attributes
-        # traffic to the calling tool, not the wire-level pipeline harness.
-        if upstream_cfg.via and result.harness != "passthrough":
+        # Attribution: label the usage-log entry with the calling agent's identity.
+        # Priority: slug's via field (set at install time) >
+        #           HTTP header detection (covers the common case where the proxy
+        #           started before `telos init <harness>` ran and via is not yet set).
+        # The `!= "passthrough"` guard is intentionally dropped: the via field
+        # identifies the *caller*, not the optimization mode — even passthrough or
+        # pipeline-failure entries should be attributed to the right agent so the
+        # dashboard's "breakdown by harness" stays accurate. This also aligns with
+        # the anthropic-messages path in handle_upstream_route, which always applies via.
+        if upstream_cfg.via:
             result.harness = upstream_cfg.via
+        else:
+            _client = _client_identity(request.headers)
+            _detected = _detect_harness_signal(raw, request.headers)
+            if _detected is not None:
+                result.harness = _detected
+                if self._client_harness.get(_client) != _detected:
+                    self._client_harness[_client] = _detected
+                    _log.info("harness pinned (openai-chat): client=%s -> %s (User-Agent=%r)",
+                              _client or "(anon)", _detected,
+                              request.headers.get("user-agent", ""))
+            elif (remembered := self._client_harness.get(_client)):
+                result.harness = remembered
 
         result.mode = mode.label
         result.compare_group = compare_group
@@ -1637,6 +1654,13 @@ class ProxyApp:
 # Application construction
 # ---------------------------------------------------------------------------
 
+@web.middleware
+async def _access_log_middleware(request: web.Request, handler):  # type: ignore[type-arg]
+    ua = request.headers.get("User-Agent", "")
+    _log.info("ACCESS %s %s  ua=%r", request.method, request.path_qs, ua)
+    return await handler(request)
+
+
 def make_app(
     *,
     upstream: str = _DEFAULT_UPSTREAM,
@@ -1666,7 +1690,7 @@ def make_app(
     # tools) that far exceeds 1 MiB, triggering HTTPRequestEntityTooLarge → wrapped by
     # handle_messages' except into "400 Invalid JSON: Request Entity Too Large". Setting it
     # to 1 GiB is effectively unlimited.
-    app = web.Application(client_max_size=1024 ** 3)
+    app = web.Application(client_max_size=1024 ** 3, middlewares=[_access_log_middleware])
     app.router.add_post("/v1/messages", proxy.handle_messages)
     # Multi-backend route: /upstreams/<slug>/<tail>. Registered before the
     # catch-all passthrough so the slug dispatch wins.

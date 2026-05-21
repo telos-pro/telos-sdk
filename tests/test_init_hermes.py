@@ -40,6 +40,33 @@ def _sample_hermes_config() -> dict[str, Any]:
     }
 
 
+def _sample_auth_json(provider: str = "openrouter") -> dict[str, Any]:
+    return {
+        "version": 1,
+        "providers": {},
+        "active_provider": provider,
+        "credential_pool": {
+            provider: [
+                {
+                    "id": "abc123",
+                    "label": "TEST_API_KEY",
+                    "auth_type": "api_key",
+                    "priority": 0,
+                    "source": "env:TEST_KEY",
+                    "access_token": "sk-test-key",
+                    "base_url": "https://openrouter.ai/api/v1",
+                }
+            ]
+        },
+    }
+
+
+def _write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _write_yaml(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -48,6 +75,9 @@ def _write_yaml(path: Path, data: Any) -> None:
 def _make_inst(tmp_path: Path) -> tuple[HermesInstaller, Path, Path]:
     config_path = tmp_path / "hermes" / "config.yaml"
     _write_yaml(config_path, _sample_hermes_config())
+    # Write auth.json beside config.yaml so credential-pool patching is exercised.
+    auth_path = config_path.parent / "auth.json"
+    _write_json(auth_path, _sample_auth_json())
     state_path = tmp_path / "telos-state" / "hermes.json"
     os.environ["TELOS_HOME"] = str(tmp_path / "telos-home")
     inst = HermesInstaller(
@@ -214,5 +244,49 @@ def test_install_anthropic_api_mode_uses_anthropic_upstream(tmp_path: Path) -> N
         upstream = telos_data["upstreams"]["claude-anthropic"]
         assert upstream["protocol"] == "anthropic-messages"
         assert upstream["engine"] == "anthropic"
+    finally:
+        _restore_env()
+
+
+def test_install_patches_auth_json_credential_pool(tmp_path: Path) -> None:
+    """install() also patches the credential_pool base_url in auth.json so the
+    hermes runtime (which prefers pool URL over config.yaml) routes through telos."""
+    inst, config_path, state_path = _make_inst(tmp_path)
+    auth_path = config_path.parent / "auth.json"
+    try:
+        inst.install()
+        auth = json.loads(auth_path.read_text())
+        pool_url = auth["credential_pool"]["openrouter"][0]["base_url"]
+        assert pool_url == "http://127.0.0.1:7171/upstreams/openrouter/v1"
+        # State records the original so uninstall can restore it.
+        state = json.loads(state_path.read_text())
+        rec = next(r for r in state["patched"] if r["key"] == "__primary__")
+        assert rec["auth_pool_patches"][0]["previous_base_url"] == "https://openrouter.ai/api/v1"
+    finally:
+        _restore_env()
+
+
+def test_install_auth_json_idempotent(tmp_path: Path) -> None:
+    """Re-running install() when auth.json is already patched is a no-op."""
+    inst, _config_path, _state = _make_inst(tmp_path)
+    try:
+        inst.install()
+        r2 = inst.install()
+        assert r2.already_installed is True
+        assert not r2.changed_files
+    finally:
+        _restore_env()
+
+
+def test_uninstall_restores_auth_json_credential_pool(tmp_path: Path) -> None:
+    """uninstall() restores the credential pool base_url in auth.json."""
+    inst, config_path, state_path = _make_inst(tmp_path)
+    auth_path = config_path.parent / "auth.json"
+    try:
+        inst.install()
+        inst.uninstall()
+        auth = json.loads(auth_path.read_text())
+        pool_url = auth["credential_pool"]["openrouter"][0]["base_url"]
+        assert pool_url == "https://openrouter.ai/api/v1"
     finally:
         _restore_env()

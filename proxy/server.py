@@ -1199,6 +1199,7 @@ class ProxyApp:
 
         # Normalize tail (no leading slash).
         tail = tail.lstrip("/")
+        _log.info("upstream_route: slug=%r tail=%r method=%s", slug, tail, request.method)
 
         if (upstream_cfg.protocol == "openai-chat"
                 and tail.endswith("chat/completions")

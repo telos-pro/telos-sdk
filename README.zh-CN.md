@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="branding/logo.svg" alt="TELOS — 可移植 Agent 上下文" width="460"/>
+<img src="assets/logo.svg" alt="TELOS — 可移植 Agent 上下文" width="460"/>
 
 ### 上下文归你所有 · Agent 是雇来的
 
@@ -15,13 +15,15 @@
 [![Status](https://img.shields.io/badge/status-Beta-d8851f?style=flat-square)](CHANGELOG.md)
 [![Protocol](https://img.shields.io/badge/protocol-TELOS%20IR-7FD8E0?style=flat-square)](docs/2026-05-06-telos-protocol.md)
 
-[**快速开始**](#-3-step-to-save-90) · [**支持矩阵**](#-support-matrix) · [**为什么**](#-the-problem--two-broken-legs) · [**协议**](#-the-protocol-not-compression-but-never-breaking-the-prefix) · [**引擎**](#-engines--one-ir-five-backends) · [**路线图**](#--roadmap) · [**深入了解**](#-going-deeper)
+[**快速开始**](#quickstart) · [**支持矩阵**](#support-matrix) · [**为什么**](#why-telos) · [**协议**](#protocol) · [**路线图**](#roadmap) · [**引用**](#citation)
 
 <sub>📖 &nbsp;**English** · [简体中文](README.zh-CN.md)</sub>
 
 </div>
 
 ---
+
+<a id="problem"></a>
 
 ## ⬢ &nbsp;凌晨 2 点：钱到底花到哪里去了？
 
@@ -39,8 +41,10 @@
 **不要再用“token 少了几倍”来衡量。** 到 2026 年，同一模型家族不同计费层级之间的价格差已经达到 **80x–150x**。任何人都能把最便宜的层级塞进分母来造出漂亮比例，只有绝对美元不会说谎。
 
 <p align="center">
-  <img src="promo-assets/01-waste.en.svg" alt="今天的 agent token 效率只有 25%" width="100%"/>
+  <img src="assets/01-waste.en.svg" alt="今天的 agent token 效率只有 25%" width="100%"/>
 </p>
+
+<a id="quickstart"></a>
 
 ## ⬢ &nbsp;3 步启动
 
@@ -67,7 +71,7 @@ telos dashboard
 会在浏览器中打开一个离线 HTML 看板，以绝对美元展示每次调用的节省。每次调用都会自动追加到 `~/.telos/usage.jsonl`，并实时汇总。
 
 <p align="center">
-  <img src="promo-assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
+  <img src="assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
 </p>
 
 <p align="center"><sub><strong>每一笔节省都固定到绝对美元</strong> · 无需云服务 · 支持离线打开 · <code>~/.telos/usage.jsonl</code> 直接驱动单文件 HTML 页面</sub></p>
@@ -75,6 +79,8 @@ telos dashboard
 **TELOS 是开源的。把它接到你的真实工作流里，看看那 92% 到底是真收益，还是又一个“X 倍 token”说法。**
 
 ---
+
+<a id="support-matrix"></a>
 
 ## ⬢ &nbsp;支持矩阵
 
@@ -106,6 +112,8 @@ telos dashboard
 
 ---
 
+<a id="why-telos"></a>
+
 ## ⬢ &nbsp;TELOS 只解决两件事
 
 **① 把 token 效率推到极限。** 真实 6 轮会话 **-92.3%**；受控 48 次调用 **-36.6%（净省 -$2.16）**。每一分钱都按绝对 $/已解决请求 核算，比例可以造，美元造不了。
@@ -113,6 +121,8 @@ telos dashboard
 **② 把上下文主权还给你。** `TelosIR` 是引擎无关、可序列化、可移植的上下文表示。你的 persona、你的 tools、你的 20 轮中段线程，全都封装在同一块“石碑”里。今天交给 Claude，明天迁到 DeepSeek，今晚跑在本地 vLLM 上。**上下文归你，agent 只是雇员。**
 
 ---
+
+<a id="protocol"></a>
 
 ## ⬢ &nbsp;协议：不是压缩，而是永不打断前缀
 
@@ -125,7 +135,7 @@ telos dashboard
 ### 三色带
 
 <p align="center">
-  <img src="promo-assets/03-banding.en.svg" alt="PIN / FOLD / DROP bands" width="100%"/>
+  <img src="assets/03-banding.en.svg" alt="PIN / FOLD / DROP bands" width="100%"/>
 </p>
 
 每个内容块在“出生”时就声明自己的缓存寿命，不靠事后启发式，不靠 LLM 猜测，而是一级结构注解：
@@ -143,12 +153,14 @@ telos dashboard
 prompt 是一条**只追加流**。新轮次只向尾部追加块，不会改写任何已经提交的字节。所谓“修改”通过新块表达（摘要、脱敏），绝不做原地重写。
 
 <p align="center">
-  <img src="promo-assets/04-append.en.svg" alt="Monotonic append: cache hit rate is monotonically non-decreasing with session length" width="100%"/>
+  <img src="assets/04-append.en.svg" alt="Monotonic append: cache hit rate is monotonically non-decreasing with session length" width="100%"/>
 </p>
 
 因为早期块不可变，而且跨轮字节完全一致，推理引擎的前缀匹配算法在每次请求里都能找到最长公共前缀。这不是运气，而是结构保证。**因此缓存命中率是会话长度的单调不下降函数：会话越长，复用越多，不会回退。**
 
 ---
+
+<a id="roadmap"></a>
 
 ## ⬢ &nbsp;路线图
 
@@ -162,6 +174,8 @@ TELOS 只做一件事：**上下文是你的，Agent 是雇的。** 当前路线
 | **Phase 4** · Context becomes an asset | trajectory 不再只是日志，而是可 fork 的代码 |
 
 ---
+
+<a id="citation"></a>
 
 ## Citation
 

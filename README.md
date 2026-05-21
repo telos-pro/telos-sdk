@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="branding/logo.svg" alt="TELOS — Portable Agent Context" width="460"/>
+<img src="assets/logo.svg" alt="TELOS — Portable Agent Context" width="460"/>
 
 ### Context is yours &nbsp;·&nbsp; Agents are hired
 
@@ -15,13 +15,15 @@
 [![Status](https://img.shields.io/badge/status-Beta-d8851f?style=flat-square)](CHANGELOG.md)
 [![Protocol](https://img.shields.io/badge/protocol-TELOS%20IR-7FD8E0?style=flat-square)](docs/2026-05-06-telos-protocol.md)
 
-[**Quickstart**](#-3-step-start) · [**Support Matrix**](#-support-matrix) · [**Why**](#-the-problem--two-broken-legs) · [**Protocol**](#-the-protocol-not-compression-but-never-breaking-the-prefix) · [**Engines**](#-engines--one-ir-five-backends) · [**Roadmap**](#--roadmap) · [**Docs**](#-going-deeper)
+[**Quickstart**](#quickstart) · [**Support Matrix**](#support-matrix) · [**Why**](#why-telos) · [**Protocol**](#protocol) · [**Roadmap**](#roadmap) · [**Citation**](#citation)
 
 <sub>📖 &nbsp;**English** · [Simplified Chinese](README.zh-CN.md)</sub>
 
 </div>
 
 ---
+
+<a id="problem"></a>
 
 ## ⬢ &nbsp;2 a.m. — where did all the money go?
 
@@ -39,8 +41,10 @@ Scale to 1,000 sessions: **$362 → $26**. In a controlled A/B/C/D run (`showcas
 **Stop measuring in "X× fewer tokens."** In 2026, the pricing gap between tiers of the same model family already spans **80×–150×**. Anyone can inflate a ratio by stuffing the cheapest tier in the denominator — absolute dollars are the only number that doesn't lie.
 
 <p align="center">
-  <img src="promo-assets/01-waste.en.svg" alt="Today's agent token efficiency is only 25%" width="100%"/>
+  <img src="assets/01-waste.en.svg" alt="Today's agent token efficiency is only 25%" width="100%"/>
 </p>
+
+<a id="quickstart"></a>
 
 ## ⬢ &nbsp;3-step to save 90%
 
@@ -67,7 +71,7 @@ telos dashboard
 Opens an offline HTML dashboard in your browser showing savings per call in absolute dollars. Every invocation is automatically appended to `~/.telos/usage.jsonl` and aggregated in real time.
 
 <p align="center">
-  <img src="promo-assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
+  <img src="assets/05-dashboard.png" alt="TELOS savings dashboard — absolute dollars broken down by harness / model / session" width="100%"/>
 </p>
 
 <p align="center"><sub><strong>Every saving pinned to an absolute dollar figure</strong> · No cloud server required · Opens offline · <code>~/.telos/usage.jsonl</code> fed directly into a single-file HTML page</sub></p>
@@ -76,6 +80,8 @@ Opens an offline HTML dashboard in your browser showing savings per call in abso
 **TELOS is open source. Run it on your own workflow — see whether that 92% is real, or just another "X× tokens" claim.**
 
 ---
+
+<a id="support-matrix"></a>
 
 ## ⬢ &nbsp;Support Matrix
 
@@ -107,6 +113,8 @@ Opens an offline HTML dashboard in your browser showing savings per call in abso
 
 ---
 
+<a id="why-telos"></a>
+
 ## ⬢ &nbsp;TELOS solves exactly two things
 
 **① Push token efficiency to the limit.** 6-turn real session **−92.3%**; controlled 48-call run **−36.6% (net −$2.16)**. Every cent accounted for in absolute $/query-resolved — ratios can be faked; dollars can't.
@@ -114,6 +122,8 @@ Opens an offline HTML dashboard in your browser showing savings per call in abso
 **② Return context sovereignty to you.** `TelosIR` is an engine-agnostic, serializable, portable context representation. Your persona, your tools, your 20-turn mid-session thread — everything packed into the same **stone tablet**. Hand it to Claude today, move it to DeepSeek tomorrow, run it on a local vLLM tonight. **Your context; agents are just hired help.**
 
 ---
+
+<a id="protocol"></a>
 
 ## ⬢ &nbsp;The protocol: not compression, but never breaking the prefix
 
@@ -126,7 +136,7 @@ That principle materializes in three interlocking ideas.
 ### Three-color bands
 
 <p align="center">
-  <img src="promo-assets/03-banding.en.svg" alt="PIN / FOLD / DROP bands" width="100%"/>
+  <img src="assets/03-banding.en.svg" alt="PIN / FOLD / DROP bands" width="100%"/>
 </p>
 
 Every content block declares its cache lifetime **at birth** — not post-hoc heuristics, not LLM guessing, but first-class structural annotation:
@@ -144,12 +154,14 @@ The ordering invariant is absolute: **PIN\* → FOLD\* → DROP\*** — within e
 The prompt is an **append-only stream**. New turns only add blocks to the tail — **no mutation of already-submitted bytes**. A "modification" is expressed as a new block (summary, redaction), never an in-place rewrite.
 
 <p align="center">
-  <img src="promo-assets/04-append.en.svg" alt="Monotonic append: cache hit rate is monotonically non-decreasing with session length" width="100%"/>
+  <img src="assets/04-append.en.svg" alt="Monotonic append: cache hit rate is monotonically non-decreasing with session length" width="100%"/>
 </p>
 
 Because earlier blocks are immutable and bytes are identical across turns, the inference engine's prefix-matching algorithm finds the longest common prefix on **every** request — not by luck, but by construction. **Cache hit rate is therefore a monotonically non-decreasing function of session length: longer sessions, more reuse, never regression.**
 
 ---
+
+<a id="roadmap"></a>
 
 ## ⬢ &nbsp;Roadmap
 
@@ -163,6 +175,8 @@ TELOS makes exactly one claim: **context is yours, agents are hired.** The curre
 | **Phase 4** · Context becomes an asset | Trajectories are no longer logs — they're forkable code |
 
 ---
+
+<a id="citation"></a>
 
 ## Citation
 

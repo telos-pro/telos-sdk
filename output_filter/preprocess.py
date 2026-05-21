@@ -1,10 +1,12 @@
-"""把工具结果过滤器应用到原始 ``/v1/messages`` 请求体。
+"""Apply the tool-result filter to the raw ``/v1/messages`` request body.
 
-在 TELOS 管线**之前**跑：rtk 开关打开时，proxy 收到请求后先用这里的
-``apply_filter`` 把 ``messages[].content[].tool_result`` 里的大段 bash
-输出缩短，再（可选地）交给 TELOS 管线打 cache 标记。
+Runs **before** the TELOS pipeline: when the rtk switch is on, after the
+proxy receives a request it first uses ``apply_filter`` here to shorten the
+large bash output inside ``messages[].content[].tool_result``, then
+(optionally) hands it to the TELOS pipeline to apply cache marks.
 
-纯函数：不改入参，返回新的 request dict + ``FilterStats`` 计量。
+A pure function: does not mutate its input, returns a new request dict +
+``FilterStats`` metering.
 """
 
 from __future__ import annotations
@@ -19,18 +21,19 @@ from telos.output_filter.filters import ToolResultFilter
 
 @dataclass
 class FilterStats:
-    """一次请求里所有 tool_result 过滤的汇总，写进 usage_log。
+    """The summary of all tool_result filtering in one request, written into usage_log.
 
-    ``original_tokens`` / ``filtered_tokens`` 由过滤器在真实文本上估算
-    （见 ``filters.FilterRecord``），dashboard 优先用它们而非 ``chars/4``。
+    ``original_tokens`` / ``filtered_tokens`` are estimated by the filter on
+    the real text (see ``filters.FilterRecord``); the dashboard prefers them
+    over ``chars/4``.
     """
 
     original_chars: int = 0
     filtered_chars: int = 0
     original_tokens: int = 0
     filtered_tokens: int = 0
-    blocks_seen: int = 0      # 扫描到的 tool_result 文本块数
-    blocks_filtered: int = 0  # 实际省下字节的块数
+    blocks_seen: int = 0      # number of tool_result text blocks scanned
+    blocks_filtered: int = 0  # number of blocks that actually saved bytes
     by_rule: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     @property
@@ -56,7 +59,7 @@ class FilterStats:
 
 
 def _command_index(messages: list[Any]) -> dict[str, str]:
-    """tool_use_id → shell 命令串（仅 Bash 类工具有 ``input.command``）。"""
+    """tool_use_id → shell command string (only Bash-type tools have ``input.command``)."""
     out: dict[str, str] = {}
     for msg in messages:
         if not isinstance(msg, Mapping) or msg.get("role") != "assistant":
@@ -77,7 +80,7 @@ def _command_index(messages: list[Any]) -> dict[str, str]:
 
 
 def _tool_name_index(messages: list[Any]) -> dict[str, str]:
-    """tool_use_id → 工具名。"""
+    """tool_use_id → tool name."""
     out: dict[str, str] = {}
     for msg in messages:
         if not isinstance(msg, Mapping) or msg.get("role") != "assistant":
@@ -96,11 +99,12 @@ def _tool_name_index(messages: list[Any]) -> dict[str, str]:
 def apply_filter(
     raw: Mapping[str, Any], flt: ToolResultFilter,
 ) -> tuple[dict[str, Any], FilterStats]:
-    """对 ``raw`` 里所有 tool_result 文本跑 ``flt``，返回新请求 + 计量。
+    """Run ``flt`` over all tool_result text in ``raw``, returning a new request + metering.
 
-    支持 tool_result 的两种 content 形态：
-    - 字符串
-    - content block 列表（仅过滤 ``type=="text"`` 的块，image 等原样保留）
+    Supports both content shapes of tool_result:
+    - a string
+    - a list of content blocks (only ``type=="text"`` blocks are filtered;
+      images and the like are kept as-is)
     """
     new = copy.deepcopy(dict(raw))
     stats = FilterStats()
@@ -134,7 +138,7 @@ def _filter_tool_result(
     tool_name: str,
     stats: FilterStats,
 ) -> None:
-    """就地改写单个 tool_result block 的 content。"""
+    """Rewrite the content of a single tool_result block in place."""
     content = item.get("content")
 
     if isinstance(content, str):

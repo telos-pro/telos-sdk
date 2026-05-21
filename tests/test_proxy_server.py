@@ -1,4 +1,4 @@
-"""端到端 proxy 测试：起一个 mock upstream，跑真实代理，断 wire 内容。"""
+"""End-to-end proxy test: start a mock upstream, run the real proxy, assert on the wire content."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from telos.proxy.server import make_app
 
 
 # ---------------------------------------------------------------------------
-# mock upstream（充当 api.anthropic.com）
+# mock upstream (acts as api.anthropic.com)
 # ---------------------------------------------------------------------------
 
 class _MockUpstream:
-    """记录收到的 wire 请求；返回固定 JSON 或 SSE 流。"""
+    """Records the received wire requests; returns a fixed JSON or an SSE stream."""
 
     def __init__(self, *, sse: bool = False) -> None:
         self.last_body: dict[str, Any] | None = None
@@ -70,7 +70,7 @@ class _MockUpstream:
 
 
 # ---------------------------------------------------------------------------
-# Fixture helpers（不引 pytest-aiohttp，直接手摆）
+# Fixture helpers (do not pull in pytest-aiohttp, set up by hand)
 # ---------------------------------------------------------------------------
 
 async def _start_upstream(mock: _MockUpstream) -> tuple[web.AppRunner, str]:
@@ -132,14 +132,14 @@ async def _test_non_streaming() -> None:
                 assert body["id"] == "msg_test"
                 assert body["usage"]["cache_read_input_tokens"] == 1000
 
-        # ---- 验证 upstream 拿到的是 TELOS 处理过的 wire ----
+        # ---- verify the upstream received the TELOS-processed wire ----
         wire = mock.last_body
         assert wire is not None
-        # tools 段或 system 段至少有一处出现 cache_control（BP-T 或 BP-S）
+        # the tools segment or system segment has cache_control in at least one place (BP-T or BP-S)
         all_blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
         assert any("cache_control" in b for b in all_blocks), \
-            f"upstream 拿到的 wire 没有 cache_control: {wire}"
-        # 认证 header 应被透传
+            f"the wire the upstream received has no cache_control: {wire}"
+        # the auth header should be passed through
         assert mock.last_headers.get("x-api-key") == "test-key"
         assert mock.last_headers.get("anthropic-version") == "2023-06-01"
         print("✓ test_non_streaming")
@@ -170,7 +170,7 @@ async def _test_streaming_sse() -> None:
                          "anthropic-version": "2023-06-01"},
             ) as resp:
                 assert resp.status == 200
-                # SSE: 累积 chunks
+                # SSE: accumulate chunks
                 received = b""
                 async for chunk in resp.content.iter_any():
                     received += chunk
@@ -217,7 +217,7 @@ async def _test_usage_log_written(tmp_log: Path) -> None:
 
 
 async def _test_pipeline_error_returns_anthropic_error() -> None:
-    """非 JSON body 必须按 Anthropic 错误 schema 返回 400。"""
+    """A non-JSON body must return 400 following the Anthropic error schema."""
     mock = _MockUpstream(sse=False)
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -240,10 +240,10 @@ async def _test_pipeline_error_returns_anthropic_error() -> None:
 
 
 async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
-    """TELOS 失败时（默认非 strict），原 raw 透传到 upstream，client 看到正常响应。
+    """When TELOS fails (non-strict by default), the original raw is passed through to the upstream and the client sees a normal response.
 
-    构造方法：发一个 model 字段缺失但 content 合法的请求 —— harness 能解析，
-    但我们 monkey-patch process_anthropic_request 让它抛异常，模拟 TELOS bug。
+    Construction method: send a request missing the model field but with valid content -- the harness can parse it,
+    but we monkey-patch process_anthropic_request to make it raise, simulating a TELOS bug.
     """
     from telos.proxy import server as srv_mod
 
@@ -251,7 +251,7 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
 
-    # monkey-patch：让管线必抛
+    # monkey-patch: make the pipeline always raise
     original = srv_mod.process_anthropic_request
 
     def boom(*args, **kwargs):
@@ -272,17 +272,17 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
                 json=req_body,
                 headers={"x-api-key": "k", "anthropic-version": "2023-06-01"},
             ) as resp:
-                # passthrough 模式：仍然 200，body 来自 upstream
+                # passthrough mode: still 200, body comes from the upstream
                 assert resp.status == 200, await resp.text()
                 body = await resp.json()
                 assert body["id"] == "msg_test"
 
-        # upstream 收到的应当是 ORIGINAL raw（无 cache_control 改写）
+        # what the upstream received should be the ORIGINAL raw (no cache_control rewrite)
         wire = mock.last_body
         all_blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
-        # 不应该出现 cache_control（因为没跑 TELOS）
+        # cache_control should not appear (because TELOS did not run)
         assert not any("cache_control" in b for b in all_blocks), \
-            "passthrough 不应有 cache_control 改写"
+            "passthrough should not have a cache_control rewrite"
         print("✓ test_pipeline_failure_falls_back_to_passthrough")
     finally:
         srv_mod.process_anthropic_request = original
@@ -291,14 +291,14 @@ async def _test_pipeline_failure_falls_back_to_passthrough() -> None:
 
 
 async def _test_strict_mode_returns_500_on_pipeline_failure() -> None:
-    """strict=True 时 TELOS 失败必须返 500（不降级）。"""
+    """When strict=True, a TELOS failure must return 500 (no degradation)."""
     from telos.proxy import server as srv_mod
     from telos.proxy.server import make_app
 
     mock = _MockUpstream(sse=False)
     up_runner, up_url = await _start_upstream(mock)
 
-    # 手动起 strict app
+    # manually start a strict app
     app = make_app(upstream=up_url, strict=True)
     px_runner = web.AppRunner(app)
     await px_runner.setup()
@@ -330,10 +330,10 @@ async def _test_strict_mode_returns_500_on_pipeline_failure() -> None:
 
 
 class _FlakyUpstream:
-    """前 ``fail_first`` 个连接收到请求后直接关闭（不返回响应），
+    """The first ``fail_first`` connections close immediately after receiving the request (returning no response),
 
-    其余正常返回 JSON。客户端侧表现为 ``ServerDisconnectedError`` —— 模拟
-    api.anthropic.com 建连/早期阶段的瞬时抖动。
+    the rest return JSON normally. On the client side this manifests as ``ServerDisconnectedError`` -- simulating
+    the transient jitter of api.anthropic.com during connection setup / early stages.
     """
 
     def __init__(self, *, fail_first: int) -> None:
@@ -344,7 +344,7 @@ class _FlakyUpstream:
     async def handler(self, request: web.Request) -> web.StreamResponse:
         self.requests += 1
         if self.requests <= self.fail_first:
-            # 收到请求后直接关闭连接，不发任何响应。
+            # close the connection immediately after receiving the request, sending no response.
             request.transport.close()
             raise asyncio.CancelledError()
         self.served += 1
@@ -370,7 +370,7 @@ def _req_body() -> dict[str, Any]:
 
 
 async def _test_retries_transient_connect_failure() -> None:
-    """前 2 次建连瞬时失败 → proxy 自己退避重试，客户端最终拿到 200。"""
+    """The first 2 connection attempts fail transiently → the proxy backs off and retries on its own, the client eventually gets 200."""
     mock = _FlakyUpstream(fail_first=2)
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -383,7 +383,7 @@ async def _test_retries_transient_connect_failure() -> None:
                 assert resp.status == 200, await resp.text()
                 body = await resp.json()
                 assert body["id"] == "msg_flaky"
-        # upstream 共收到 3 次（2 次失败 + 1 次成功），只成功服务 1 次。
+        # the upstream received 3 requests in total (2 failures + 1 success), serving successfully only once.
         assert mock.requests == 3, mock.requests
         assert mock.served == 1, mock.served
         print("✓ test_retries_transient_connect_failure")
@@ -393,7 +393,7 @@ async def _test_retries_transient_connect_failure() -> None:
 
 
 async def _test_502_after_exhausting_retries() -> None:
-    """建连一直失败 → 重试耗尽后 proxy 回 502（anthropic error 结构）。"""
+    """Connection setup keeps failing → after retries are exhausted the proxy returns 502 (anthropic error structure)."""
     mock = _FlakyUpstream(fail_first=999)
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -406,7 +406,7 @@ async def _test_502_after_exhausting_retries() -> None:
                 assert resp.status == 502, await resp.text()
                 body = await resp.json()
                 assert body["error"]["type"] == "api_error"
-        # 1 次初始 + 3 次重试 = 4 次尝试。
+        # 1 initial + 3 retries = 4 attempts.
         assert mock.requests == 4, mock.requests
         print("✓ test_502_after_exhausting_retries")
     finally:
@@ -415,7 +415,7 @@ async def _test_502_after_exhausting_retries() -> None:
 
 
 def test_wire_tool_result_first_helper() -> None:
-    """_wire_tool_result_first：tool_result 居首 → True，殿后 → False。"""
+    """_wire_tool_result_first: tool_result first → True, last → False."""
     from telos.proxy.server import _wire_tool_result_first
     ok = {"messages": [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "t", "content": "r"},
@@ -425,14 +425,14 @@ def test_wire_tool_result_first_helper() -> None:
         {"type": "tool_result", "tool_use_id": "t", "content": "r"}]}]}
     assert _wire_tool_result_first(ok) is True
     assert _wire_tool_result_first(bad) is False
-    # 纯文本 / 纯 tool_result / 字符串 content 都算合法
+    # pure text / pure tool_result / string content are all considered valid
     assert _wire_tool_result_first({"messages": [
         {"role": "user", "content": "hi"}]}) is True
     print("✓ test_wire_tool_result_first_helper")
 
 
 async def _test_invalid_wire_falls_back_to_passthrough() -> None:
-    """TELOS 产出 tool_result 殿后的非法 wire → proxy 退回 passthrough。"""
+    """TELOS produces an invalid wire with tool_result last → the proxy falls back to passthrough."""
     from telos.proxy import server as srv_mod
 
     mock = _MockUpstream(sse=False)
@@ -442,7 +442,7 @@ async def _test_invalid_wire_falls_back_to_passthrough() -> None:
     real = srv_mod.process_anthropic_request
 
     def bad_wire(raw, **kw):
-        # 模拟 TELOS bug：把每条 user message 的 tool_result 排到最后
+        # simulate a TELOS bug: move each user message's tool_result to the end
         res = real(raw, **kw)
         for m in res.wire.get("messages", []):
             c = m.get("content")
@@ -477,7 +477,7 @@ async def _test_invalid_wire_falls_back_to_passthrough() -> None:
                 headers={"x-api-key": "k", "x-telos-session": "bad-wire"},
             ) as resp:
                 assert resp.status == 200, await resp.text()
-        # upstream 收到的是退回 passthrough 的请求 —— tool_result 仍居首
+        # what the upstream received is the passthrough-fallback request -- tool_result still comes first
         last = mock.last_body["messages"][-1]["content"]
         assert last[0]["type"] == "tool_result", last
         print("✓ test_invalid_wire_falls_back_to_passthrough")

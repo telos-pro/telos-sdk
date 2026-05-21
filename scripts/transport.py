@@ -1,46 +1,40 @@
-"""统一 SDK Transport 入口 —— 一键接入 openclaw / hermes / claude-code / deepseek-cli。
+"""Unified SDK Transport entry point — one-click integration of openclaw / hermes / claude-code.
 
-用法：
+Usage:
 
     from telos.scripts.transport import TelosTransport
 
-    # 方式 1：直接选 harness（推荐）
+    # Option 1: pick a harness directly (recommended)
     transport = TelosTransport.for_harness("claude-code")
-
-    # Anthropic-shape harness（openclaw / hermes / claude-code）→ 鸭子 Anthropic 接口
     resp = transport.messages.create(model="claude-opus-4-7", system=[...], messages=[...], tools=[...])
 
-    # OpenAI-shape harness（deepseek-cli）→ 鸭子 OpenAI 接口
-    resp = transport.chat.completions.create(model="deepseek-chat", messages=[...], tools=[...])
-
-    # 方式 2：自动检测（从请求内容猜 harness）
+    # Option 2: auto-detect (guess the harness from request content)
     transport = TelosTransport.auto(session_id="my-session")
 
-每个 harness preset 预配好了：
-- 对应的 harness plugin（请求解析）
-- 默认 engine adapter（wire 生成 + cache 策略）
-- 默认 base_url 和 API key 环境变量
-- wire 协议（Anthropic /v1/messages 或 OpenAI chat/completions）
+Each harness preset comes pre-configured with:
+- the corresponding harness plugin (request parsing)
+- the default engine adapter (wire generation + cache policy)
+- the default base_url and API key environment variable
 
-也可以通过 kwargs 覆盖任何默认值。
+Any default can also be overridden via kwargs.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from telos.bridge import BridgeSessionState
 
 
 # ---------------------------------------------------------------------------
-# Harness preset 定义
+# Harness preset definitions
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class HarnessPreset:
-    """某个 harness 的完整默认配置。"""
+    """The complete default configuration of a harness."""
     harness_name: str
     engine_name: str
     wire_protocol: Literal["anthropic", "openai"]
@@ -74,27 +68,19 @@ PRESETS: dict[str, HarnessPreset] = {
         api_key_env="ANTHROPIC_API_KEY",
         description="Alias for hermes — Claude Code harness",
     ),
-    "deepseek-cli": HarnessPreset(
-        harness_name="telos",
-        engine_name="deepseek",
-        wire_protocol="openai",
-        default_base_url="https://api.deepseek.com",
-        api_key_env="DEEPSEEK_API_KEY",
-        description="DeepSeek CLI agent — OpenAI chat/completions wire, prefix cache",
-    ),
 }
 
 
 # ---------------------------------------------------------------------------
-# 统一 Transport
+# Unified Transport
 # ---------------------------------------------------------------------------
 
 class TelosTransport:
-    """统一 SDK Transport —— 根据 harness preset 自动选择底层 wire 协议。
+    """Unified SDK Transport — one-click integration of openclaw / hermes / claude-code.
 
-    ``for_harness("claude-code")`` 返回的实例带 ``messages.create()`` 接口；
-    ``for_harness("deepseek-cli")`` 返回的实例带 ``chat.completions.create()``
-    接口。两者也统一暴露 ``create(**kwargs)`` 方法，不关心 wire 协议时直接用这个。
+    The instance returned by ``for_harness("claude-code")`` carries the
+    ``messages.create()`` interface, and also uniformly exposes a
+    ``create(**kwargs)`` method.
     """
 
     def __init__(
@@ -109,41 +95,26 @@ class TelosTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ):
+        from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
+
         self._preset = preset
-        self._wire = preset.wire_protocol
         effective_engine = engine_name or preset.engine_name
         effective_base_url = base_url or preset.default_base_url
         effective_api_key = api_key or os.environ.get(preset.api_key_env, "")
 
-        common = dict(
-            session_id=session_id,
-            usage_log=usage_log,
-            prompt_trace_log=prompt_trace_log,
-            session_state=session_state,
-        )
-
-        if self._wire == "anthropic":
-            from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
-            kwargs: dict[str, Any] = {
-                "api_key": effective_api_key,
-                "harness_name": preset.harness_name,
-                "engine_name": effective_engine,
-                **common,
-            }
-            if effective_base_url is not None:
-                kwargs["base_url"] = effective_base_url
-            self._inner = TelosAnthropicTransport(**kwargs)
-            self.messages = self._inner.messages
-        else:
-            from telos.scripts.telos_transport import TelosOpenAITransport
-            self._inner = TelosOpenAITransport(
-                base_url=effective_base_url or "https://api.deepseek.com",
-                api_key=effective_api_key,
-                engine_name=effective_engine,
-                harness_name=preset.harness_name,
-                **common,
-            )
-            self.chat = self._inner.chat
+        kwargs: dict[str, Any] = {
+            "api_key": effective_api_key,
+            "harness_name": preset.harness_name,
+            "engine_name": effective_engine,
+            "session_id": session_id,
+            "usage_log": usage_log,
+            "prompt_trace_log": prompt_trace_log,
+            "session_state": session_state,
+        }
+        if effective_base_url is not None:
+            kwargs["base_url"] = effective_base_url
+        self._inner = TelosAnthropicTransport(**kwargs)
+        self.messages = self._inner.messages
 
     @property
     def session_state(self) -> BridgeSessionState:
@@ -154,13 +125,11 @@ class TelosTransport:
         return self._preset
 
     def create(self, **kwargs) -> Any:
-        """统一调用入口 —— 自动路由到对应 wire 协议的 create 方法。"""
-        if self._wire == "anthropic":
-            return self.messages.create(**kwargs)
-        return self.chat.completions.create(**kwargs)
+        """Unified call entry point — routes to messages.create()."""
+        return self.messages.create(**kwargs)
 
     # ------------------------------------------------------------------
-    # 工厂方法
+    # Factory methods
     # ------------------------------------------------------------------
 
     @classmethod
@@ -176,15 +145,14 @@ class TelosTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ) -> "TelosTransport":
-        """按 harness 名一键创建 transport。
+        """Create a transport with one click by harness name.
 
-        支持的 harness 名：
-        - ``"openclaw"``    — OpenClaw agent（Anthropic wire）
-        - ``"hermes"``      — Claude Code / Hermes（Anthropic wire）
-        - ``"claude-code"`` — 同 hermes
-        - ``"deepseek-cli"``— DeepSeek CLI agent（OpenAI wire）
+        Supported harness names:
+        - ``"openclaw"``    — OpenClaw agent
+        - ``"hermes"``      — Claude Code / Hermes
+        - ``"claude-code"`` — same as hermes
 
-        所有配置项都有合理默认值；传 kwargs 覆盖。
+        All configuration items have sensible defaults; pass kwargs to override.
 
         Example::
 
@@ -224,10 +192,9 @@ class TelosTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ) -> "TelosTransport":
-        """自动检测模式 —— harness_name=None，首次请求时从内容推断。
+        """Auto-detect mode — harness_name=None, inferred from content on the first request.
 
-        默认走 Anthropic wire（openclaw / hermes 自动切换）。如果需要
-        OpenAI wire 请显式用 ``for_harness("deepseek-cli")``。
+        Defaults to the Anthropic wire (openclaw / hermes switch automatically).
         """
         from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
         preset = HarnessPreset(
@@ -259,5 +226,5 @@ class TelosTransport:
 
     @staticmethod
     def available_presets() -> dict[str, str]:
-        """返回所有可用 preset 名 → 描述的映射。"""
+        """Return a mapping of all available preset names → descriptions."""
         return {name: p.description for name, p in PRESETS.items()}

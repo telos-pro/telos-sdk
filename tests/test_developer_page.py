@@ -1,12 +1,12 @@
-"""``telos.scripts.build_developer_page`` 的纯函数单测。
+"""Pure-function unit tests for ``telos.scripts.build_developer_page``.
 
-不需要起 aiohttp：手动构造 _SessionInspector + _SessionRegistry 喂数据，
-检查渲染出的 HTML 包含关键字段。验证：
+No need to start aiohttp: manually construct _SessionInspector + _SessionRegistry to feed data,
+and check that the rendered HTML contains the key fields. Verifies:
 
-- 空状态（无 session）渲染不抛
-- 单 session 详情：region stacks 三段 / 工具调用统计 / cache 字段
-- pin/fold/drop chars delta（"上一轮 → 这一轮"箭头）正确
-- tool_use → tool_result 配对：通过 tool_use_id 关联回工具名
+- the empty state (no session) renders without raising
+- single-session detail: the three region stacks / tool-call statistics / cache fields
+- pin/fold/drop chars delta (the "previous turn → this turn" arrow) is correct
+- tool_use → tool_result pairing: relating back to the tool name via tool_use_id
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ from telos.proxy.inspector import SessionInspector
 from telos.scripts.build_developer_page import render_developer
 
 
-# 复用更友好的别名
+# reuse a friendlier alias
 _SessionInspector = SessionInspector
 
 
 class _SessionRegistry:
-    """测试用最小 stub —— 只暴露 __len__。"""
+    """A minimal stub for testing -- exposes only __len__."""
     def __init__(self) -> None:
         self._n = 0
     def __len__(self) -> int:
@@ -28,14 +28,14 @@ class _SessionRegistry:
 
 
 def test_empty_overview_renders() -> None:
-    """没 session 时也不能抛。"""
+    """Must not raise even when there is no session."""
     body = render_developer(
         _SessionInspector(), _SessionRegistry(),
         focus_session=None, refresh_seconds=5,
     )
     assert "TELOS · developer inspector" in body
     assert "0 session(s) tracked" in body
-    assert "尚无 session" in body
+    assert "No sessions yet" in body
     assert 'content="5"' in body  # refresh tag
 
 
@@ -85,7 +85,7 @@ def test_session_detail_with_calls_and_tools() -> None:
     reg = _SessionRegistry()
     entry = insp.touch("sess-A")
 
-    # 第 1 次 call
+    # the 1st call
     entry.record(
         call_index=1,
         layout=_layout(messages_chars=1000),
@@ -106,7 +106,7 @@ def test_session_detail_with_calls_and_tools() -> None:
         latency_s=2.4,
         model="claude-opus-4-7", harness="telos",
     )
-    # 第 2 次 call：messages 段变大（fold 增长），tool_result 回流，新增 Read 工具
+    # the 2nd call: the messages segment grows larger (fold growth), tool_result flows back, a new Read tool is added
     entry.record(
         call_index=2,
         layout=_layout(messages_chars=1800),  # +800 chars
@@ -133,24 +133,24 @@ def test_session_detail_with_calls_and_tools() -> None:
     body = render_developer(insp, reg, focus_session="sess-A",
                               refresh_seconds=3)
 
-    # 关键检查
+    # key checks
     assert "session · sess-A" in body
     assert "claude-opus-4-7" in body
     assert "telos" in body
-    # 段堆叠条
+    # segment stack bar
     assert "tools" in body and "system" in body and "messages" in body
-    # plan slots 列表
+    # plan slots list
     assert "BP-T" in body and "BP-X" in body
-    # tool 调用统计
+    # tool call statistics
     assert "Bash" in body
     assert "Read" in body
-    # tool_result 通过 tu_001 反查到 Bash → Bash 的 result_chars_total = 1200
+    # tool_result is looked up back to Bash via tu_001 → Bash's result_chars_total = 1200
     assert "1,200" in body
-    # 段字符增量（messages +800）必须显示为正向 Δ
+    # the segment character delta (messages +800) must be displayed as a positive Δ
     assert "+800" in body
-    # cache 拆分字段必须原样出现
+    # the cache breakdown fields must appear unchanged
     assert "ephemeral_5m_input_tokens" in body
-    assert "ephemeral_1h_input_tokens" in body or "200" in body  # 至少透传
+    assert "ephemeral_1h_input_tokens" in body or "200" in body  # at least passed through
     # refresh tag
     assert 'content="3"' in body
 
@@ -177,12 +177,12 @@ def test_unknown_focus_falls_back_to_friendly_404() -> None:
                               focus_session="does-not-exist")
     assert "session not found" in body
     assert "does-not-exist" in body
-    # 提供回到 overview 的链接
+    # provides a link back to the overview
     assert "back to overview" in body
 
 
 def test_entry_to_json_roundtrips() -> None:
-    """JSON 视图必须 serializable，且字段齐全。"""
+    """The JSON view must be serializable and have all fields."""
     import json as _json
     from telos.proxy.inspector import entry_to_json
 
@@ -196,7 +196,7 @@ def test_entry_to_json_roundtrips() -> None:
         usage_raw={"input_tokens":1}, latency_s=0.5,
         model="m", harness="h")
     js = entry_to_json(e)
-    # 必须能 round-trip
+    # must be able to round-trip
     s = _json.dumps(js)
     js2 = _json.loads(s)
     assert js2["session_id"] == "s-X"
@@ -204,7 +204,7 @@ def test_entry_to_json_roundtrips() -> None:
     assert len(js2["calls"]) == 1
     assert any(t["name"] == "Bash" and t["invocations"] == 1
                 for t in js2["tools"])
-    # Bash tool_result 通过 tu 关联到 Bash，所以 result_chars_total == 500
+    # the Bash tool_result is related to Bash via tu, so result_chars_total == 500
     bash = next(t for t in js2["tools"] if t["name"] == "Bash")
     assert bash["result_chars_total"] == 500
 

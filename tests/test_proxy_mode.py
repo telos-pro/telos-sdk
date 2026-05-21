@@ -1,6 +1,6 @@
-"""端到端 proxy 测试：mode 开关 + RTK 过滤 + compare_group 落盘。
+"""End-to-end proxy test: mode switch + RTK filtering + compare_group persistence.
 
-起一个 mock upstream，跑真实代理，断言 wire 内容 / usage_log 记录。
+Start a mock upstream, run the real proxy, and assert on the wire content / usage_log records.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from telos.proxy.server import make_app
 
 
 class _MockUpstream:
-    """记录收到的 wire 请求，返回固定 JSON。"""
+    """Records the received wire requests, returns a fixed JSON."""
 
     def __init__(self) -> None:
         self.last_body: dict[str, Any] | None = None
@@ -60,7 +60,7 @@ async def _start_proxy(
 
 
 def _req_with_big_tool_result() -> dict[str, Any]:
-    """构造一个带大段重复 bash 输出的请求（RTK 过滤的理想目标）。"""
+    """Constructs a request with a large block of repeated bash output (an ideal RTK filtering target)."""
     big = "build start\n" + ("compiling module foo bar baz qux\n" * 300) + "build done\n"
     return {
         "model": "claude-opus-4-7",
@@ -92,7 +92,7 @@ def _tool_result_len(wire: dict[str, Any]) -> int:
 
 
 async def _test_mode_rtk_shrinks_tool_result() -> None:
-    """mode=rtk：upstream 收到的 tool_result 被过滤缩短，且无 cache_control。"""
+    """mode=rtk: the tool_result the upstream receives is filtered and shortened, with no cache_control."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -109,8 +109,8 @@ async def _test_mode_rtk_shrinks_tool_result() -> None:
 
         wire = mock.last_body
         assert wire is not None
-        assert _tool_result_len(wire) < original_len, "tool_result 未被 RTK 缩短"
-        # rtk-only 模式不打 cache_control
+        assert _tool_result_len(wire) < original_len, "tool_result was not shortened by RTK"
+        # rtk-only mode does not apply cache_control
         blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
         assert not any("cache_control" in b for b in blocks)
         print("✓ test_mode_rtk_shrinks_tool_result")
@@ -120,7 +120,7 @@ async def _test_mode_rtk_shrinks_tool_result() -> None:
 
 
 async def _test_mode_none_is_byte_identical() -> None:
-    """mode=none：纯透传，upstream 收到的 body 与原 raw 完全一致。"""
+    """mode=none: pure passthrough, the body the upstream receives is exactly the original raw."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -134,7 +134,7 @@ async def _test_mode_none_is_byte_identical() -> None:
             ) as resp:
                 assert resp.status == 200
 
-        assert mock.last_body == req, "mode=none 应原样透传"
+        assert mock.last_body == req, "mode=none should pass through unchanged"
         print("✓ test_mode_none_is_byte_identical")
     finally:
         await px_runner.cleanup()
@@ -142,7 +142,7 @@ async def _test_mode_none_is_byte_identical() -> None:
 
 
 async def _test_mode_telos_marks_cache_control() -> None:
-    """mode=telos：跑管线打 cache_control，但 tool_result 不被过滤。"""
+    """mode=telos: runs the pipeline and applies cache_control, but tool_result is not filtered."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url)
@@ -159,8 +159,8 @@ async def _test_mode_telos_marks_cache_control() -> None:
 
         wire = mock.last_body
         blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
-        assert any("cache_control" in b for b in blocks), "mode=telos 应有 cache_control"
-        # TELOS 不动 tool_result 文本
+        assert any("cache_control" in b for b in blocks), "mode=telos should have cache_control"
+        # TELOS does not touch the tool_result text
         assert _tool_result_len(wire) == original_len
         print("✓ test_mode_telos_marks_cache_control")
     finally:
@@ -169,7 +169,7 @@ async def _test_mode_telos_marks_cache_control() -> None:
 
 
 async def _test_compare_group_and_reduction_logged(tmp_log: Path) -> None:
-    """mode=both + compare_group header：usage_log 记录 mode / group / 过滤量。"""
+    """mode=both + compare_group header: usage_log records mode / group / filtered amount."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url, usage_log=tmp_log)
@@ -196,21 +196,21 @@ async def _test_compare_group_and_reduction_logged(tmp_log: Path) -> None:
 
 
 async def _test_mode_is_sticky_per_session() -> None:
-    """首个请求用 header 设 mode=rtk，后续同 session 无 header 仍走 rtk。"""
+    """The first request sets mode=rtk via header; later requests in the same session without a header still use rtk."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
-    # proxy 进程默认 mode=telos —— 若 sticky 失效，第二个请求会打 cache_control
+    # the proxy process defaults to mode=telos -- if sticky fails, the second request would apply cache_control
     px_runner, px_url = await _start_proxy(up_url, mode=TelosMode.from_label("telos"))
     try:
         async with aiohttp.ClientSession() as client:
-            # 第一轮：显式 header rtk
+            # turn 1: explicit header rtk
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
                 headers={"x-api-key": "k", "x-telos-mode": "rtk",
                          "x-telos-session": "sticky-test"},
             ) as resp:
                 assert resp.status == 200
-            # 第二轮：同 session，无 header
+            # turn 2: same session, no header
             async with client.post(
                 f"{px_url}/v1/messages", json=_req_with_big_tool_result(),
                 headers={"x-api-key": "k", "x-telos-session": "sticky-test"},
@@ -220,7 +220,7 @@ async def _test_mode_is_sticky_per_session() -> None:
         wire = mock.last_body
         blocks = list(wire.get("tools") or []) + list(wire.get("system") or [])
         assert not any("cache_control" in b for b in blocks), \
-            "sticky 失效：第二个请求退回到了默认 telos mode"
+            "sticky failed: the second request fell back to the default telos mode"
         print("✓ test_mode_is_sticky_per_session")
     finally:
         await px_runner.cleanup()
@@ -228,7 +228,7 @@ async def _test_mode_is_sticky_per_session() -> None:
 
 
 async def _test_proxy_records_corpus(corpus_dir: Path) -> None:
-    """proxy 默认把原始请求录进语料库，replay 之后能 load 回来。"""
+    """The proxy records the original request into the corpus by default; replay can load it back afterward."""
     mock = _MockUpstream()
     up_runner, up_url = await _start_upstream(mock)
     px_runner, px_url = await _start_proxy(up_url, corpus_dir=corpus_dir)
@@ -243,8 +243,8 @@ async def _test_proxy_records_corpus(corpus_dir: Path) -> None:
                     assert resp.status == 200
 
         turns = load_session(corpus_dir, "corpus-test")
-        assert len(turns) == 2, f"语料应录到 2 轮，实得 {len(turns)}"
-        # 录的是原始请求（未被 RTK 缩短）
+        assert len(turns) == 2, f"the corpus should record 2 turns, got {len(turns)}"
+        # what is recorded is the original request (not shortened by RTK)
         tr_len = _tool_result_len(turns[1]["request"])
         assert tr_len == _tool_result_len(_req_with_big_tool_result())
         print("✓ test_proxy_records_corpus")
@@ -266,7 +266,7 @@ async def _test_no_record_disables_corpus(corpus_dir: Path) -> None:
             ) as resp:
                 assert resp.status == 200
         assert not (corpus_dir / "norecord-test.jsonl").exists(), \
-            "--no-record 时不应写语料"
+            "should not write the corpus when --no-record is set"
         print("✓ test_no_record_disables_corpus")
     finally:
         await px_runner.cleanup()
@@ -284,7 +284,7 @@ async def _run_all(tmp_log: Path, corpus_dir: Path) -> None:
 
 
 def test_proxy_mode() -> None:
-    """pytest 入口：在单个 event loop 里跑完整套。"""
+    """pytest entry point: run the whole suite in a single event loop."""
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         asyncio.run(_run_all(Path(td) / "usage.jsonl", Path(td) / "corpus"))

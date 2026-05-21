@@ -1,15 +1,17 @@
-"""共享的 user-message 切分逻辑（OpenClaw / Hermes 都要用）。
+"""Shared user-message splitting logic (used by both OpenClaw and Hermes).
 
-把一条 user message 的纯文本按已知 envelope 模式切成三类子串：
-- ``<environment_info>...</environment_info>``（OpenClaw 注入）→ DROP
-- ``<system-reminder>...</system-reminder>``（Hermes 注入）→ DROP
-- ``<command-message>...</command-message>``（Hermes 命令面板）→ DROP
-- ``Current time: ...``（两边都常注入）→ DROP
-- 用户的提问主体 → PIN
-- ``[ref:...]`` 引用 / 上轮 tool_result 摘要 → FOLD（仅当用 ``<prev>...</prev>`` 包裹）
+Splits the plain text of a user message into three categories of substrings
+by known envelope patterns:
+- ``<environment_info>...</environment_info>`` (injected by OpenClaw) → DROP
+- ``<system-reminder>...</system-reminder>`` (injected by Hermes) → DROP
+- ``<command-message>...</command-message>`` (Hermes command palette) → DROP
+- ``Current time: ...`` (commonly injected by both) → DROP
+- the body of the user's question → PIN
+- a ``[ref:...]`` reference / previous-turn tool_result summary → FOLD (only when wrapped in ``<prev>...</prev>``)
 
-复用 ``agent-janus/bridge/src/efficiency/prefix-normalization/system.ts`` 的
-正则集合（值在仓库内已稳定，这里照搬就行）。
+Reuses the regex set from
+``agent-janus/bridge/src/efficiency/prefix-normalization/system.ts`` (the
+values are already stable within that repo, so they are copied verbatim here).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from typing import Iterable
 from telos.ir import Band, TelosBlock
 
 
-# DROP 模式：harness 在每轮注入、每轮变化的元数据
+# DROP patterns: metadata that the harness injects every turn and that changes every turn
 _DROP_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("env_info",        re.compile(r"<environment_info>.*?</environment_info>", re.DOTALL)),
     ("system_reminder", re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)),
@@ -29,16 +31,16 @@ _DROP_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("current_time",    re.compile(r"Current time:.*?(?=\n|$)")),
 ]
 
-# FOLD 模式：上一轮结果回声（如果 harness 显式包裹）
+# FOLD patterns: the echo of the previous turn's result (if the harness wraps it explicitly)
 _FOLD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("prev_result", re.compile(r"<prev>.*?</prev>", re.DOTALL)),
 ]
 
 
 def split_user_text(text: str, *, base_id: str) -> tuple[TelosBlock, ...]:
-    """把一段 user 文本切成 (PIN: 提问主体) + (FOLD: 引用回声)* + (DROP: envelope)*。
+    """Split a span of user text into (PIN: question body) + (FOLD: reference echo)* + (DROP: envelope)*.
 
-    返回的 blocks 已经按 §5 顺序排列，可以直接喂给 ``TelosMessage(blocks=...)``。
+    The returned blocks are already ordered per §5, and can be fed directly to ``TelosMessage(blocks=...)``.
     """
     drops: list[tuple[str, str]] = []
     folds: list[tuple[str, str]] = []

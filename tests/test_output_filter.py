@@ -1,4 +1,4 @@
-"""``telos.output_filter`` 单测：mode 解析、fallback 过滤器、apply_filter。"""
+"""``telos.output_filter`` unit tests: mode parsing, fallback filter, apply_filter."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def test_mode_labels_roundtrip() -> None:
 
 
 def test_mode_unknown_falls_back_to_telos() -> None:
-    """空 / None / 垃圾值都退化到默认 telos（保持引入开关前的历史行为）。"""
+    """Empty / None / garbage values all fall back to the default telos (preserving the historical behavior before the switch was introduced)."""
     for bad in (None, "", "garbage", "TELOS+RTK"):
         m = TelosMode.from_label(bad)
         assert m.label == "telos", bad
@@ -45,7 +45,7 @@ def test_fallback_dedup_collapses_repeats() -> None:
 
 
 def test_fallback_skips_short_output() -> None:
-    """短输出不值得过滤 —— 原样返回。"""
+    """Short output is not worth filtering -- returned unchanged."""
     flt = FallbackFilter()
     rec = flt.filter_text("ok\n", tool_name="Bash", command="ls")
     assert rec.saved_chars == 0
@@ -54,12 +54,12 @@ def test_fallback_skips_short_output() -> None:
 
 
 def test_fallback_truncates_long_unique_output() -> None:
-    """无重复但很长的输出走头尾截断。"""
+    """Long output with no duplicates goes through head/tail truncation."""
     flt = FallbackFilter()
     text = "\n".join(f"unique line number {i} with some content" for i in range(2000))
     rec = flt.filter_text(text, tool_name="Bash", command="find .")
     assert rec.saved_chars > 0
-    assert "已省略" in rec.text
+    assert "characters omitted" in rec.text
     print("✓ test_fallback_truncates_long_unique_output")
 
 
@@ -79,9 +79,9 @@ def test_apply_filter_rewrites_tool_result_and_counts() -> None:
         ],
     }
     new, stats = apply_filter(raw, flt)
-    # 原 raw 不被改动
+    # the original raw is not modified
     assert raw["messages"][1]["content"][0]["content"] == big
-    # 新 raw 的 tool_result 被缩短
+    # the tool_result in the new raw is shortened
     filtered = new["messages"][1]["content"][0]["content"]
     assert len(filtered) < len(big)
     assert stats.blocks_seen == 1
@@ -94,7 +94,7 @@ def test_apply_filter_rewrites_tool_result_and_counts() -> None:
 
 
 def test_apply_filter_handles_block_list_content() -> None:
-    """tool_result 的 content 也可能是 block 列表 —— 只过滤 text 块。"""
+    """A tool_result's content may also be a block list -- only the text blocks are filtered."""
     flt = build_filter()
     big = "x\n" + ("dup\n" * 400)
     raw = {
@@ -110,26 +110,26 @@ def test_apply_filter_handles_block_list_content() -> None:
     new, stats = apply_filter(raw, flt)
     blk = new["messages"][0]["content"][0]["content"]
     assert len(blk[0]["text"]) < len(big)
-    assert blk[1]["type"] == "image"  # 非 text 块原样保留
+    assert blk[1]["type"] == "image"  # non-text blocks are kept unchanged
     assert stats.blocks_filtered == 1
     print("✓ test_apply_filter_handles_block_list_content")
 
 
 def test_estimate_tokens_heuristic() -> None:
-    """estimate_tokens：空串 0，非空恒 ≥1，标点密集文本比 chars/4 多。"""
+    """estimate_tokens: empty string is 0, non-empty is always ≥1, punctuation-heavy text exceeds chars/4."""
     assert estimate_tokens("") == 0
     assert estimate_tokens("hello world") >= 1
-    # 纯标点：每个符号 1 token，远多于 chars/4
+    # pure punctuation: 1 token per symbol, far more than chars/4
     puncts = "(){}[];,.<>" * 10
     assert estimate_tokens(puncts) > len(puncts) // 4
-    # 单调性：长文本 token 多于其前缀
+    # monotonicity: long text has more tokens than its prefix
     long = "def foo(x): return x + 1\n" * 50
     assert estimate_tokens(long) > estimate_tokens(long[:100])
     print("✓ test_estimate_tokens_heuristic")
 
 
 def test_filter_record_token_fields() -> None:
-    """过滤命中时 FilterRecord 带 token 估算，saved_tokens 与字符同向。"""
+    """When the filter hits, FilterRecord carries a token estimate, and saved_tokens moves in the same direction as characters."""
     flt = FallbackFilter()
     text = "head\n" + ("repeated build line\n" * 100) + "tail"
     rec = flt.filter_text(text, tool_name="Bash", command="cargo build")
@@ -137,7 +137,7 @@ def test_filter_record_token_fields() -> None:
     assert rec.filtered_tokens > 0
     assert rec.original_tokens > rec.filtered_tokens
     assert rec.saved_tokens > 0
-    # passthrough：前后 token 相等 → saved_tokens == 0
+    # passthrough: tokens before and after are equal → saved_tokens == 0
     pt = FilterRecord.passthrough("short")
     assert pt.saved_tokens == 0
     assert pt.original_tokens == pt.filtered_tokens
@@ -145,7 +145,7 @@ def test_filter_record_token_fields() -> None:
 
 
 def test_apply_filter_emits_token_fields() -> None:
-    """FilterStats.as_dict() 带 original/filtered/saved_tokens，写进 usage_log。"""
+    """FilterStats.as_dict() carries original/filtered/saved_tokens, written into usage_log."""
     flt = build_filter()
     big = "start\n" + ("compiling module\n" * 300) + "done\n"
     raw = {

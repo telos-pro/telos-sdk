@@ -1,6 +1,6 @@
-"""``telos.output_filter`` —— RTK 风格的工具结果过滤层。
+"""``telos.output_filter`` — the RTK-style tool-result filtering layer.
 
-公开入口::
+Public entry points::
 
     from telos.output_filter import TelosMode, build_filter, apply_filter
 
@@ -9,8 +9,10 @@
         flt = build_filter()
         new_raw, stats = apply_filter(raw_request, flt)
 
-这一层与 TELOS 管线正交：TELOS 稳「请求前缀」拿 KV cache，本层缩
-「工具结果尾巴」减少每轮新增 token。两者可独立开关，见 ``TelosMode``。
+This layer is orthogonal to the TELOS pipeline: TELOS stabilizes the "request
+prefix" to obtain KV cache, while this layer shrinks the "tool-result tail"
+to reduce the new tokens added each turn. The two can be switched
+independently — see ``TelosMode``.
 """
 
 from telos.output_filter.filters import (

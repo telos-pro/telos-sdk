@@ -1,13 +1,15 @@
-"""``python -m telos.replay`` / ``telos replay`` 入口。
+"""``python -m telos.replay`` / ``telos replay`` entry point.
 
-把语料库里某个真实会话，按多种 mode 各重放一遍，结果 append 到 usage_log，
-dashboard 的「A/B 对比」面板会自动并排展示（compare_group = 原会话 id）。
+Replays a real session from the corpus once for each of several modes; the
+results are appended to usage_log, and the dashboard's "A/B comparison" panel
+shows them side by side automatically (compare_group = the original session id).
 
-用法::
+Usage::
 
-    telos replay --list                       # 列出语料库里的会话
-    telos replay --session telos-ab12cd34      # 默认 4 mode 全跑
+    telos replay --list                       # list the sessions in the corpus
+    telos replay --session telos-ab12cd34      # run all 4 modes by default
     telos replay --session <id> --modes none,both
+    telos replay --session <id> --cast         # record the dashboard changing
 """
 
 from __future__ import annotations
@@ -20,26 +22,32 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from telos.corpus import DEFAULT_CORPUS_DIR, list_sessions, load_session
+from telos.cast import CastRecorder
+from telos.corpus import (DEFAULT_CORPUS_DIR, display_session, list_sessions,
+                          load_session)
 from telos.output_filter import MODE_LABELS, TelosMode, build_filter
 from telos.replay import ReplayResult, anthropic_sender, replay_session
+from telos.scripts.build_savings_dashboard import aggregate
 
 _DEFAULT_USAGE_LOG = Path.home() / ".telos" / "usage.jsonl"
+_DEFAULT_CAST = Path.home() / ".telos" / "replay-cast.cast"
 
 
 def _print_sessions(corpus_dir: Path) -> int:
     infos = list_sessions(corpus_dir)
     if not infos:
-        print(f"语料库为空：{corpus_dir}")
-        print("（先用 `telos proxy` 跑几个真实会话，默认就会录进去）")
+        print(f"corpus is empty: {corpus_dir}")
+        print("(run a few real sessions with `telos proxy` first; they are recorded by default)")
         return 0
-    print(f"语料库 {corpus_dir} —— {len(infos)} 个会话：\n")
-    print(f"  {'session_id':<40} {'calls':>6}  last_seen")
+    print(f"corpus {corpus_dir} —— {len(infos)} sessions:\n")
+    print(f"  {'session':<40} {'calls':>6}  {'last_seen':<16}  handle")
     for i in infos:
         last = datetime.fromtimestamp(i.last_ts).strftime("%Y-%m-%d %H:%M") \
             if i.last_ts else "—"
-        print(f"  {i.session_id:<40} {i.n_calls:>6}  {last}")
-    print("\n重放：telos replay --session <session_id>")
+        print(f"  {display_session(i.session_id):<40} {i.n_calls:>6}  "
+              f"{last:<16}  {i.handle}")
+    print("\nreplay one:  telos replay --session <session>")
+    print("  (the 'session' or 'handle' value above — either resolves)")
     return 0
 
 
@@ -62,41 +70,98 @@ def _print_summary(results: list[ReplayResult]) -> None:
         print(f"{r.mode:<10} {r.turns_ok:>7} {r.total_raw_input:>12,} "
               f"{r.total_cache_read:>12,} {r.total_cache_write:>12,}")
         if r.turns_failed:
-            print(f"  ⚠ {r.turns_failed} 轮上游调用失败（已跳过）")
+            print(f"  ⚠ {r.turns_failed} turns failed the upstream call (skipped)")
+
+
+# ---------------------------------------------------------------------------
+# --cast: record the savings dashboard updating as replay runs
+# ---------------------------------------------------------------------------
+
+def _usd(v: float) -> str:
+    if v <= 0:
+        return "—"
+    return f"${v:.4f}" if v < 0.01 else f"${v:.2f}"
+
+
+def _bar(frac: float, width: int = 22) -> str:
+    filled = max(0, min(width, round(frac * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _render_dashboard_frame(session_label: str, mode_order: list[str],
+                            cur_mode: str, idx: int, total: int,
+                            summary, *, done: bool = False) -> str:
+    """Render one text frame of the live savings dashboard for the cast."""
+    by_mode = summary.by_mode
+    frac = (idx / total) if total else 1.0
+    head = "replay complete" if done else f"▶ replaying {cur_mode}"
+    lines = [
+        "",
+        "  ┌─ TELOS replay · dashboard cast " + "─" * 37 + "┐",
+        "  │",
+        f"  │   session   {session_label}",
+        f"  │   {head:<18} turn {idx:>4} / {total:<4}  [{_bar(frac)}] {frac * 100:3.0f}%",
+        "  │",
+        f"  │   {'mode':<7}{'turns':>7}{'cache_read':>14}"
+        f"{'token cost':>13}{'saved $':>11}",
+        "  │   " + "─" * 52,
+    ]
+    for m in mode_order:
+        agg = by_mode.get(m)
+        if agg is None or agg.calls == 0:
+            lines.append(f"  │   {m:<7}{'—':>7}{'—':>14}{'—':>13}{'—':>11}")
+            continue
+        mark = "  ◀" if (m == cur_mode and not done) else ""
+        lines.append(
+            f"  │   {m:<7}{agg.calls:>7}{agg.cache_read:>14,}"
+            f"{_usd(agg.cost_usd):>13}{_usd(agg.combined_saved_usd):>11}{mark}")
+    tot = summary.total
+    lines += [
+        "  │",
+        f"  │   cumulative saved   {_usd(tot.combined_saved_usd):<10}"
+        f" ·   {tot.calls} turns replayed",
+        "  │",
+        "  └" + "─" * 70 + "┘",
+    ]
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="telos.replay",
-        description="录制 → 重放对照：同一会话按多种 mode 各跑一遍，"
-                    "结果进 dashboard 的 A/B 对比面板。",
+        description="Record → replay comparison: run the same session once for each of "
+                    "several modes; the results go into the dashboard's A/B comparison panel.",
     )
     ap.add_argument("--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR,
-                    help=f"会话语料目录（默认 {DEFAULT_CORPUS_DIR}）")
+                    help=f"session corpus directory (default {DEFAULT_CORPUS_DIR})")
     ap.add_argument("--list", action="store_true",
-                    help="列出语料库里的会话后退出")
+                    help="list the sessions in the corpus and exit")
     ap.add_argument("--session", default=None,
-                    help="要重放的会话 id（见 --list）")
+                    help="the session id to replay (see --list)")
     ap.add_argument("--modes", default="none,telos,rtk,both",
-                    help="逗号分隔的 mode 列表（默认 none,telos,rtk,both）")
+                    help="comma-separated list of modes (default none,telos,rtk,both)")
     ap.add_argument("--usage-log", type=Path, default=_DEFAULT_USAGE_LOG,
-                    help=f"重放结果 append 到此 jsonl（默认 {_DEFAULT_USAGE_LOG}）")
+                    help=f"replay results are appended to this jsonl (default {_DEFAULT_USAGE_LOG})")
     ap.add_argument("--compare-group", default=None,
-                    help="对比分组键（默认用会话 id）")
+                    help="comparison group key (defaults to the session id)")
     ap.add_argument("--upstream", default="https://api.anthropic.com",
-                    help="上游 Anthropic endpoint")
+                    help="upstream Anthropic endpoint")
     ap.add_argument("--api-key", default=os.environ.get("ANTHROPIC_API_KEY"),
-                    help="Anthropic API key（默认读 ANTHROPIC_API_KEY）")
+                    help="Anthropic API key (defaults to reading ANTHROPIC_API_KEY)")
     ap.add_argument("--no-cache-isolation", action="store_true",
-                    help="不给每个 mode 注入唯一 system 前缀（默认注入，"
-                         "避免跨 mode 缓存互相污染）")
+                    help="do not inject a unique system prefix per mode (injected by default, "
+                         "to avoid cross-mode cache pollution)")
+    ap.add_argument("--cast", nargs="?", const=str(_DEFAULT_CAST), default=None,
+                    metavar="PATH",
+                    help="record an asciinema cast of the savings dashboard updating "
+                         f"as replay runs (default path: {_DEFAULT_CAST})")
     args = ap.parse_args(argv)
 
     if args.list:
         return _print_sessions(args.corpus_dir)
 
     if not args.session:
-        print("需要 --session <id>（或用 --list 查看可用会话）", file=sys.stderr)
+        print("--session <id> is required (or use --list to view available sessions)", file=sys.stderr)
         return 2
 
     try:
@@ -105,43 +170,79 @@ def main(argv: list[str] | None = None) -> int:
         print(str(e), file=sys.stderr)
         return 1
     if not turns:
-        print(f"会话 {args.session} 没有可重放的轮次", file=sys.stderr)
+        print(f"session {args.session} has no replayable turns", file=sys.stderr)
         return 1
 
     if not args.api_key:
-        print("缺少 API key：设 ANTHROPIC_API_KEY 或传 --api-key", file=sys.stderr)
+        print("missing API key: set ANTHROPIC_API_KEY or pass --api-key", file=sys.stderr)
         return 2
 
     modes = [TelosMode.from_label(m.strip()) for m in args.modes.split(",")
              if m.strip()]
     if not modes:
-        print(f"--modes 解析为空；合法值：{', '.join(MODE_LABELS)}", file=sys.stderr)
+        print(f"--modes parsed to empty; valid values: {', '.join(MODE_LABELS)}", file=sys.stderr)
         return 2
 
     compare_group = args.compare_group or args.session
     sender = anthropic_sender(api_key=args.api_key, upstream=args.upstream)
     flt = build_filter()
 
-    print(f"重放会话 {args.session}（{len(turns)} 轮）"
-          f"× {len(modes)} mode → {args.usage_log}")
+    # --cast: set up an asciinema recorder of the dashboard changing.
+    mode_order = [m.label for m in modes]
+    session_label = display_session(args.session)
+    recorder: CastRecorder | None = None
+    frame_dt = 0.1
+    if args.cast:
+        total_frames = max(1, len(turns) * len(modes))
+        frame_dt = min(0.4, max(0.04, 40.0 / total_frames))
+        recorder = CastRecorder(args.cast, title=f"TELOS replay — {session_label}")
+
+    print(f"replaying session {args.session} ({len(turns)} turns)"
+          f" × {len(modes)} modes → {args.usage_log}")
+    if recorder is not None:
+        print(f"  · recording dashboard cast → {recorder.path}")
     t0 = time.time()
     results: list[ReplayResult] = []
+    done_records: list[dict] = []
     for mode in modes:
         print(f"  · mode={mode.label} …", flush=True)
-        results.append(replay_session(
+        on_turn = None
+        if recorder is not None:
+            def on_turn(result: ReplayResult, idx: int, total: int,
+                        _mode: str = mode.label) -> None:
+                summary = aggregate(done_records + result.records)
+                recorder.frame(
+                    _render_dashboard_frame(session_label, mode_order, _mode,
+                                            idx, total, summary),
+                    dt=frame_dt)
+        res = replay_session(
             turns, mode,
             session_id=args.session,
             compare_group=compare_group,
             sender=sender,
             flt=flt,
             cache_isolation=not args.no_cache_isolation,
-        ))
+            on_turn=on_turn,
+        )
+        results.append(res)
+        done_records.extend(res.records)
+
+    if recorder is not None:
+        final = _render_dashboard_frame(
+            session_label, mode_order, mode_order[-1],
+            len(turns), len(turns), aggregate(done_records), done=True)
+        recorder.frame(final, dt=frame_dt)
+        recorder.frame(final, dt=2.5)  # hold the final dashboard on screen
+        recorder.close()
 
     n = _append_records(args.usage_log, results)
     _print_summary(results)
-    print(f"\n写入 {n} 条记录 · 用时 {time.time() - t0:.1f}s")
-    print(f"看对比：telos dashboard --usage-log {args.usage_log}")
-    print(f"  （compare_group = {compare_group}）")
+    print(f"\nwrote {n} records · took {time.time() - t0:.1f}s")
+    print(f"view the comparison: telos dashboard --usage-log {args.usage_log}")
+    print(f"  (compare_group = {compare_group})")
+    if recorder is not None:
+        print(f"dashboard cast → {recorder.path}")
+        print(f"  play it back:  asciinema play {recorder.path}")
     return 0
 
 

@@ -1,7 +1,8 @@
-"""Plugin / adapter 注册表（按名加载，避免顶层模块强依赖）。
+"""Plugin / adapter registry (load by name, avoiding hard top-level module dependencies).
 
-harness 和 engine 都通过这里实例化，保证 bridge 不直接 import 任何
-具体实现 —— 这就是"三层只往下传值，不反向引用"的代码层落地。
+Both harnesses and engines are instantiated here, ensuring the bridge does not
+directly import any concrete implementation —— this is the code-level realization
+of "the three tiers only pass values downward, never reference upward".
 """
 
 from __future__ import annotations
@@ -15,24 +16,44 @@ if TYPE_CHECKING:
 
 _HARNESS_ALIASES: dict[str, str] = {
     "claude-code": "hermes",
-    "deepseek-cli": "telos",
 }
 
 
 def canonical_harness(name: str) -> str:
-    """把 harness 别名解析成 canonical 名（``claude-code`` → ``hermes``）。
+    """Resolve a harness alias into its canonical name (``claude-code`` → ``hermes``).
 
-    非别名原样返回。用于让 usage log / dashboard 不论调用方传别名还是
-    canonical 名都显示一致的 harness。
+    Non-aliases are returned as-is. This ensures the usage log / dashboard show a
+    consistent harness whether the caller passes an alias or the canonical name.
     """
     return _HARNESS_ALIASES.get(name, name)
 
 
-def load_harness(name: str) -> "HarnessPlugin":
-    """按名加载 harness plugin。
+# canonical harness name → human-facing display name shown on dashboards/reports.
+# The internal codename (hermes) is not intuitive to users —— the dashboard always
+# shows the name from here.
+_HARNESS_DISPLAY_NAMES: dict[str, str] = {
+    "openclaw": "OpenClaw",
+    "hermes": "Claude Code",
+    "telos": "Telos",
+}
 
-    支持：``openclaw``, ``hermes``, ``telos``
-    别名：``claude-code`` → hermes, ``deepseek-cli`` → telos
+
+def harness_display_name(name: str) -> str:
+    """Map a harness name (canonical or alias) to its dashboard display name.
+
+    ``hermes`` / ``claude-code`` → ``"Claude Code"``. Unknown names (e.g.
+    ``passthrough`` / ``rtk-only`` / ``?``) are returned as-is.
+    """
+    if not name:
+        return name
+    return _HARNESS_DISPLAY_NAMES.get(canonical_harness(name), name)
+
+
+def load_harness(name: str) -> "HarnessPlugin":
+    """Load a harness plugin by name.
+
+    Supported: ``openclaw``, ``hermes``, ``telos``
+    Alias: ``claude-code`` → hermes
     """
     canonical = canonical_harness(name)
     if canonical == "openclaw":
@@ -48,11 +69,11 @@ def load_harness(name: str) -> "HarnessPlugin":
 
 
 def load_engine(name: str) -> "EngineAdapter":
-    """按名加载 engine adapter。
+    """Load an engine adapter by name.
 
-    支持：
-    - 闭源 API：``anthropic``, ``openai``, ``deepseek``
-    - 开源推理（双向感知）：``vllm``, ``sglang``
+    Supported:
+    - Closed-source APIs: ``anthropic``, ``openai``, ``deepseek``
+    - Open-source inference (bidirectionally aware): ``vllm``, ``sglang``
     """
     if name == "anthropic":
         from telos.engine.anthropic import AnthropicAdapter

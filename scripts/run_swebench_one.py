@@ -2,12 +2,12 @@
 """End-to-end Scope-B runner: telos (Hermes mini_swe_runner) → TELOS → OpenRouter
 → patch → optional evaluate.
 
-执行一个 SWE-bench Verified 任务，证明 telos-as-harness 通过 telos 这条
-管道走通；输出与 ``token-efficient-framework/benchmark/scripts/evaluate-patches.py``
-兼容的 ``<results-dir>/telos-<instance_id>.patch``，外加 telos 维度的
-``usage.jsonl`` / ``result.json``。
+Runs a single SWE-bench Verified task, demonstrating that telos-as-harness works
+through the telos pipeline; outputs a ``<results-dir>/telos-<instance_id>.patch``
+compatible with ``token-efficient-framework/benchmark/scripts/evaluate-patches.py``,
+plus telos-side ``usage.jsonl`` / ``result.json``.
 
-用法::
+Usage::
 
     export OPENROUTER_API_KEY=sk-or-...
     python -m telos.scripts.run_swebench_one \\
@@ -16,12 +16,13 @@
         --max-iterations 25 \\
         --results-dir /tmp/telos-telos-run
 
-依赖 telos 仓库已经按其 README 走过 ``git submodule update --init``，
-即 vendor/hermes 已就位。
+Assumes the telos repo has already run ``git submodule update --init`` per its
+README, i.e. vendor/hermes is in place.
 
-注意：``mini_swe_runner`` 的 LocalEnvironment 直接在 ``cwd`` 里 exec
-shell；本脚本会先在 ``/tmp/telos-swebench/<inst>`` 下做 git worktree，
-再把那个目录传给 runner。运行结束 ``git diff HEAD`` 取 patch。
+Note: ``mini_swe_runner``'s LocalEnvironment execs a shell directly in ``cwd``;
+this script first creates a git worktree under ``/tmp/telos-swebench/<inst>`` and
+then passes that directory to the runner. When the run finishes, ``git diff HEAD``
+extracts the patch.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# 路径常量（按需可改）
+# Path constants (change as needed)
 # ---------------------------------------------------------------------------
 
 TELOS_ROOT = Path("/Users/george/Code/tokenpilot-ai/telos")
@@ -53,7 +54,7 @@ REPO_CACHE = Path("/tmp/swebench-repos")
 
 
 # ---------------------------------------------------------------------------
-# 辅助：数据集加载（按需下载）
+# Helper: dataset loading (download on demand)
 # ---------------------------------------------------------------------------
 
 def ensure_dataset(dataset_path: Path) -> Path:
@@ -133,7 +134,7 @@ def diff_of(work: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 核心：跑一个任务
+# Core: run one task
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -155,7 +156,7 @@ def main() -> None:
     if not os.environ.get("OPENROUTER_API_KEY"):
         sys.exit("OPENROUTER_API_KEY not set in environment.")
 
-    # vendored Hermes 必须在 sys.path 上才能 import mini_swe_runner
+    # vendored Hermes must be on sys.path to import mini_swe_runner
     if not HERMES_ROOT.exists():
         sys.exit(f"vendor/hermes not found at {HERMES_ROOT}; "
                  "run `git submodule update --init` inside telos.")
@@ -223,11 +224,11 @@ def main() -> None:
         sys.stderr.write(f"[run] task raised: {err}\n")
     duration = int(time.time() - t0)
 
-    # ---- 收 patch ----
+    # ---- collect the patch ----
     patch = diff_of(work)
     (results_dir / f"{tag}.patch").write_text(patch)
 
-    # ---- 写 trajectory + result.json ----
+    # ---- write trajectory + result.json ----
     if traj is not None:
         (results_dir / f"{tag}.trajectory.json").write_text(
             json.dumps(traj, ensure_ascii=False, indent=2))
@@ -259,7 +260,7 @@ def main() -> None:
           flush=True)
     print(f"[done] artifacts under {results_dir}", flush=True)
 
-    # ---- 可选：跑 evaluate ----
+    # ---- optional: run evaluate ----
     eval_result: dict[str, Any] | None = None
     if args.evaluate:
         evaluator = TEF_ROOT / "benchmark" / "scripts" / "evaluate-patches.py"

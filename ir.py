@@ -1,22 +1,23 @@
-"""TELOS IR：三层之间唯一通过的数据结构。
+"""TELOS IR: the one data structure passed between the three layers.
 
-设计原则
---------
-1. **不可变** —— 所有 dataclass 都是 frozen；bridge 的"修改"动作返回新 IR，
-   不在原对象上改字节。这样上游 agent 即使把同一个 IR 发给多个 bridge，
-   也不会出现共享状态写竞争。
-2. **窄字段** —— 字段越少越难用错。任何 engine-specific 的旋钮都不放进
-   IR，由 engine adapter 在 emit 时自己决定。
-3. **三色一刀切** —— 每个 block 必须落在 ``pin / fold / drop`` 之一；
-   没有"既可缓存又不可缓存"的灰色态。
+Design principles
+-----------------
+1. **Immutable** -- every dataclass is frozen; the bridge's "modify" actions return a new
+   IR rather than mutating bytes on the original object. This way, even if an upstream agent
+   sends the same IR to multiple bridges, there is no shared-state write race.
+2. **Narrow fields** -- the fewer the fields, the harder they are to misuse. Any
+   engine-specific knob is kept out of the IR; the engine adapter decides it at emit time.
+3. **Three-color, all-or-nothing** -- every block must land in exactly one of
+   ``pin / fold / drop``; there is no gray "both cacheable and non-cacheable" state.
 
-不变量（由 bridge 在每次原语调用前后再校验，详见 ``bridge.py``）
---------------------------------------------------------------
-**§5 顺序不变量**：在每个段（``tools`` / ``system`` / 每条 ``message``）
-内部，blocks 必须按 ``pin* → fold* → drop*`` 物理顺序排列。例外：``message``
-段里的 ``tool_result`` 块一律排在最前（``tool_result* → pin* → fold* → drop*``）
-—— Anthropic 要求 user message 的 tool_result 物理居首，这条协议硬约束的
-优先级高于 band 排序。``tools`` / ``system`` 段不含 tool_result，不受影响。
+Invariants (re-checked by the bridge before and after every primitive call, see ``bridge.py``)
+----------------------------------------------------------------------------------------------
+**§5 order invariant**: within each segment (``tools`` / ``system`` / each ``message``),
+blocks must be physically ordered ``pin* → fold* → drop*``. Exception: ``tool_result``
+blocks in a ``message`` segment always come first (``tool_result* → pin* → fold* → drop*``)
+-- Anthropic requires the tool_result of a user message to be physically first, and this hard
+protocol constraint takes priority over band ordering. The ``tools`` / ``system`` segments
+contain no tool_result and are unaffected.
 """
 
 from __future__ import annotations
@@ -27,18 +28,18 @@ from typing import Any, Iterable, Literal, Mapping
 
 
 # ---------------------------------------------------------------------------
-# Band（三色带）
+# Band (three-color band)
 # ---------------------------------------------------------------------------
 
 class Band(str, Enum):
-    """每个 block 的缓存生命周期类别。
+    """The cache lifecycle category of each block.
 
-    - ``PIN``：长寿稳定段。tools 定义、system prompt、用户当下提问。
-      默认请求 1h TTL（Anthropic）/ 24h retention（OpenAI）。
-    - ``FOLD``：可缓存但 compact 时可丢弃。assistant 回答、tool_result、
-      ref-pool 大文档。默认请求 5m TTL。
-    - ``DROP``：永远不进 cache hash。timestamp、cwd、git status、
-      ``<system-reminder>`` envelope。必须出现在所属段的最末。
+    - ``PIN``: long-lived, stable segment. Tool definitions, system prompt, the user's
+      current question. Requests 1h TTL by default (Anthropic) / 24h retention (OpenAI).
+    - ``FOLD``: cacheable but discardable on compaction. Assistant answers, tool_result,
+      large ref-pool documents. Requests 5m TTL by default.
+    - ``DROP``: never enters the cache hash. Timestamps, cwd, git status,
+      ``<system-reminder>`` envelopes. Must appear at the very end of its segment.
     """
 
     PIN = "pin"
@@ -65,37 +66,37 @@ BlockKind = Literal[
 
 @dataclass(frozen=True)
 class TelosBlock:
-    """TELOS 中最小的内容单元。
+    """The smallest unit of content in TELOS.
 
-    一个 block 等价于一段 "engine 看作不可拆的 cache 计算粒度"。这与
-    Anthropic 的 content block、OpenAI 的 message-piece 在大多数情况下
-    一一对应。
+    A block is equivalent to "a cache-computation granule the engine treats as
+    indivisible". In most cases this maps one-to-one with an Anthropic content block
+    or an OpenAI message-piece.
     """
 
-    id: str                       #: 会话内稳定标识（用于诊断 / 引用）
+    id: str                       #: stable identifier within a session (for diagnostics / references)
     band: Band
     kind: BlockKind
-    payload: Any                  #: engine-agnostic 内容；emit 时由 adapter 翻译
-    ref_slug: str | None = None   #: 若非空，此 block 来自 ref-pool（详见 §4）
-    source_tag: str | None = None #: 诊断字段：哪条 harness 规则把它分到此 band
+    payload: Any                  #: engine-agnostic content; translated by the adapter at emit time
+    ref_slug: str | None = None   #: if non-empty, this block comes from the ref-pool (see §4)
+    source_tag: str | None = None #: diagnostic field: which harness rule assigned it to this band
     extra: Mapping[str, Any] = field(default_factory=dict)
-    """放 engine 可能需要的稳定旁信息，例如 image 的 ``detail`` 字段。
+    """Holds stable side information the engine may need, e.g. an image's ``detail`` field.
 
-    *必须* 进 cache hash 的字段都写到 ``extra`` 里、由 adapter 在 emit
-    时一并序列化；harness 决不能在 emit 时刻才注入这类字段，否则 §5
-    保证的字节稳定性被破坏。
+    Any field that *must* enter the cache hash should be written into ``extra`` and
+    serialized by the adapter at emit time; the harness must never inject such a field
+    at emit time, otherwise the byte stability guaranteed by §5 is broken.
     """
 
 
 @dataclass(frozen=True)
 class TelosMessage:
-    """一条对话 message（user / assistant）。
+    """A single conversation message (user / assistant).
 
-    与一个 OpenAI / Anthropic 的 message 对应，但内部 blocks **必须**
-    按 §5 顺序排列：``tool_result*`` 居首（Anthropic 协议要求），其后
-    ``pin* → fold* → drop*``。最常见的场景是 user message 被强制切成
-    ``(tool_result: 上轮工具结果) + (pin: 用户提问) + (fold: 历史回声 /
-    [ref:...] 引用) + (drop: harness envelope)``。
+    Corresponds to one OpenAI / Anthropic message, but its internal blocks **must**
+    be ordered per §5: ``tool_result*`` first (required by the Anthropic protocol),
+    followed by ``pin* → fold* → drop*``. The most common case is a user message
+    forced into ``(tool_result: previous turn's tool output) + (pin: user question) +
+    (fold: history echo / [ref:...] references) + (drop: harness envelope)``.
     """
 
     role: Literal["system", "user", "assistant"]
@@ -104,11 +105,11 @@ class TelosMessage:
 
 @dataclass(frozen=True)
 class TelosIR:
-    """harness → bridge → engine 之间唯一的传输对象。"""
+    """The one transport object passed between harness → bridge → engine."""
 
     session_id: str
-    tools: tuple[TelosBlock, ...]                  #: 全部 band=PIN（schema 不变）
-    system: tuple[TelosBlock, ...]                 #: pin* → fold*（fold 部分含 ref-pool）→ drop*
+    tools: tuple[TelosBlock, ...]                  #: all band=PIN (schema does not change)
+    system: tuple[TelosBlock, ...]                 #: pin* → fold* (the fold part contains the ref-pool) → drop*
     messages: tuple[TelosMessage, ...]
     ref_pool: Mapping[str, TelosBlock]             #: slug → block
     hints: "TelosHints" = field(default_factory=lambda: TelosHints())
@@ -116,77 +117,81 @@ class TelosIR:
 
 @dataclass(frozen=True)
 class TelosHints:
-    """非强制的元信息，engine adapter 用来做 plan 决策。"""
+    """Non-binding metadata the engine adapter uses to make plan decisions."""
 
     engine: Literal["anthropic", "openai", "deepseek"] = "anthropic"
     model: str = ""
-    expected_turns: int = 0       #: harness 预估的总轮数；影响 mid-rolling 锚的开关
+    expected_turns: int = 0       #: the harness's estimate of total turns; affects the mid-rolling anchor toggle
 
 
 # ---------------------------------------------------------------------------
-# Engine 输出后再回流的 usage 报告（§9）
+# Usage report flowing back after engine output (§9)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class UsageReport:
-    """统一 usage 返回格式。
+    """Unified usage return format.
 
-    与 ``benchmark/scripts/compute-metrics.py`` 的 ``raw_input / cache_read /
-    cache_write`` 三元 schema 对齐——任何 engine 的原始 ``usage`` 字段都
-    需归一到这三个数，否则 north-star 指标算不出来。
+    Aligned with the ``raw_input / cache_read / cache_write`` triple schema of
+    ``benchmark/scripts/compute-metrics.py`` -- any engine's raw ``usage`` fields must be
+    normalized to these three numbers, otherwise the north-star metric cannot be computed.
     """
 
-    raw_input: int                 #: 未命中且未写缓存的 input token
-    cache_read: int                #: 从缓存读入
-    cache_write: int               #: 本次请求写入缓存的新增 token
+    raw_input: int                 #: input tokens that neither hit nor wrote the cache
+    cache_read: int                #: read from the cache
+    cache_write: int               #: new tokens written to the cache by this request
     output: int
-    raw: Mapping[str, Any] = field(default_factory=dict)  #: 原始 usage 字段，留作诊断
+    raw: Mapping[str, Any] = field(default_factory=dict)  #: raw usage fields, kept for diagnostics
 
 
 # ---------------------------------------------------------------------------
-# §5 顺序不变量校验
+# §5 order invariant checks
 # ---------------------------------------------------------------------------
 
 class TelosInvariantError(ValueError):
-    """§5 / canonical 化 / ref-pool 注册任一不变量被破坏时抛出。"""
+    """Raised when any invariant of §5 / canonicalization / ref-pool registration is broken."""
 
 
 def _order_key(blk: TelosBlock) -> tuple[int, int]:
-    """message 内 block 的物理排序键。
+    """The physical sort key for a block within a message.
 
-    ``tool_result`` 块必须物理居首 —— 这是 Anthropic 的协议硬约束（user
-    message 里 tool_result 必须排在所有其他内容之前），优先级高于 band 的
-    缓存生命周期排序。其余 block 按 ``pin* → fold* → drop*``。
+    ``tool_result`` blocks must be physically first -- this is a hard Anthropic protocol
+    constraint (a user message's tool_result must come before all other content), taking
+    priority over the band cache-lifecycle ordering. The rest of the blocks follow
+    ``pin* → fold* → drop*``.
     """
     return (0 if blk.kind == "tool_result" else 1, _BAND_RANK[blk.band])
 
 
 def enforce_band_order(blocks: Iterable[TelosBlock]) -> tuple[TelosBlock, ...]:
-    """把 blocks 按 ``tool_result* → pin* → fold* → drop*`` 稳定排序。
+    """Stably sort blocks into ``tool_result* → pin* → fold* → drop*``.
 
-    Harness 在拼装一条 message 时常常会按 ``content[]`` 源顺序遍历，每个
-    content item 自己 expand 出 (PIN, FOLD*, DROP*) 子序列；直接 ``extend``
-    会让带交错（PIN, DROP, PIN, DROP, ...）违反 §5。Harness 应该在 message
-    级别调用一次本函数兜底，再 freeze 成 ``TelosMessage.blocks``。
+    When a harness assembles a message it often iterates in ``content[]`` source order,
+    with each content item expanding into its own (PIN, FOLD*, DROP*) subsequence; a plain
+    ``extend`` interleaves bands (PIN, DROP, PIN, DROP, ...) and violates §5. The harness
+    should call this function once at the message level as a safety net, then freeze the
+    result into ``TelosMessage.blocks``.
 
-    ``tool_result`` 块无论 band 一律排到最前 —— Anthropic 要求 user message
-    的 tool_result 物理居首，排到 text 之后会被 API 判 400。
+    ``tool_result`` blocks are always sorted first regardless of band -- Anthropic requires
+    a user message's tool_result to be physically first, and placing it after text gets the
+    request rejected with a 400.
 
-    保证稳定：同一组内保留传入顺序——这关系到「问题 A 在问题 B 前」的
-    语义可读性，不能乱跳。
+    Stability guaranteed: the incoming order is preserved within each group -- this matters
+    for the readable semantics of "question A before question B" and must not jump around.
     """
     return tuple(sorted(blocks, key=_order_key))
 
 
 def assert_band_order(blocks: tuple[TelosBlock, ...], where: str) -> None:
-    """断言 blocks 满足 ``tool_result* → pin* → fold* → drop*`` 严格顺序。
+    """Assert that blocks satisfy the strict ``tool_result* → pin* → fold* → drop*`` order.
 
-    复杂度 O(n)，单次扫描；bridge 在每次原语调用前后都会跑一次，开销
-    可以忽略——这是整个协议的"安全门"。
+    Complexity is O(n), a single scan; the bridge runs it before and after every primitive
+    call, so the cost is negligible -- this is the "safety gate" of the whole protocol.
 
-    ``tool_result`` 块视作 rank ``-1``：必须排在所有非 tool_result 之前
-    （Anthropic 协议要求），出现在 text 之后即判违规。``tools`` / ``system``
-    段不含 tool_result，校验行为与原先完全一致。
+    ``tool_result`` blocks are treated as rank ``-1``: they must come before all
+    non-tool_result blocks (required by the Anthropic protocol), and appearing after text is
+    flagged as a violation. The ``tools`` / ``system`` segments contain no tool_result, so
+    the check behaves exactly as before.
     """
     last_rank = -2
     for blk in blocks:
@@ -202,7 +207,7 @@ def assert_band_order(blocks: tuple[TelosBlock, ...], where: str) -> None:
 
 
 def assert_ir_invariants(ir: TelosIR) -> None:
-    """对整份 IR 跑一次完整的 §5 校验。"""
+    """Run a full §5 check over the entire IR."""
     assert_band_order(ir.tools, "tools")
     if any(b.band is not Band.PIN for b in ir.tools):
         raise TelosInvariantError("All blocks in `tools` must have band=PIN")
@@ -212,11 +217,11 @@ def assert_ir_invariants(ir: TelosIR) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 便利构造器（harness plugin 常用，所以放进 IR 模块本体）
+# Convenience constructors (commonly used by harness plugins, so kept in the IR module itself)
 # ---------------------------------------------------------------------------
 
 def with_messages(ir: TelosIR, messages: tuple[TelosMessage, ...]) -> TelosIR:
-    """返回替换 ``messages`` 后的新 IR；方便函数式风格的 bridge 操作。"""
+    """Return a new IR with ``messages`` replaced; convenient for functional-style bridge operations."""
     return replace(ir, messages=messages)
 
 

@@ -15,7 +15,7 @@
 
 [**Quickstart**](#-30-second-start) · [**Engines**](#-engines--one-ir-five-backends) · [**Why**](#-why-telos-exists--stop-being-a-tenant-in-someone-elses-agent) · [**Three things**](#-one-representation-three-things) · [**Protocol**](docs/2026-05-06-telos-protocol.md) · [**User Guide**](docs/User-guide.md)
 
-<sub>📖 &nbsp;**English** · [简体中文](README.zh-CN.md)</sub>
+<sub>📖 &nbsp;**English** · [Simplified Chinese](README.zh-CN.md)</sub>
 
 </div>
 
@@ -208,14 +208,17 @@ A slug is **frozen** the moment `register()` is called: content can change (`fol
 
 ## ⬢ &nbsp;Cost you can see · savings dashboard
 
-Every TELOS entry point (proxy / SDK transport) appends each call's normalized usage to a `usage_log` jsonl, aggregated into a single-file HTML page (zero JS, opens offline):
+Every TELOS entry point (gateway / SDK transport) appends each call's normalized usage to a `usage_log` jsonl, aggregated into a single-file HTML page (zero JS, opens offline):
 
 ```bash
-telos dashboard --usage-log ~/.telos/usage.jsonl --out savings.html
+# one-line install
+pip install telos-sdk          # or: brew install telos-sdk (see packaging/)
 
-# auto-refreshing dashboard embedded in the proxy
-telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl
-open http://127.0.0.1:7171/__telos/dashboard
+# auto-detect harnesses, inject config, start the gateway
+telos init
+
+# open the live dashboard in your browser
+telos dashboard
 ```
 
 The dashboard counts **absolutes**: cumulative cache_read, cost saved = cache_read × (input_price − cache_read_price), token mix, broken down across harness / model / session.

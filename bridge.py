@@ -1,4 +1,4 @@
-"""Bridge：TELOS 的策略核心。五个原语 + 一次 canonicalize。
+"""Bridge: the policy core of TELOS. Five primitives + one canonicalize.
 
 ```
 upstream agent → harness.parse() → IR
@@ -10,19 +10,21 @@ upstream agent → harness.parse() → IR
                           │   mark  / fold /    │
                           │   refresh           │
                           └─────────┬──────────┘
-                                    │ IR (改写后)
+                                    │ IR (after rewrite)
                                     ▼
                           engine.emit() → wire request
                           engine.parse_usage() → UsageReport
 ```
 
-Bridge 是**有状态**的（每个 session 一个实例）：
-- 维护 ref-pool（slug 一旦注册即冻结）
-- 维护"自上次 mark 以来真实请求数"，给 ``refresh`` 自适应门控用（修复 R8）
-- 维护一个累计 ``cache_creation`` 计数，达到阈值就提示上游 ``Fold``
+The Bridge is **stateful** (one instance per session):
+- maintains the ref-pool (a slug is frozen once registered)
+- maintains "the number of real requests since the last mark", used for ``refresh``'s
+  adaptive gating (fixes R8)
+- maintains a cumulative ``cache_creation`` counter and hints the upstream to ``Fold``
+  once a threshold is reached
 
-Bridge **不**记录任何 engine 私有状态（breakpoint slot 编号、TTL slot 等）—
-那些由 engine adapter 在 ``plan_marks`` 时按需重算。
+The Bridge does **not** track any engine-private state (breakpoint slot numbers, TTL
+slots, etc.) -- those are recomputed on demand by the engine adapter during ``plan_marks``.
 """
 
 from __future__ import annotations
@@ -52,12 +54,12 @@ from telos.refpool import RefPool
 
 
 # ---------------------------------------------------------------------------
-# Bridge 跨 turn 持久化的状态
+# Bridge state persisted across turns
 # ---------------------------------------------------------------------------
 
 @dataclass
 class _SessionStats:
-    """跟踪自上次 refresh 以来的真实请求数（用于 refresh 自适应门控）。"""
+    """Tracks the number of real requests since the last refresh (used for refresh adaptive gating)."""
 
     real_requests_since_refresh: int = 0
     cumulative_cache_creation: int = 0
@@ -66,68 +68,74 @@ class _SessionStats:
 
 @dataclass
 class BridgeSessionState:
-    """一个 conversation session 的全部跨 turn 状态。
+    """All cross-turn state of a single conversation session.
 
-    设计意图：上游（proxy / SDK transport）可以按 session_id 持有一份
-    ``BridgeSessionState``，每轮请求构造新的 ``Bridge`` 时传进来。这样：
+    Design intent: the upstream (proxy / SDK transport) can hold one
+    ``BridgeSessionState`` per session_id and pass it in when constructing a new
+    ``Bridge`` each turn. This way:
 
-    - ref-pool slug 一次注册、全 session 共享（fold 状态跨轮保持）
-    - R8 自适应 refresh 的请求计数能真累积
-    - cache_creation 累计计数能真累积，触发上游 fold 提示
+    - a ref-pool slug is registered once and shared across the whole session (fold state
+      is preserved across turns)
+    - the request count for R8 adaptive refresh can truly accumulate
+    - the cumulative cache_creation counter can truly accumulate and trigger the upstream
+      fold hint
 
-    缺省（``None``）时 Bridge 自己 new 一个，行为退化到"每轮独立"——与
-    之前完全等价，保证不破坏现有调用方。
+    When omitted (``None``), the Bridge creates one itself, degrading the behavior to
+    "independent per turn" -- exactly equivalent to before, guaranteeing existing callers
+    are not broken.
     """
 
     refpool: RefPool = field(default_factory=RefPool)
     stats: _SessionStats = field(default_factory=_SessionStats)
-    # 一旦某个 session 的 harness 被识别出来（hermes / openclaw），后续
-    # 同 session 的请求直接复用，避免每条 call 重新探测带来的"openclaw ↔
-    # hermes 翻转 → source_tag 前缀不一致 → ref-pool slug 失配"。显式
-    # 传入 ``harness_name`` 始终覆盖这个字段。
+    # Once a session's harness is identified (hermes / openclaw), subsequent requests in
+    # the same session reuse it directly, avoiding a re-probe on every call that would
+    # cause "openclaw <-> hermes flip-flopping -> inconsistent source_tag prefix ->
+    # ref-pool slug mismatch". Explicitly passing ``harness_name`` always overrides this field.
     sticky_harness: str | None = None
-    # 同理：一个 session 第一次见到的 mode（none/telos/rtk/both）被锁定，
-    # 后续同 session 的请求复用，避免对比实验里某个 session 中途换挡。
-    # proxy 配置默认值仍可被首个请求的 X-Telos-Mode header 覆盖一次。
+    # Likewise: the mode (none/telos/rtk/both) a session sees the first time is locked,
+    # and subsequent requests in the same session reuse it, to avoid a session switching
+    # gears mid-way in a comparison experiment. The proxy config default can still be
+    # overridden once by the first request's X-Telos-Mode header.
     sticky_mode: str | None = None
-    # 对比实验分组标签（X-Telos-Compare-Group header）。同一 compare_group
-    # 下、mode 不同的多个 session 会在 dashboard 上并排展示。
+    # Comparison-experiment group label (X-Telos-Compare-Group header). Multiple sessions
+    # under the same compare_group with different modes are shown side by side on the dashboard.
     compare_group: str | None = None
 
 
-REFRESH_THRESHOLD = 11  # Janus §6.3.1：每续期间至少 11 次真实请求才回本
+REFRESH_THRESHOLD = 11  # Janus §6.3.1: at least 11 real requests per renewal window to break even
 
 
 # ---------------------------------------------------------------------------
-# Canonicalization（修复 R5：跨 engine 通用，必须在 emit 前统一做掉）
+# Canonicalization (fixes R5: cross-engine generic, must be done uniformly before emit)
 # ---------------------------------------------------------------------------
 
-# JSON-Schema 中"集合语义"的数组键：order-insensitive，排序后字节稳定。
-# 仅在 tool_def 的 schema 子树里被认作集合；tool_use / tool_result 的 payload
-# 是用户数据，绝不动（payload 里碰巧叫 ``required`` 的字段不能被静默重排）。
+# Array keys with "set semantics" in JSON-Schema: order-insensitive, byte-stable once sorted.
+# Treated as sets only within the schema subtree of a tool_def; the payload of tool_use /
+# tool_result is user data and must never be touched (a field that happens to be named
+# ``required`` in a payload must not be silently reordered).
 #
-# 故意 *不* 排序的键（与 Janus tools.ts 同步保守）：
-#   - ``enum``        : 顺序常被用作 tie-break 偏好
-#   - ``examples``    : 文档示例可能是有意排序的
-#   - ``anyOf`` / ``oneOf`` / ``allOf`` : spec 无序，但 prompt 里常见
-#                       "prefer first matching schema" 这种语义
-# 暴露为模块级名字，方便特殊 harness 在 import 后 monkey-patch。
+# Keys deliberately *not* sorted (kept conservative, in sync with Janus tools.ts):
+#   - ``enum``        : order is often used as a tie-break preference
+#   - ``examples``    : documentation examples may be intentionally ordered
+#   - ``anyOf`` / ``oneOf`` / ``allOf`` : the spec says unordered, but prompts commonly
+#                       rely on "prefer first matching schema" semantics
+# Exposed as a module-level name so special harnesses can monkey-patch it after import.
 _SCHEMA_SET_ARRAY_KEYS: frozenset[str] = frozenset({"required"})
 
-# 工具来源排序：builtin 先、MCP 次、user 最末；未标 tag 排到最后（safe default）。
+# Tool source ordering: builtin first, MCP next, user last; untagged sorts last (safe default).
 _TOOL_SOURCE_RANK: Mapping[str, int] = {"builtin": 0, "mcp": 1, "user": 2}
 _TOOL_SOURCE_DEFAULT_RANK = 3
 
 
 def _canonicalize_payload(payload: Any) -> Any:
-    """对 dict 类 payload 做 key 排序；其它类型原样返回。
+    """Sort keys for dict-like payloads; return other types unchanged.
 
-    Anthropic 文档明确指出 Swift / Go 的 JSON 序列化会随机化 key 顺序，
-    导致 cache 失效。DeepSeek 的 prefix 是 exact-match，OpenAI 的 prefix
-    是 hash —— 所有 engine 都受影响。所以放在 bridge 而不是 adapter。
+    The Anthropic docs explicitly note that Swift / Go JSON serialization randomizes key
+    order, which invalidates the cache. DeepSeek's prefix is exact-match, OpenAI's prefix
+    is a hash -- all engines are affected. So this belongs in the bridge, not the adapter.
 
-    本函数 *不* 触碰集合语义数组（如 ``required``）—— 那只发生在
-    ``_canonicalize_schema``，且仅作用于 tool_def 的 schema 子树。
+    This function does *not* touch set-semantics arrays (such as ``required``) -- that
+    only happens in ``_canonicalize_schema`` and only on the schema subtree of a tool_def.
     """
     if isinstance(payload, dict):
         return {k: _canonicalize_payload(payload[k]) for k in sorted(payload.keys())}
@@ -137,12 +145,12 @@ def _canonicalize_payload(payload: Any) -> Any:
 
 
 def _canonicalize_schema(node: Any, *, parent_key: str | None = None) -> Any:
-    """JSON-Schema 子树专用规范化：dict key 排序 + 集合语义数组排序。
+    """Canonicalization dedicated to JSON-Schema subtrees: dict key sorting + set-semantics array sorting.
 
-    与 ``_canonicalize_payload`` 的差别仅在于：当一个 list 的父键属于
-    ``_SCHEMA_SET_ARRAY_KEYS`` 时，按字符串排序而不是保留原序。这样
-    ``required: ["b","a"]`` 与 ``["a","b"]`` 字节相同，杜绝
-    ``list(set(...))`` 类的隐式失序破坏 prefix cache。
+    The only difference from ``_canonicalize_payload`` is: when a list's parent key belongs
+    to ``_SCHEMA_SET_ARRAY_KEYS``, it is sorted as strings rather than keeping the original
+    order. This way ``required: ["b","a"]`` and ``["a","b"]`` are byte-identical, preventing
+    implicit reordering like ``list(set(...))`` from breaking the prefix cache.
     """
     if isinstance(node, dict):
         return {
@@ -158,15 +166,16 @@ def _canonicalize_schema(node: Any, *, parent_key: str | None = None) -> Any:
 
 
 def _canonicalize_tool_def(payload: Any) -> Any:
-    """规范化 tool_def payload：识别 Anthropic / OpenAI 两种 schema 字段。
+    """Canonicalize a tool_def payload: recognizes both the Anthropic and OpenAI schema fields.
 
     - Anthropic shape: ``{"name", "description", "input_schema": {...}}``
     - OpenAI   shape: ``{"type": "function", "function": {"name", "description",
                           "parameters": {...}}}``
 
-    schema 子树（``input_schema`` / ``parameters``）走 ``_canonicalize_schema``，
-    其余字段走普通 ``_canonicalize_payload``。未识别的形态退化为整体
-    ``_canonicalize_payload`` —— 与改动前等价。
+    The schema subtree (``input_schema`` / ``parameters``) goes through
+    ``_canonicalize_schema``, the other fields through plain ``_canonicalize_payload``.
+    An unrecognized shape degrades to a whole ``_canonicalize_payload`` -- equivalent to
+    before the change.
     """
     if not isinstance(payload, dict):
         return _canonicalize_payload(payload)
@@ -199,11 +208,11 @@ def _canonicalize_tool_def(payload: Any) -> Any:
 
 
 def _canonicalize_block(blk: TelosBlock) -> TelosBlock:
-    """规范化单个 block：tool 定义 / tool_use / tool_result 的字段排序。
+    """Canonicalize a single block: field sorting for tool_def / tool_use / tool_result.
 
-    ``tool_def`` 走 schema-aware 路径（额外规范化 ``required`` 等集合数组）；
-    ``tool_use`` / ``tool_result`` 只做 dict key 排序 —— 它们的 payload 是
-    用户数据，不能改动数组顺序。
+    ``tool_def`` goes through the schema-aware path (additionally canonicalizes set arrays
+    such as ``required``); ``tool_use`` / ``tool_result`` only do dict key sorting -- their
+    payload is user data, so array order must not be changed.
     """
     if blk.kind == "tool_def":
         return replace(blk, payload=_canonicalize_tool_def(blk.payload))
@@ -213,7 +222,7 @@ def _canonicalize_block(blk: TelosBlock) -> TelosBlock:
 
 
 def _tool_name(blk: TelosBlock) -> str:
-    """从 tool_def block 提取工具名（Anthropic / OpenAI 两种 shape 都覆盖）。"""
+    """Extract the tool name from a tool_def block (covers both the Anthropic and OpenAI shapes)."""
     p = blk.payload
     if isinstance(p, dict):
         name = p.get("name")
@@ -228,16 +237,18 @@ def _tool_name(blk: TelosBlock) -> str:
 
 
 def _tool_sort_key(blk: TelosBlock) -> tuple[int, str, str]:
-    """工具数组的稳定排序键：``(source_rank, mcp_server, name)``。
+    """The stable sort key for the tool array: ``(source_rank, mcp_server, name)``.
 
-    - ``source_rank`` : builtin(0) → mcp(1) → user(2) → 未标记(3)
-    - ``mcp_server``  : 同为 MCP 时按 server 名稳定，避免多 server 启动竞态
-                        在两个 server 之间交替插入而破坏 prefix
-    - ``name``        : 组内字典序
+    - ``source_rank`` : builtin(0) → mcp(1) → user(2) → untagged(3)
+    - ``mcp_server``  : when both are MCP, sort stably by server name to avoid a
+                        multi-server startup race interleaving inserts between two servers
+                        and breaking the prefix
+    - ``name``        : lexicographic order within a group
 
-    所有 PIN 工具排序后仍是 PIN，不破坏 §5 band 顺序（``assert_band_order``
-    在 emit 时再校验一次）。``extra["source"]`` 与 ``extra["mcp_server"]``
-    是 harness 约定的 tag —— 缺失时退化为最末位（safe default）。
+    All PIN tools are still PIN after sorting, so §5 band order is not broken
+    (``assert_band_order`` re-checks at emit time). ``extra["source"]`` and
+    ``extra["mcp_server"]`` are harness-convention tags -- when missing, they degrade to
+    the last position (safe default).
     """
     extra = blk.extra or {}
     src = extra.get("source") if isinstance(extra, Mapping) else None
@@ -250,7 +261,8 @@ def _tool_sort_key(blk: TelosBlock) -> tuple[int, str, str]:
 
 
 def _canonicalize_ir(ir: TelosIR) -> TelosIR:
-    # tools: 每个 block 内部规范化 → 整个数组稳定排序（仍全是 PIN，不破坏 §5）
+    # tools: canonicalize each block internally → stable-sort the whole array
+    # (still all PIN, so §5 is not broken)
     canon_tools = sorted(
         (_canonicalize_block(b) for b in ir.tools),
         key=_tool_sort_key,
@@ -266,14 +278,15 @@ def _canonicalize_ir(ir: TelosIR) -> TelosIR:
 
 
 # ---------------------------------------------------------------------------
-# Bridge 主体
+# Bridge body
 # ---------------------------------------------------------------------------
 
 class Bridge:
-    """每个 session 一个实例。线程不安全（同一 session 通常顺序处理）。
+    """One instance per session. Not thread-safe (a single session is usually processed sequentially).
 
-    跨 turn 状态外置：传入 ``session_state`` 让 ref-pool + R8 计数器跨调用
-    累积；不传则每个 Bridge 独立持有状态（与早期版本行为等价）。
+    Cross-turn state is externalized: passing in ``session_state`` lets the ref-pool +
+    R8 counter accumulate across calls; without it, each Bridge holds its own state
+    (equivalent to early-version behavior).
     """
 
     def __init__(
@@ -286,20 +299,21 @@ class Bridge:
         self._ir = ir
         self._engine = engine
         self._state = session_state if session_state is not None else BridgeSessionState()
-        # 把当前 IR 里的 ref_pool 同步进 state.refpool。
-        # 用 register_or_skip：第二次起，已注册的 slug（可能已被 fold 改成
-        # 占位符）不会被新一轮的完整 payload 覆盖回去。
+        # Sync the ref_pool from the current IR into state.refpool.
+        # Use register_or_skip: from the second call on, an already-registered slug (which
+        # may have been folded into a placeholder) is not overwritten back by a new round's
+        # full payload.
         for slug, blk in ir.ref_pool.items():
             self._state.refpool.register_or_skip(slug, blk)
-        # 初始 IR 也走一遍 §5 校验，避免 harness plugin 偷懒
+        # The initial IR also goes through the §5 check, so harness plugins can't cut corners
         assert_ir_invariants(self._ir)
 
     @property
     def session_state(self) -> BridgeSessionState:
-        """暴露外置状态。上游可读 ``cumulative_cache_creation`` 等做诊断。"""
+        """Expose the externalized state. The upstream may read ``cumulative_cache_creation`` etc. for diagnostics."""
         return self._state
 
-    # 后向兼容：旧代码可能直接读这些字段。保留 property 读路径。
+    # Backward compatibility: old code may read these fields directly. Keep the property read path.
     @property
     def _refpool(self) -> RefPool:  # type: ignore[override]
         return self._state.refpool
@@ -309,14 +323,14 @@ class Bridge:
         return self._state.stats
 
     # ------------------------------------------------------------------
-    # 五个原语
+    # The five primitives
     # ------------------------------------------------------------------
 
     def place(self, segment: str, blocks: tuple[TelosBlock, ...]) -> "Bridge":
-        """**Place**：替换某个段（``"tools"`` / ``"system"`` / ``"messages"``）的
-        全部 blocks，并立即重新跑 §5 校验。
+        """**Place**: replace all blocks of a segment (``"tools"`` / ``"system"`` / ``"messages"``),
+        and immediately re-run the §5 check.
 
-        Place 是显式的"接受新 IR"动作，harness 在每次新 turn 来临时调用。
+        Place is the explicit "accept new IR" action, called by the harness whenever a new turn arrives.
         """
         if segment == "tools":
             assert_band_order(blocks, "tools")
@@ -331,21 +345,21 @@ class Bridge:
         return self
 
     def append_message(self, msg: TelosMessage) -> "Bridge":
-        """**Place** 的 message 专用快捷方式：追加一条新 message。
+        """A message-specific shortcut for **Place**: append a new message.
 
-        每次追加都校验 message 内部的 §5 顺序——这是修复 Janus C6 的
-        关键，user message 的 envelope 必须切到 ``DROP`` 子块。
+        Every append checks the §5 order inside the message -- this is the key to fixing
+        Janus C6: a user message's envelope must be cut into a ``DROP`` sub-block.
         """
         assert_band_order(msg.blocks, f"new message (role={msg.role})")
         self._ir = replace(self._ir, messages=self._ir.messages + (msg,))
         return self
 
     def pin(self, slug: str, payload: str, *, source_tag: str | None = None) -> "Bridge":
-        """**Pin**：注册一个 ref-pool 条目，slug 立即冻结。
+        """**Pin**: register a ref-pool entry; the slug is frozen immediately.
 
-        注意 Pin 注册的是 ``band=FOLD`` 的可折叠条目（与原语名"Pin"看似
-        矛盾，但 Pin 这里指的是"把这段大内容固定在 ref-pool 里、给它
-        一个稳定的指针"，不是"band=PIN"）。
+        Note that Pin registers a foldable entry with ``band=FOLD`` (seemingly at odds
+        with the primitive name "Pin", but Pin here means "fix this large chunk of content
+        in the ref-pool and give it a stable pointer", not "band=PIN").
         """
         blk = TelosBlock(
             id=f"ref:{slug}",
@@ -356,15 +370,15 @@ class Bridge:
             source_tag=source_tag or "ref-pool/registered",
         )
         self._refpool.register(slug, blk)
-        # 把 ref-pool 渲染到 system 段尾部（§4 所有大内容都集中在这里）
+        # Render the ref-pool at the tail of the system segment (§4 keeps all large content here)
         self._sync_refpool_into_system()
         return self
 
     def mark(self) -> EmitPlan:
-        """**Mark**：让 engine adapter 决定本次 emit 的 cache 锚位。
+        """**Mark**: let the engine adapter decide the cache anchors for this emit.
 
-        bridge 不知道 cache_control / prompt_cache_key 这些 engine 私有
-        概念，把决策完全委托给 adapter。
+        The bridge has no knowledge of engine-private concepts like cache_control /
+        prompt_cache_key, and delegates the decision entirely to the adapter.
         """
         return self._engine.plan_marks(self._ir)
 
@@ -375,16 +389,17 @@ class Bridge:
         message_range: tuple[int, int] | None = None,
         summary: str = "<folded prior turns>",
     ) -> "Bridge":
-        """**Fold**：折叠 ref-pool 条目，或把一段历史 message 折叠成摘要。
+        """**Fold**: fold ref-pool entries, or fold a span of history messages into a summary.
 
-        修复 R4：Fold 后所有落在 fold 区域之后的 Mark slot 必须由下次
-        ``mark()`` 重新规划——bridge 不缓存 plan，所以这是天然成立的。
+        Fixes R4: after a Fold, every Mark slot that lands after the fold region must be
+        re-planned by the next ``mark()`` -- the bridge does not cache the plan, so this
+        holds naturally.
 
-        参数：
-            slugs: 要折叠的 ref-pool slug 列表（仅替换 payload，slug 不动）
-            message_range: ``(start, end)`` 半开区间，把这段历史 message
-                替换为单个 ``band=FOLD`` 的 summary message
-            summary: message 折叠时使用的占位文本
+        Parameters:
+            slugs: list of ref-pool slugs to fold (only the payload is replaced, the slug stays)
+            message_range: ``(start, end)`` half-open interval; replaces this span of history
+                messages with a single ``band=FOLD`` summary message
+            summary: the placeholder text used when folding messages
         """
         for slug in slugs:
             self._refpool.fold(slug)
@@ -418,10 +433,11 @@ class Bridge:
         return self
 
     def refresh(self, plan: EmitPlan) -> bool:
-        """**Refresh**：触发 engine 的 keep-alive；若 engine 不支持则 no-op。
+        """**Refresh**: trigger the engine's keep-alive; a no-op if the engine doesn't support it.
 
-        修复 R8：自适应门控——窗口内真实请求数低于阈值就跳过续期，
-        让 cache 自然过期。这避免低活跃 session 续期成本 > 收益。
+        Fixes R8: adaptive gating -- if the number of real requests in the window is below
+        the threshold, skip the renewal and let the cache expire naturally. This avoids a
+        low-activity session where the renewal cost > the benefit.
         """
         if not self._engine.capabilities.prewarmable:
             return False
@@ -433,24 +449,25 @@ class Bridge:
         return True
 
     # ------------------------------------------------------------------
-    # emit / 回流：bridge 还要负责把 engine 返回的 usage 归一化
+    # emit / flow-back: the bridge is also responsible for normalizing the usage the engine returns
     # ------------------------------------------------------------------
 
     def emit(self) -> Mapping[str, Any]:
-        """规范化 → 校验 → 委托 engine.emit() 出 wire 请求。"""
+        """Canonicalize → validate → delegate to engine.emit() to produce the wire request."""
         wire, _ = self.emit_with_plan()
         return wire
 
     def emit_with_plan(self) -> tuple[Mapping[str, Any], EmitPlan]:
-        """``emit()`` 的二元返回版：同时拿到 wire 和当次使用的 EmitPlan。
+        """The two-value return version of ``emit()``: get both the wire and the EmitPlan used this time.
 
-        proxy / transport 想记 plan 诊断（slot 名、routing_key 等）的时候用
-        这个，避免它们自己重复跑 canonicalize + plan_marks。
+        Use this when the proxy / transport wants to record plan diagnostics (slot names,
+        routing_key, etc.), to avoid them re-running canonicalize + plan_marks themselves.
         """
         canon = _canonicalize_ir(self._ir)
-        # 渲染前再做一次完整 §5 校验（修改 IR 的入口很多，最后一道防线）
+        # One more full §5 check before rendering (there are many entry points that modify
+        # the IR, this is the last line of defense)
         assert_ir_invariants(canon)
-        # ref-pool lint：扫描所有文本 block 内的 [ref:...] 引用
+        # ref-pool lint: scan all [ref:...] references inside text blocks
         self._state.refpool.lint_blocks(canon.system, "system")
         for i, m in enumerate(canon.messages):
             self._state.refpool.lint_blocks(m.blocks, f"messages[{i}]")
@@ -460,13 +477,13 @@ class Bridge:
         return wire, plan
 
     def absorb_usage(self, raw_response: Mapping[str, Any]) -> UsageReport:
-        """解析 engine response，更新 cache_creation 累计计数。"""
+        """Parse the engine response and update the cumulative cache_creation counter."""
         report = self._engine.parse_usage(raw_response)
         self._stats.cumulative_cache_creation += report.cache_write
         return report
 
     # ------------------------------------------------------------------
-    # 诊断 / 调试
+    # Diagnostics / debugging
     # ------------------------------------------------------------------
 
     @property
@@ -474,7 +491,8 @@ class Bridge:
         return self._stats.cumulative_cache_creation
 
     # ------------------------------------------------------------------
-    # 双向操作（仅 vLLM / SGLang 等开源推理实现；闭源 API 全 no-op）
+    # Bidirectional operations (only open-source inference implementations like
+    # vLLM / SGLang; all no-ops on closed-source APIs)
     # ------------------------------------------------------------------
 
     @property
@@ -482,10 +500,11 @@ class Bridge:
         return isinstance(self._engine, BidirectionalEngineAdapter)
 
     def probe_cache(self) -> ProbeResult:
-        """**Probe**：问 server 端"前缀还在缓存里吗？"
+        """**Probe**: ask the server "is the prefix still in the cache?"
 
-        闭源 API 直接返回 ``hit=False``；vLLM / SGLang 真正发起 lookup。
-        bridge 用这个结果决定是否跳过即将发起的 ``refresh``，省一次 RTT。
+        Closed-source APIs simply return ``hit=False``; vLLM / SGLang really issue a lookup.
+        The bridge uses this result to decide whether to skip an imminent ``refresh``,
+        saving one RTT.
         """
         if not isinstance(self._engine, BidirectionalEngineAdapter):
             return ProbeResult(hit=False)
@@ -499,22 +518,23 @@ class Bridge:
         message_range: tuple[int, int] | None = None,
         summary: str = "<folded prior turns>",
     ) -> Mapping[str, Any]:
-        """**协同 Fold**：客户端折叠 + 服务端 evict-span / fork-and-replace。
+        """**Cooperative Fold**: client-side fold + server-side evict-span / fork-and-replace.
 
-        与普通 ``fold()`` 不同：本方法不仅改 IR，还返回一个 ``cache_control``
-        / ``cache_policy`` 片段，由 caller 合并进下一次 emit 的 plan extras。
-        服务端拿到后真正释放旧 KV 块（vLLM）或 fork radix 路径（SGLang），
-        实现"零重算 Fold"——这是闭源 API 完全做不到的。
+        Unlike a plain ``fold()``: this method not only modifies the IR but also returns a
+        ``cache_control`` / ``cache_policy`` fragment for the caller to merge into the next
+        emit's plan extras. Once the server receives it, it really releases the old KV
+        blocks (vLLM) or forks the radix path (SGLang), achieving "zero-recompute Fold" --
+        something closed-source APIs simply cannot do.
 
-        闭源 API 上调用本方法等同于 ``fold()`` + 返回 ``{}``。
+        Calling this method on a closed-source API is equivalent to ``fold()`` + returning ``{}``.
         """
-        # 先做客户端侧的 IR rewrite（与普通 fold 相同）
+        # First do the client-side IR rewrite (same as a plain fold)
         self.fold(slugs=slugs, message_range=message_range, summary=summary)
         if not isinstance(self._engine, BidirectionalEngineAdapter):
             return {}
 
         caps = self._engine.capabilities
-        # 优先走 fork_and_replace（SGLang 全支持，vLLM 部分支持）
+        # Prefer fork_and_replace (fully supported by SGLang, partially by vLLM)
         if caps.fork_and_replace and message_range is not None:
             plan = self._engine.plan_marks(self._ir)
             path_hash = plan.extras.get("path_hash") or plan.routing_key or ""
@@ -523,17 +543,17 @@ class Bridge:
                 path_hash=path_hash,
                 replace_suffix={"text": summary},
             )
-        # 退而求其次：evict_span（vLLM 主路径）
+        # Next best: evict_span (vLLM's main path)
         if caps.span_eviction and message_range is not None:
             start, end = message_range
             return self._engine.evict_span(self._ir, start, end)
         return {}
 
     def emit_with_extras(self, extras: Mapping[str, Any]) -> Mapping[str, Any]:
-        """``emit()`` 的扩展版：允许 caller 把双向操作返回的 cache_control
-        片段合并进 plan.extras。
+        """The extended version of ``emit()``: lets the caller merge the cache_control fragment
+        returned by a bidirectional operation into plan.extras.
 
-        典型用法：
+        Typical usage:
 
             ctrl = bridge.cooperative_fold(message_range=(2, 8), summary="…")
             wire = bridge.emit_with_extras(ctrl)
@@ -554,11 +574,11 @@ class Bridge:
         return wire
 
     def snapshot_ir(self) -> TelosIR:
-        """返回当前 IR 的快照（用于序列化 / 测试）。"""
+        """Return a snapshot of the current IR (for serialization / testing)."""
         return self._ir
 
     def dump_layout(self) -> str:
-        """打印当前 IR 的 band 分布；调试用。"""
+        """Print the band distribution of the current IR; for debugging."""
         lines: list[str] = [f"-- session {self._ir.session_id} --"]
 
         def fmt(blocks: tuple[TelosBlock, ...]) -> str:
@@ -571,16 +591,16 @@ class Bridge:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # 内部：把 ref-pool 同步进 system 段（pin* → fold(ref-pool)*）
+    # Internal: sync the ref-pool into the system segment (pin* → fold(ref-pool)*)
     # ------------------------------------------------------------------
 
     def _sync_refpool_into_system(self) -> None:
-        # 取 system 中所有非 ref-pool 来源的 block（保留 harness 注入的 system pin / drop）
+        # Take all non-ref-pool-sourced blocks in system (keep harness-injected system pin / drop)
         non_pool = tuple(b for b in self._ir.system if b.ref_slug is None)
-        # 重新组合：保留原有 pin → 加 ref-pool fold → 保留原有 drop
+        # Recombine: keep the existing pins → add the ref-pool fold → keep the existing drops
         pins = tuple(b for b in non_pool if b.band is Band.PIN)
         drops = tuple(b for b in non_pool if b.band is Band.DROP)
-        # ref-pool 字典序渲染（保证多次 emit 字节稳定）
+        # Render the ref-pool in lexicographic order (guarantees byte stability across emits)
         pool_blocks = self._refpool.render_blocks()
         new_system = pins + pool_blocks + drops
         assert_band_order(new_system, "system (after refpool sync)")

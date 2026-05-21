@@ -1,43 +1,53 @@
 # TELOS User Guide
 
-> 端到端使用手册：从安装到接入 agent，到多轮观测和调优。
+> An end-to-end manual: from installation to integrating an agent, to multi-turn observability and tuning.
 >
-> 协议层面看 [`2026-05-06-telos-protocol.md`](2026-05-06-telos-protocol.md)；
-> 改动历史看根目录 [`CHANGELOG.md`](../CHANGELOG.md)。
+> For the protocol level see [`2026-05-06-telos-protocol.md`](2026-05-06-telos-protocol.md);
+> for the change history see [`CHANGELOG.md`](../CHANGELOG.md) in the root.
 
 ---
 
-## 1. 决策树：你该用哪条接入路径？
+## 1. Decision tree: which integration path should you use?
 
 ```
-你能修改 agent 的源码 / import 站点吗？
+Can you modify the agent's source code / import site?
 │
-├─ 能（自研 Python agent / mini_swe_runner 这类 vendored 代码）
+├─ Yes (a self-built Python agent / vendored code like mini_swe_runner)
 │      ↓
-│   路径 A —— SDK Transport
+│   Path A — SDK Transport
 │   import TelosAnthropicTransport / TelosOpenAITransport
-│   优点：完整 typed 响应、与 agent 进程同生命周期、调试直接
-│   缺点：每个 agent 要单独改 import；流式还没 wrap
+│   Pros: full typed responses, same lifecycle as the agent process, direct to debug
+│   Cons: each agent needs its own import change; streaming not yet wrapped
 │
-└─ 不能（npm 全局装的 Claude Code、闭源二进制、共享主机多 agent）
+└─ No (npm-globally-installed Claude Code, closed-source binary, multiple agents on a shared host)
        ↓
-    路径 B —— HTTP 反向代理
-    telos proxy 起本机 7171，agent 设 ANTHROPIC_BASE_URL=http://127.0.0.1:7171
-    优点：零侵入、agent 升级不丢、多 agent 共享一份代理
-    缺点：多一层进程、白名单外的 header 会被丢弃
+    Path B — HTTP reverse proxy (gateway)
+    telos gateway brings up 7171 locally; the agent sets ANTHROPIC_BASE_URL=http://127.0.0.1:7171
+    Pros: zero intrusion, survives agent upgrades, multiple agents share one proxy
+    Cons: one extra process layer; headers outside the allowlist are dropped
 ```
 
-两条路径**功能等价**：
-- 同样的 TELOS 管线（`process_anthropic_request` / `bridge.emit_with_plan`）
-- 同样的多轮状态累积（`BridgeSessionState`）
-- 同样的 `cache_control` 注入 / canonical 排序
-- 同样的 usage 累计字段在日志里
+The two paths are **functionally equivalent**:
+- the same TELOS pipeline (`process_anthropic_request` / `bridge.emit_with_plan`)
+- the same multi-turn state accumulation (`BridgeSessionState`)
+- the same `cache_control` injection / canonical ordering
+- the same usage accumulation fields in the logs
 
-差异只在「进程边界 / 错误处理 / 流式」这些操作层面。
+The differences are only at the operational level: process boundary / error handling / streaming.
 
 ---
 
-## 2. 安装
+## 2. Installation
+
+One-line install:
+
+```bash
+pip install telos-sdk
+# or Homebrew (see packaging/, available after the tap is published):
+# brew install telos-sdk
+```
+
+Development install from source:
 
 ```bash
 cd /Users/george/Code/telos-sdk
@@ -46,41 +56,60 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-[`pyproject.toml`](../pyproject.toml) 把项目根目录映射成 `telos` 包。安装后：
+[`pyproject.toml`](../pyproject.toml) maps the project root directory to the `telos` package. After install:
 
 ```bash
 python -c "import telos; print(telos.__file__)"
 # .../telos-sdk/__init__.py
 
 telos --help
-# usage: telos <subcommand> [...]
+# usage: telos [<subcommand>] [...]
 ```
 
-需要 Python ≥ 3.10。依赖 `anthropic ≥ 0.49`、`openai ≥ 1.72`、`aiohttp ≥ 3.10`。
+Requires Python ≥ 3.10. Depends on `anthropic ≥ 0.49`, `openai ≥ 1.72`, `aiohttp ≥ 3.10`.
+
+### 2.1 One-command integration (recommended)
+
+```bash
+telos init
+```
+
+`telos init` with no arguments will: auto-detect which harness CLIs are installed locally
+(claude-code / codex / openclaw / hermes) → inject config pointing at the local gateway into each
+→ start the gateway in the background → print the gateway and dashboard addresses.
+
+Afterward:
+
+```bash
+telos              # pick a harness and enter its CLI (telos alias <harness> sets the default)
+telos dashboard    # open the live dashboard in the browser
+telos mode both    # switch the optimization gear, hot-reloading the running gateway
+telos gateway status   # check the gateway's run status
+```
 
 ---
 
-## 3. 路径 A：SDK Transport（代码内接入）
+## 3. Path A: SDK Transport (in-code integration)
 
-### 3.1 Anthropic 客户端 — Claude Code / Openclaw / Hermes / 自研 agent
+### 3.1 Anthropic client — Claude Code / Openclaw / Hermes / self-built agents
 
-把 `anthropic.Anthropic()` 换成 `TelosAnthropicTransport`，其余 `.messages.create()` 调用不变：
+Replace `anthropic.Anthropic()` with `TelosAnthropicTransport`; all other `.messages.create()` calls stay the same:
 
 ```python
-# 改前
+# before
 import anthropic
 client = anthropic.Anthropic()
 
-# 改后
+# after
 from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
 client = TelosAnthropicTransport(
-    session_id="my-agent-session",       # 同一对话用同一 id
+    session_id="my-agent-session",       # use the same id for the same conversation
     usage_log="logs/usage.jsonl",
     prompt_trace_log="logs/trace.jsonl",
-    # harness_name="hermes",             # 不填则自动检测
+    # harness_name="hermes",             # leave unset for auto-detect
 )
 
-# 调用完全不变
+# the call is completely unchanged
 response = client.messages.create(
     model="claude-opus-4-7",
     max_tokens=8192,
@@ -91,36 +120,36 @@ response = client.messages.create(
 print(response.content[0].text)
 ```
 
-构造参数：
+Constructor parameters:
 
-| 参数 | 默认 | 说明 |
+| Parameter | Default | Description |
 |---|---|---|
 | `api_key` | `$ANTHROPIC_API_KEY` | Anthropic API key |
-| `base_url` | `None`（走 SDK 默认） | 调试时可指向本机代理 |
-| `session_id` | `"telos-session"` | 同一对话保持同一个 id；多轮 cache 累积的 key |
-| `harness_name` | `None`（auto-detect） | 强制 `"openclaw"` / `"hermes"` |
-| `engine_name` | `"anthropic"` | 一般不动 |
-| `usage_log` | `None` | jsonl 路径，每次调用追加一行（标准化 usage） |
-| `prompt_trace_log` | `None` | jsonl 路径，记录 IR layout / plan / 累积状态等诊断 |
-| `session_state` | `None`（内部 new） | 多个 transport 共享同一对话时显式传入 |
+| `base_url` | `None` (uses the SDK default) | can point at a local proxy for debugging |
+| `session_id` | `"telos-session"` | keep the same id for the same conversation; the key for multi-turn cache accumulation |
+| `harness_name` | `None` (auto-detect) | force `"openclaw"` / `"hermes"` |
+| `engine_name` | `"anthropic"` | usually left alone |
+| `usage_log` | `None` | jsonl path; one line appended per call (normalized usage) |
+| `prompt_trace_log` | `None` | jsonl path; records IR layout / plan / accumulation state and other diagnostics |
+| `session_state` | `None` (new'd internally) | pass explicitly when multiple transports share one conversation |
 
-Harness 自动检测：system 含 `<system-reminder>` 或 `<command-message>`、或消息中有 `thinking` block → 选 `hermes`；否则 `openclaw`。
+Harness auto-detection: system contains `<system-reminder>` or `<command-message>`, or a message has a `thinking` block → picks `hermes`; otherwise `openclaw`.
 
-### 3.2 OpenAI 客户端 — telos / mini_swe_runner / 自研 OpenAI-shape agent
+### 3.2 OpenAI client — telos / mini_swe_runner / self-built OpenAI-shape agents
 
 ```python
-# 改前
+# before
 from openai import OpenAI
 client = OpenAI(base_url="https://openrouter.ai/api/v1")
 
-# 改后
+# after
 from telos.scripts.telos_transport import TelosOpenAITransport
 client = TelosOpenAITransport(
     base_url="https://openrouter.ai/api/v1",
     session_id="telos-session",
     usage_log="logs/usage.jsonl",
-    engine_name="deepseek",              # 或 "openai"
-    harness_name="telos",                # 固定
+    engine_name="deepseek",              # or "openai"
+    harness_name="telos",                # fixed
 )
 
 response = client.chat.completions.create(
@@ -130,9 +159,9 @@ response = client.chat.completions.create(
 )
 ```
 
-### 3.3 跨 transport 共享同一对话
+### 3.3 Sharing one conversation across transports
 
-如果一段对话由多个 transport 实例处理（例如 retry 后重建 client），把 `BridgeSessionState` 显式传进去：
+If a conversation is handled by multiple transport instances (e.g. the client is rebuilt after a retry), pass `BridgeSessionState` in explicitly:
 
 ```python
 from telos.bridge import BridgeSessionState
@@ -140,39 +169,56 @@ from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
 
 shared = BridgeSessionState()
 t1 = TelosAnthropicTransport(session_id="conv-1", session_state=shared)
-# ... t1 出错被销毁 ...
+# ... t1 errors and is destroyed ...
 t2 = TelosAnthropicTransport(session_id="conv-1", session_state=shared)
-# t2 看得到 t1 累积的 ref-pool 和 R8 计数
+# t2 can see the ref-pool and R8 counts accumulated by t1
 ```
 
 ---
 
-## 4. 路径 B：HTTP 反向代理（零侵入接入）
+## 4. Path B: HTTP reverse proxy (zero-intrusion integration)
 
-### 4.1 启动代理
+### 4.1 Starting the gateway
+
+`telos init` already starts the gateway in the background automatically. You can also manage it manually:
 
 ```bash
-telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl
-# 后台跑：
-telos proxy --port 7171 --usage-log ~/.telos/usage.jsonl &
+telos gateway start                       # background start (host/port/mode taken from ~/.telos/config.json)
+telos gateway start --port 7171           # specify the port (and write it back as the new default)
+telos gateway status                      # check the run status
+telos gateway restart                     # restart
+telos gateway stop                        # stop
+telos gateway start --foreground          # run in the foreground, blocking (debugging / containers)
 ```
 
-启动后输出：
+After a background start, the state is recorded in `~/.telos/gateway.json` and the log in `~/.telos/gateway.log`.
+
+> The old `telos proxy ...` (foreground blocking) is still kept as a hidden alias, fully flag-compatible.
+
+After starting, the log (`~/.telos/gateway.log`) outputs:
 
 ```
-TELOS proxy listening on http://127.0.0.1:7171 → https://api.anthropic.com
+TELOS gateway listening on http://127.0.0.1:7171 → https://api.anthropic.com
 usage log → /Users/.../usage.jsonl
 ```
 
-代理路径接受所有 Anthropic 协议路径；`/v1/messages` 经 TELOS 改写，其他原样 passthrough。
+The gateway accepts all Anthropic protocol paths; `/v1/messages` is rewritten by TELOS, everything else is passed through unchanged.
 
-### 4.2 接入 Claude Code（一行命令）
+> **harness auto-detection**: the gateway automatically determines which harness each request belongs to, with no manual specification needed.
+> Besides the main conversation, Claude Code also sends auxiliary requests via Haiku (conversation-title generation, new-topic detection, etc.).
+> These requests have no tools and no `<system-reminder>` tag — the gateway identifies them via the HTTP `User-Agent`
+> header (`claude-cli/...`) and remembers the identification result per client, so auxiliary requests are also
+> correctly attributed to Claude Code, and won't be mistakenly shown as `openclaw` on the dashboard.
+
+### 4.2 Integrating Claude Code
+
+`telos init` automatically integrates the harnesses it detects. You can also integrate Claude Code only:
 
 ```bash
-telos init --agent claude-code
+telos init --harness claude-code
 ```
 
-往 `~/.claude/settings.json` 的 `env` 字段写入：
+It writes into the `env` field of `~/.claude/settings.json`:
 
 ```json
 {
@@ -183,89 +229,91 @@ telos init --agent claude-code
 }
 ```
 
-之后任何启动 Claude Code 的进程都会自动用本机代理。**不改 npm 包**，**不改 PATH**，**npm update 也不会丢**。
+Afterward any process that starts Claude Code automatically uses the local gateway. **No change to the npm package**, **no change to PATH**, and **`npm update` won't lose it**.
 
-撤销：
-
-```bash
-telos init --agent claude-code --uninstall
-# 还原任何 install 之前的 ANTHROPIC_BASE_URL（如有）
-```
-
-查状态：
+To undo / check status:
 
 ```bash
-telos init --agent claude-code --status
+telos init --harness claude-code --uninstall   # restore the state before install
+telos init --harness claude-code --status      # view only, don't modify files
 ```
 
-### 4.3 接入其它 Anthropic-SDK 客户端（generic）
+### 4.3 Integrating other clients
 
-```bash
-telos init --agent generic
-# 打印一段 export 指令，自己加到 shell rc / Dockerfile / k8s env
-# export ANTHROPIC_BASE_URL=http://127.0.0.1:7171
-```
+codex / openclaw / hermes are injected via environment variables (set automatically when `telos <harness>` starts the child process).
+Any client that respects `ANTHROPIC_BASE_URL` can also use `telos init --harness generic` to get a set of
+manual export instructions.
 
-适用于 Cursor、Gemini CLI、自研 Node/Python agent —— 任何尊重 `ANTHROPIC_BASE_URL` 的客户端。
-
-### 4.4 完整 CLI 参考
+### 4.4 Full CLI reference
 
 ```
-telos proxy [options]
-  --host HOST          监听地址（默认 127.0.0.1）
-  --port PORT          监听端口（默认 7171）
-  --upstream URL       真实 Anthropic API endpoint（默认 https://api.anthropic.com）
-  --usage-log PATH     每次调用追加一行 jsonl
-  --harness {openclaw,hermes,claude-code}
-                       强制 harness（默认按内容自动检测）；claude-code 是 hermes 的别名
-  --strict             TELOS 失败时返 500，而不是降级到 passthrough
+telos                        bare command: pick a harness and enter its CLI
+telos <harness>              enter a harness directly (claude-code / codex / openclaw / hermes)
+telos alias <harness>        set the harness that bare telos enters by default
 
 telos init [options]
-  --agent {claude-code,generic}    必填
-  --proxy-url URL      代理 URL（默认 http://127.0.0.1:7171）
-  --uninstall          还原 install 之前的状态
-  --status             只查看，不改文件
+  --harness {claude-code,codex,openclaw,hermes,generic}
+                       operate on the specified harness only (default: auto-detect all)
+  --gateway-url URL    gateway address (default taken from ~/.telos/config.json)
+  --uninstall          restore the state before install
+  --status             view only, don't modify files
+  --no-gateway         only inject config, don't start the gateway automatically
+
+telos gateway [start|stop|status|restart] [options]
+  --host HOST          listen address (default 127.0.0.1)
+  --port PORT          listen port (default 7171)
+  --mode {none,telos,rtk,both}   default optimization gear
+  --usage-log PATH     append one jsonl line per call
+  --foreground         run in the foreground, blocking (no backgrounding)
+
+telos mode [none|telos|rtk|both]   switch the optimization gear; hot-reloads the running gateway and persists it
+telos dashboard [--static] [--no-open]   open the dashboard in the browser
+
+telos proxy [options]        hidden alias: runs the gateway in the foreground, blocking; fully compatible with the old flags
 ```
+
+For `telos gateway` / `telos init`, any host/port/mode not passed defaults to `~/.telos/config.json`;
+explicitly passed values are written back as the new default.
 
 ---
 
-## 5. 多轮状态累积（关键能力）
+## 5. Multi-turn state accumulation (a key capability)
 
-TELOS 协议设计文档第 §4 / §6 提到的 ref-pool 持久化、R8 自适应 refresh 都依赖**跨 turn 的状态累积**。本节解释机制和如何观测。
+The ref-pool persistence and the R8 adaptive refresh mentioned in §4 / §6 of the TELOS protocol design doc both depend on **cross-turn state accumulation**. This section explains the mechanism and how to observe it.
 
-### 5.1 状态都在哪
+### 5.1 Where the state lives
 
 ```python
 @dataclass
 class BridgeSessionState:
-    refpool: RefPool          # ref-pool slug 注册表（冻结后跨轮保持，fold 也保持）
+    refpool: RefPool          # ref-pool slug registry (kept across turns once frozen, kept across folds too)
     stats: _SessionStats      # cumulative_cache_creation + real_requests_since_refresh
 ```
 
-### 5.2 在路径 A 自动持有
+### 5.2 Held automatically on Path A
 
-`TelosAnthropicTransport` / `TelosOpenAITransport` 实例 = 一个 session。`__init__` 内部创建 `BridgeSessionState`，每次 `_do_create` 传给 `Bridge`，response 回来时 `bridge.absorb_usage(...)` 累加 cache_creation。
+A `TelosAnthropicTransport` / `TelosOpenAITransport` instance = one session. `__init__` creates a `BridgeSessionState` internally; each `_do_create` passes it to `Bridge`, and when the response returns `bridge.absorb_usage(...)` accumulates the cache_creation.
 
-访问：`transport.session_state.stats.cumulative_cache_creation`。
+Access: `transport.session_state.stats.cumulative_cache_creation`.
 
-### 5.3 在路径 B 按 session-id keyed 自动持有
+### 5.3 Held automatically on Path B, keyed by session-id
 
-代理内部 `_SessionRegistry`（OrderedDict LRU，默认 10000）按 session_id 持有 state。session_id 派生优先级：
+Inside the proxy, `_SessionRegistry` (an OrderedDict LRU, default 10000) holds the state keyed by session_id. session_id derivation priority:
 
-1. `x-telos-session` HTTP header（显式覆盖）
-2. `metadata.user_id`（Anthropic SDK 内建字段）
+1. the `x-telos-session` HTTP header (explicit override)
+2. `metadata.user_id` (an Anthropic SDK built-in field)
 3. `blake2b(api_key + system + tools + messages[0])` → `telos-<16 hex>`
 
-派生规则的语义：
-- 同一对话的 N 轮（只在 `messages[]` 尾部追加）→ 同一 session_id ✓
-- 不同初始 prompt（`messages[0]` 变）→ 不同 session_id ✓
-- 不同 API key 的两个用户 → 不同 session_id ✓
+The semantics of the derivation rule:
+- the N turns of the same conversation (only appending to the tail of `messages[]`) → the same session_id ✓
+- a different initial prompt (`messages[0]` changes) → a different session_id ✓
+- two users with different API keys → different session_ids ✓
 
-LRU 上限超了之后最旧的 session 被驱逐，会打 INFO 日志。
+Once the LRU cap is exceeded the oldest session is evicted, with an INFO log emitted.
 
-### 5.4 观测累积
+### 5.4 Observing accumulation
 
-usage_log 每行新增 `cumulative` 块：
+usage_log adds a `cumulative` block per line:
 
 ```json
 {
@@ -281,24 +329,24 @@ usage_log 每行新增 `cumulative` 块：
 }
 ```
 
-`cache_creation` 单调递增即说明累积工作；`refpool_slugs` 数组在多轮中不应反复增长（同一文档不应被重复注册）。
+`cache_creation` increasing monotonically shows accumulation is working; the `refpool_slugs` array should not grow repeatedly across turns (the same document should not be registered again and again).
 
-### 5.5 关闭累积（每轮独立 Bridge）
+### 5.5 Disabling accumulation (a fresh Bridge per turn)
 
-不传 `session_state`、或代理重启，行为退化为每轮新建 state。这是 1.0 之前的默认行为，不会破坏 wire 字节。
+Not passing `session_state`, or restarting the proxy, makes the behavior fall back to newing a fresh state per turn. This was the default behavior before 1.0, and it does not break wire bytes.
 
 ---
 
-## 6. 故障排查
+## 6. Troubleshooting
 
-### 6.1 Proxy 返 500 / SDK 重试 10 次
+### 6.1 Proxy returns 500 / the SDK retries 10 times
 
-老版本 TELOS 抛异常 → 代理返 500。现已**默认降级到 passthrough**：
-- 代理日志首次失败：完整 traceback + `"falling back to passthrough"`
-- 后续失败：WARNING 单行
-- Wire 是 raw 透传（不带 cache_control 改写），但响应正常
+Older TELOS versions threw an exception → the proxy returned 500. It now **degrades to passthrough by default**:
+- proxy log on the first failure: full traceback + `"falling back to passthrough"`
+- subsequent failures: a single WARNING line
+- the wire is a raw passthrough (no `cache_control` rewrite), but the response is normal
 
-要在 dev 阶段让 TELOS 失败立刻显式爆，启 `--strict`：
+To make a TELOS failure blow up explicitly and immediately during the dev stage, start with `--strict`:
 
 ```bash
 telos proxy --strict
@@ -306,57 +354,57 @@ telos proxy --strict
 
 ### 6.2 `Band order violated`
 
-如果你看到：
+If you see:
 
 ```
 TelosInvariantError: Band order violated in messages[0]:
   block 'msg0/blk3/q' has band 'pin' after a higher-band block.
 ```
 
-说明 harness 输出违反了 §5。**这是 TELOS-side 的 bug，不是你的请求问题。**
+it means the harness output violates §5. **This is a TELOS-side bug, not a problem with your request.**
 
-最常见原因：harness 不知道某种 content block 类型，或多 part 拼接没按 band 排。当前 openclaw / hermes 都已用 `enforce_band_order` 兜底；如果你扩展了新 harness，记得在 message 末尾过一遍 `enforce_band_order(blocks)`。
+The most common cause: the harness doesn't know about some content-block type, or a multi-part concatenation didn't sort by band. Currently both openclaw and hermes use `enforce_band_order` as a fallback; if you extend a new harness, remember to run the message blocks through `enforce_band_order(blocks)` at the end.
 
-### 6.3 多轮 cache_creation 永远 0
+### 6.3 Multi-turn cache_creation always 0
 
-如果 usage_log 里 `cumulative.cache_creation` 永远是 0，可能：
+If `cumulative.cache_creation` in usage_log is always 0, it may be:
 
-| 症状 | 检查 |
+| Symptom | Check |
 |---|---|
-| 同一对话每次 session_id 都不同 | header 是不是漏了 `x-api-key`；`messages[0]` 是不是真不变 |
-| `real_requests_since_refresh` 也永远 1 | 没传 `session_state`（路径 A）或代理重启过（路径 B） |
-| `cache_read` 数字也是 0 | Anthropic 模型不支持 prompt caching、或 `cache_control` 没生效 |
-| `refpool_slugs` 是空 | 没有大文档触发 ref-pool（默认 2KB 阈值）|
+| session_id differs every time for the same conversation | whether the headers are missing `x-api-key`; whether `messages[0]` really stays unchanged |
+| `real_requests_since_refresh` is also always 1 | `session_state` wasn't passed (Path A) or the proxy was restarted (Path B) |
+| the `cache_read` number is also 0 | the Anthropic model doesn't support prompt caching, or `cache_control` didn't take effect |
+| `refpool_slugs` is empty | no large document triggered the ref-pool (default 2KB threshold) |
 
-### 6.4 Header 没透传
+### 6.4 Headers not passed through
 
-代理只白名单转发：`x-api-key` / `authorization` / `anthropic-version` / `anthropic-beta` / `anthropic-dangerous-direct-browser-access` / `user-agent`。
+The proxy forwards only an allowlist: `x-api-key` / `authorization` / `anthropic-version` / `anthropic-beta` / `anthropic-dangerous-direct-browser-access` / `user-agent`.
 
-其它 header 想透传，目前只能改 `_FORWARD_HEADER_WHITELIST`（[proxy/server.py](../proxy/server.py)）。SDK transport 路径不受此限制。
+To pass through other headers, currently the only way is to edit `_FORWARD_HEADER_WHITELIST` ([proxy/server.py](../proxy/server.py)). The SDK transport path is not subject to this restriction.
 
-### 6.5 流式响应（Claude Code 默认开）
+### 6.5 Streaming responses (on by default in Claude Code)
 
-- 路径 A（SDK transport）：当前 `messages.create(stream=True)` 不做 TELOS 处理，直接调底层 SDK。**避免在 SDK transport 路径用流式**。
-- 路径 B（proxy）：完整 SSE 支持，旁路解析 `message_start` / `message_delta` 抽 usage 字段。
+- Path A (SDK transport): currently `messages.create(stream=True)` does no TELOS processing and calls the underlying SDK directly. **Avoid streaming on the SDK transport path.**
+- Path B (proxy): full SSE support, side-channel parsing of `message_start` / `message_delta` to extract usage fields.
 
 ---
 
-## 7. 观测：两份日志的字段对照
+## 7. Observability: a field cross-reference for the two logs
 
-### 7.1 `usage_log`（代理 + SDK transport 共有）
+### 7.1 `usage_log` (shared by proxy + SDK transport)
 
 ```jsonc
 {
-  "session_id": "telos-...",          // 跨轮稳定
-  "call_index": 1,                     // 进程内递增
+  "session_id": "telos-...",          // stable across turns
+  "call_index": 1,                     // increments within the process
   "harness": "openclaw" | "hermes" | "telos" | "passthrough",
-  "n_slots": 3,                        // EmitPlan 的 slot 数
+  "n_slots": 3,                        // the number of slots in the EmitPlan
   "slots": ["BP-T", "BP-S", "BP-X"],
   "latency_s": 1.234,
   "streaming": true | false,
-  "status": 200,                       // upstream HTTP 状态
-  "raw_usage": {...},                  // 原 wire usage 字段
-  "normalized": {                      // 统一到 4 字段
+  "status": 200,                       // upstream HTTP status
+  "raw_usage": {...},                  // the original wire usage fields
+  "normalized": {                      // unified to 4 fields
     "raw_input": 50,
     "cache_read": 6500,
     "cache_write": 0,
@@ -370,29 +418,29 @@ TelosInvariantError: Band order violated in messages[0]:
 }
 ```
 
-### 7.2 `prompt_trace_log`（仅 SDK transport）
+### 7.2 `prompt_trace_log` (SDK transport only)
 
-包含 IR layout 快照、plan 细节、跨 call 的 prefix 重合度等诊断信息——粒度比 usage_log 重，用于 cache 行为深度分析。具体字段见 [scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py)。
+Contains IR layout snapshots, plan details, cross-call prefix overlap and other diagnostics — heavier-grained than usage_log, for deep analysis of cache behavior. For the exact fields see [scripts/telos_anthropic_transport.py](../scripts/telos_anthropic_transport.py).
 
-### 7.3 看日志的几个常用命令
+### 7.3 A few common commands for reading the logs
 
 ```bash
-# 查看每轮 cache_read 增量（验证多轮命中）
+# view the per-turn cache_read delta (verify multi-turn hits)
 jq -c '{call: .call_index, cache_read: .normalized.cache_read, cum: .cumulative.cache_creation}' \
     < ~/.telos/usage.jsonl
 
-# 查看 ref-pool 是否稳定（不应反复变化）
+# check whether the ref-pool is stable (it should not keep changing)
 jq -c '.cumulative.refpool_slugs' < ~/.telos/usage.jsonl | sort -u
 
-# 找所有降级到 passthrough 的请求
+# find all requests that degraded to passthrough
 jq -c 'select(.harness == "passthrough")' < ~/.telos/usage.jsonl
 ```
 
 ---
 
-## 8. 测试
+## 8. Testing
 
-完整测试矩阵：
+The full test matrix:
 
 ```bash
 for t in test_smoke test_harness_multiblock \
@@ -403,29 +451,29 @@ for t in test_smoke test_harness_multiblock \
 done
 ```
 
-每个套件单独可读，套件名映射看 [tests/](../tests/) 下的 docstring。
+Each suite is readable on its own; for the suite-name mapping see the docstrings under [tests/](../tests/).
 
 ---
 
-## 9. 已知局限
+## 9. Known limitations
 
-| 局限 | 解释 | 影响 |
+| Limitation | Explanation | Impact |
 |---|---|---|
-| SDK transport 不 wrap `.stream()` | Anthropic SDK 的流式 context manager 没接 | 用 SDK transport 时避免 `stream=True` |
-| 代理 header 白名单 | 只透传 6 个 header | 自定义 header 静默丢失 |
-| 代理 LRU 上限默认 10000 | 长跑超过后驱逐旧 session | 大并发 / 长跑场景按需调 `max_sessions=` |
-| 没有 OpenAI 反向代理 | 代理只听 `/v1/messages` | telos 类 OpenAI shape 只能走 SDK transport |
-| `R8 refresh` 仅当 engine 支持 prewarm | 闭源 API 都 `prewarmable=False` | refresh 永远 no-op；只有 vLLM/SGLang 走得到 |
-| 单进程代理 | 一个 aiohttp event loop | 想 scale 出去要前置一层 LB |
+| SDK transport doesn't wrap `.stream()` | the Anthropic SDK's streaming context manager isn't hooked | avoid `stream=True` when using the SDK transport |
+| proxy header allowlist | only 6 headers are passed through | custom headers are silently dropped |
+| proxy LRU cap defaults to 10000 | old sessions are evicted past the cap on long runs | tune `max_sessions=` as needed for high-concurrency / long-running scenarios |
+| no OpenAI reverse proxy | the proxy only listens on `/v1/messages` | telos-style OpenAI-shape can only go through the SDK transport |
+| `R8 refresh` only when the engine supports prewarm | closed-source APIs are all `prewarmable=False` | refresh is always a no-op; only vLLM/SGLang reach it |
+| single-process proxy | one aiohttp event loop | to scale out, front it with a load balancer |
 
 ---
 
-## 10. 扩展点
+## 10. Extension points
 
-| 想做的事 | 改哪 |
+| What you want to do | Where to change |
 |---|---|
-| 新增 agent installer（Cursor / Gemini CLI / Hermes 本地版） | 在 [init/](../init/) 添一个 `<name>.py`，实现 `AgentInstaller` |
-| 新增 harness | 在 [harness/](../harness/) 添一个 plugin，注册到 [registry.py](../registry.py) |
-| 新增 engine adapter | 在 [engine/](../engine/) 添一个 `EngineAdapter` 子类 |
-| 加 `/v1/chat/completions` 代理路径 | [proxy/server.py](../proxy/server.py) 加 route + 复用 `process_anthropic_request` 的 OpenAI 同款管线 |
-| 持久化 session state 到 Redis / disk | `BridgeSessionState` 是普通 dataclass，序列化成 JSON 即可；改 `_SessionRegistry` 走外部存储 |
+| Add a new agent installer (Cursor / Gemini CLI / a local Hermes) | add a `<name>.py` under [init/](../init/), implementing `AgentInstaller` |
+| Add a new harness | add a plugin under [harness/](../harness/), registered in [registry.py](../registry.py) |
+| Add a new engine adapter | add an `EngineAdapter` subclass under [engine/](../engine/) |
+| Add a `/v1/chat/completions` proxy path | add a route in [proxy/server.py](../proxy/server.py) + reuse the same OpenAI pipeline as `process_anthropic_request` |
+| Persist session state to Redis / disk | `BridgeSessionState` is a plain dataclass, just serialize it to JSON; change `_SessionRegistry` to use external storage |

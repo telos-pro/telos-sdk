@@ -1,26 +1,28 @@
-"""TelosOpenAITransport：把 OpenAI-shape 的 chat.completions client 串到 telos。
+"""TelosOpenAITransport: wires an OpenAI-shaped chat.completions client through telos.
 
-mini_swe_runner（telos vendored hermes）调用：
+mini_swe_runner (the telos-vendored hermes) calls:
 
     self.client.chat.completions.create(model=..., messages=[...], tools=[...])
 
-本 transport 实现同样接口，但内部走 ``telos`` harness → TELOS Bridge →
-canonicalize / band-reorder → 转回 chat-completions shape → 真正发到
-OpenRouter 的 ``/v1/chat/completions``。响应回来后用 ``deepseek``
-adapter 归一化 usage（DeepSeek V3+ 在 OpenRouter 的 usage 字段是
-``prompt_cache_hit_tokens / prompt_cache_miss_tokens``），写入 jsonl 日志。
+This transport implements the same interface, but internally routes through the
+``telos`` harness → TELOS Bridge → canonicalize / band-reorder → converts back to
+the chat-completions shape → actually sends it to OpenRouter's
+``/v1/chat/completions``. When the response comes back, usage is normalized with
+the ``deepseek`` adapter (DeepSeek V3+ on OpenRouter has usage fields
+``prompt_cache_hit_tokens / prompt_cache_miss_tokens``) and written to the jsonl log.
 
-设计要点：
+Design notes:
 
-- **不破坏 tool_calls 结构**：role=assistant 的 ``tool_calls`` 与 role=tool
-  的 ``tool_call_id`` 必须按 OpenAI 协议挂回 wire，不能像 DeepSeek
-  adapter 那样直接 inline 成文本——否则 agent 循环拿不到工具结果。
-- **应用 TELOS 政策的最小子集**：DROP 段（``<environment_info>`` /
-  ``Current time:`` 等）下沉到每个 user message 文本的尾部；tool 定义
-  做 canonicalize（key 排序）；其余按 §5 顺序。这是 cache-命中收益最
-  直接的两条规则。
-- **usage 同时记 raw 与 normalized**：raw 留作诊断，normalized 按
-  ``UsageReport`` schema 直接对齐 ``compute-metrics.py``。
+- **Do not break tool_calls structure**: role=assistant's ``tool_calls`` and
+  role=tool's ``tool_call_id`` must be re-attached to the wire per the OpenAI
+  protocol; they cannot be inlined directly into text the way the DeepSeek
+  adapter does — otherwise the agent loop cannot get the tool results.
+- **Apply a minimal subset of the TELOS policy**: the DROP band
+  (``<environment_info>`` / ``Current time:`` etc.) sinks to the tail of each
+  user message's text; tool definitions are canonicalized (key ordering); the
+  rest follows the §5 order. These are the two rules most directly tied to cache-hit gains.
+- **usage records both raw and normalized**: raw is kept for diagnostics, while
+  normalized aligns directly with ``compute-metrics.py`` per the ``UsageReport`` schema.
 """
 
 from __future__ import annotations
@@ -38,11 +40,11 @@ from telos.bridge import BridgeSessionState, _canonicalize_ir
 
 
 # ---------------------------------------------------------------------------
-# IR -> OpenAI ChatCompletions wire（保留 tool_calls / role=tool 结构）
+# IR -> OpenAI ChatCompletions wire (preserves tool_calls / role=tool structure)
 # ---------------------------------------------------------------------------
 
 def _ir_to_chat_completions(ir, *, model: str) -> dict[str, Any]:
-    # system: PIN 在前、DROP 在后
+    # system: PIN first, DROP last
     sys_blocks = sorted(ir.system, key=lambda b: 0 if b.band is not Band.DROP else 1)
     sys_text = "\n\n".join(str(b.payload) for b in sys_blocks)
 
@@ -54,7 +56,7 @@ def _ir_to_chat_completions(ir, *, model: str) -> dict[str, Any]:
         ordered = sorted(m.blocks, key=lambda b: 0 if b.band is not Band.DROP else 1)
 
         if m.role == "user":
-            # 把 tool_result 单独抽出来变成 role=tool；剩余文本拼成一条 user
+            # Pull tool_result out separately into role=tool; join the remaining text into one user message
             tr = [b for b in ordered if b.kind == "tool_result"]
             for trb in tr:
                 payload = trb.payload or {}
@@ -71,12 +73,21 @@ def _ir_to_chat_completions(ir, *, model: str) -> dict[str, Any]:
         elif m.role == "assistant":
             text_parts = [str(b.payload) for b in ordered if b.kind == "text"]
             tool_calls = [b.payload for b in ordered if b.kind == "tool_use"]
+            reasoning_parts = [str(b.payload) for b in ordered if b.kind == "reasoning"]
             entry: dict[str, Any] = {
                 "role": "assistant",
                 "content": "\n".join(text_parts) if text_parts else None,
             }
             if tool_calls:
                 entry["tool_calls"] = list(tool_calls)
+            if reasoning_parts:
+                # DeepSeek / OpenAI thinking-mode contract: the previous turn's
+                # ``reasoning_content`` must be echoed back verbatim on every
+                # subsequent request, otherwise the upstream rejects with HTTP
+                # 400 ("reasoning_content in the thinking mode must be passed
+                # back to the API"). Concatenation matches the harness's
+                # behavior for multi-text-block messages.
+                entry["reasoning_content"] = "\n".join(reasoning_parts)
             wire_messages.append(entry)
 
     wire: dict[str, Any] = {"model": model, "messages": wire_messages}
@@ -86,13 +97,13 @@ def _ir_to_chat_completions(ir, *, model: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Usage 归一化：兼容 DeepSeek-style 与 OpenAI-style 字段
+# Usage normalization: compatible with DeepSeek-style and OpenAI-style fields
 # ---------------------------------------------------------------------------
 
 def _normalize_usage(response_usage: Mapping[str, Any]) -> dict[str, int]:
     if not response_usage:
         return {"raw_input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
-    # DeepSeek（OpenRouter 透传）
+    # DeepSeek (passed through by OpenRouter)
     if "prompt_cache_hit_tokens" in response_usage or "prompt_cache_miss_tokens" in response_usage:
         hit = int(response_usage.get("prompt_cache_hit_tokens") or 0)
         miss = int(response_usage.get("prompt_cache_miss_tokens") or 0)
@@ -102,7 +113,7 @@ def _normalize_usage(response_usage: Mapping[str, Any]) -> dict[str, int]:
             "cache_write": 0,
             "output": int(response_usage.get("completion_tokens") or 0),
         }
-    # OpenAI / 其它：``cached_tokens`` 在 prompt_tokens 子段或顶层
+    # OpenAI / others: ``cached_tokens`` is in the prompt_tokens sub-field or at the top level
     pt = int(response_usage.get("prompt_tokens") or 0)
     cached = int(
         (response_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
@@ -235,19 +246,19 @@ def _wire_text(wire: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Transport（鸭子接口：mini_swe_runner 只用到 .chat.completions.create）
+# Transport (duck interface: mini_swe_runner only uses .chat.completions.create)
 # ---------------------------------------------------------------------------
 
 class TelosOpenAITransport:
-    """OpenAI-鸭子接口的 client，内部走 TELOS。
+    """A client with an OpenAI-shaped duck interface, internally routing through TELOS.
 
     Args:
-        base_url: 底层真实端点，例如 ``https://openrouter.ai/api/v1``。
-        api_key:  envvar 读不到时显式传入。
-        session_id: 同一个 session 内复用 Bridge stats。
-        usage_log: 每次调用追加一行 jsonl 的路径；``None`` 表示不写。
-        engine_name: engine adapter 名（``deepseek`` 用于 OpenRouter+DS）。
-        harness_name: 默认 ``telos``。
+        base_url: the underlying real endpoint, e.g. ``https://openrouter.ai/api/v1``.
+        api_key:  passed explicitly when not readable from an envvar.
+        session_id: reuse Bridge stats within the same session.
+        usage_log: path that appends one jsonl line per call; ``None`` means don't write.
+        engine_name: name of the engine adapter (``deepseek`` for OpenRouter+DS).
+        harness_name: defaults to ``telos``.
     """
 
     def __init__(
@@ -262,7 +273,7 @@ class TelosOpenAITransport:
         harness_name: str = "telos",
         session_state: BridgeSessionState | None = None,
     ):
-        from openai import OpenAI  # 延迟导入
+        from openai import OpenAI  # deferred import
 
         self.base_url = base_url
         self._inner = OpenAI(
@@ -278,12 +289,12 @@ class TelosOpenAITransport:
         self._prev_wire_text: str = ""
         self._prev_regions: dict[str, Any] | None = None
 
-        # Bridge 跨 turn 状态：transport 一个实例 = 一个 session。
+        # Bridge cross-turn state: one transport instance = one session.
         self._session_state = (
             session_state if session_state is not None else BridgeSessionState()
         )
 
-        # 鸭子接口
+        # duck interface
         self.chat = _ChatNS(self)
 
     @property
@@ -291,12 +302,12 @@ class TelosOpenAITransport:
         return self._session_state
 
     # ------------------------------------------------------------------
-    # 内部：执行一次 create
+    # Internal: execute one create
     # ------------------------------------------------------------------
     def _do_create(self, kwargs: dict[str, Any]):
         self._call_count += 1
         model = kwargs.get("model", "")
-        # ---- 0. caller 原始输入快照 ----
+        # ---- 0. snapshot of the caller's raw input ----
         in_msgs = list(kwargs.get("messages") or [])
         in_tools = list(kwargs.get("tools") or [])
         input_summary = _summarize_messages(in_msgs)
@@ -311,18 +322,19 @@ class TelosOpenAITransport:
         )
         ir_in_summary = _summarize_ir(ir)
 
-        # 2. Bridge：传 session_state 让 R8 计数器 / cache_creation 跨 turn 累积
+        # 2. Bridge: pass session_state so the R8 counters / cache_creation accumulate across turns
         bridge = Bridge(ir, self._engine, session_state=self._session_state)
         plan = bridge.mark()
         plan_summary = _summarize_plan(plan)
 
-        # 3. 规范化（tools 排序、payload key 排序）—— 不能直接用 ir 的 snapshot，
-        # 必须跑过 _canonicalize_ir 才能保证多轮 prefix 字节稳定。这是 OpenAI
-        # 路径的关键修复：以前直接喂 ir2 给 wire builder，没做这一步。
+        # 3. Canonicalize (tools ordering, payload key ordering) — cannot use the
+        # ir snapshot directly; it must run through _canonicalize_ir to guarantee
+        # the multi-round prefix bytes are stable. This is the key fix on the
+        # OpenAI path: previously ir2 was fed straight to the wire builder, skipping this step.
         ir2 = _canonicalize_ir(bridge.snapshot_ir())
         ir_out_summary = _summarize_ir(ir2)
         regions = _flatten_regions(ir_out_summary)
-        # 增长过程：相对上一次调用的 chars 变动（按 segment & band）
+        # Growth process: char changes relative to the previous call (by segment & band)
         if self._prev_regions is None:
             region_deltas: dict[str, Any] = {"first_call": True}
         else:
@@ -341,7 +353,7 @@ class TelosOpenAITransport:
                 "total": regions["total"] - prev["total"],
             }
         wire = _ir_to_chat_completions(ir2, model=model)
-        # 4. 透传一些非 telos 关心的字段
+        # 4. pass through some fields that telos does not care about
         for k in ("temperature", "top_p", "max_tokens", "stream",
                   "timeout", "tool_choice", "response_format"):
             if k in kwargs and kwargs[k] is not None:
@@ -349,30 +361,32 @@ class TelosOpenAITransport:
 
         wire_summary = _summarize_messages(wire.get("messages", []))
         wire_summary["n_tools"] = len(wire.get("tools") or [])
-        # 跨调用前缀稳定性：cache 命中的最强先行指标
+        # Cross-call prefix stability: the strongest leading indicator of cache hits
         wire_text = _wire_text(wire)
         prefix_match_chars = len(commonprefix([self._prev_wire_text, wire_text])) \
             if self._prev_wire_text else 0
 
-        # 真请求即将发出 —— 等同 bridge.emit_with_plan 末尾的 +1，因为这条
-        # OpenAI 路径走自定义 _ir_to_chat_completions 而不是 engine.emit。
+        # The real request is about to be sent — equivalent to the +1 at the end
+        # of bridge.emit_with_plan, since this OpenAI path uses the custom
+        # _ir_to_chat_completions rather than engine.emit.
         self._session_state.stats.real_requests_since_refresh += 1
 
-        # 5. 真发请求
+        # 5. actually send the request
         t0 = time.time()
         response = self._inner.chat.completions.create(**wire)
         dt = time.time() - t0
 
-        # 6. usage 归一化 + 跨 turn 累积
+        # 6. usage normalization + cross-turn accumulation
         usage_obj = getattr(response, "usage", None)
         usage_dict = usage_obj.model_dump() if usage_obj is not None else {}
         normalized = _normalize_usage(usage_dict)
         inp_total = normalized["raw_input"] + normalized["cache_read"]
         cache_share = (normalized["cache_read"] / inp_total) if inp_total else 0.0
 
-        # bridge.absorb_usage：通过 engine.parse_usage 抽出 cache_write 并累加
-        # 进 session_state。DeepSeek/OpenAI 的 cache_write 通常为 0，但调用
-        # 形式与 anthropic transport 对齐，保留 R8 可见性。
+        # bridge.absorb_usage: extracts cache_write via engine.parse_usage and
+        # accumulates it into session_state. DeepSeek/OpenAI's cache_write is
+        # usually 0, but the call form is aligned with the anthropic transport,
+        # keeping R8 visibility.
         try:
             bridge.absorb_usage({"usage": usage_dict})
         except Exception:  # noqa: BLE001

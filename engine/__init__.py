@@ -1,1 +1,1 @@
-"""Engine adapter 包入口。"""
+"""Engine adapter package entry point."""

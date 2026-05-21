@@ -1,204 +1,204 @@
-# TELOS Playbook — 图文版用户手册
+# TELOS Playbook — Illustrated User Manual
 
 <div align="center">
 
 <img src="../branding/logo.svg" alt="TELOS — Portable Agent Context" width="380"/>
 
-**让 KV cache 真的命中你的 agent，让钱真的省下来。**
+**Make the KV cache truly hit your agent, and make the savings real.**
 
-<sub>📖 想要 CLI 字典 → [User-guide.md](User-guide.md) ｜ 想看代码架构 → [ARCHITECTURE.md](ARCHITECTURE.md) ｜ 想看协议规范 → [TELOS Protocol](2026-05-06-telos-protocol.md)</sub>
+<sub>📖 Want the CLI reference → [User-guide.md](User-guide.md) ｜ Want the code architecture → [ARCHITECTURE.md](ARCHITECTURE.md) ｜ Want the protocol spec → [TELOS Protocol](2026-05-06-telos-protocol.md)</sub>
 
-<sub>最后更新：2026-05-18</sub>
+<sub>Last updated: 2026-05-18</sub>
 
 </div>
 
 ---
 
-## 目录
+## Table of Contents
 
-1. [3 分钟读懂 TELOS](#1-3-分钟读懂-telos)
-2. [心智模型 · 一座石碑](#2-心智模型--一座石碑)
-3. [三色带：PIN / FOLD / DROP](#3-三色带pin--fold--drop)
-4. [三层架构总览](#4-三层架构总览)
-5. [两条正交优化线（TELOS + RTK）](#5-两条正交优化线telos--rtk)
-6. [安装](#6-安装)
-7. [选接入路径](#7-选接入路径)
-8. [路径 B · HTTP 反向代理（推荐）](#8-路径-b--http-反向代理推荐)
-9. [路径 A · SDK Transport](#9-路径-a--sdk-transport)
-10. [多轮状态累积](#10-多轮状态累积)
-11. [三个看板：实时看健康，事后算账](#11-三个看板实时看健康事后算账)
-12. [对比实验：replay vs 双 session](#12-对比实验replay-vs-双-session)
-13. [最佳实践（DO）与反模式（DON'T）](#13-最佳实践do与反模式dont)
-14. [故障排查](#14-故障排查)
-15. [推荐上手顺序](#15-推荐上手顺序)
+1. [Understand TELOS in 3 minutes](#1-understand-telos-in-3-minutes)
+2. [Mental model · a stone stele](#2-mental-model--a-stone-stele)
+3. [Three color bands: PIN / FOLD / DROP](#3-three-color-bands-pin--fold--drop)
+4. [Three-layer architecture overview](#4-three-layer-architecture-overview)
+5. [Two orthogonal optimization lines (TELOS + RTK)](#5-two-orthogonal-optimization-lines-telos--rtk)
+6. [Installation](#6-installation)
+7. [Choose an integration path](#7-choose-an-integration-path)
+8. [Path B · HTTP reverse proxy (recommended)](#8-path-b--http-reverse-proxy-recommended)
+9. [Path A · SDK Transport](#9-path-a--sdk-transport)
+10. [Multi-turn state accumulation](#10-multi-turn-state-accumulation)
+11. [Three dashboards: watch health live, settle accounts after](#11-three-dashboards-watch-health-live-settle-accounts-after)
+12. [Comparison experiments: replay vs dual session](#12-comparison-experiments-replay-vs-dual-session)
+13. [Best practices (DO) and anti-patterns (DON'T)](#13-best-practices-do-and-anti-patterns-dont)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Recommended onboarding order](#15-recommended-onboarding-order)
 
 ---
 
-## 1. 3 分钟读懂 TELOS
+## 1. Understand TELOS in 3 minutes
 
-### 1.1 钱花在哪了
+### 1.1 Where the money goes
 
-一个跑 20 轮的编码 agent，每轮请求都会把 **system prompt + 工具定义 + 整段对话历史** 全部重新发给模型。第 20 轮的请求里，**95% 内容和第 19 轮一字不差**。
+A coding agent that runs 20 turns re-sends the **system prompt + tool definitions + the entire conversation history** to the model on every request. In the 20th request, **95% of the content is byte-for-byte identical to the 19th turn**.
 
 ```
-轮次:    1     2     3     4    ...    19    20
+turn:    1     2     3     4    ...    19    20
         ┌─┐  ┌──┐  ┌───┐ ┌────┐       ┌─────┐┌──────┐
 input:  │ │  │  │  │   │ │    │  ...  │     ││      │
         └─┘  └──┘  └───┘ └────┘       └─────┘└──────┘
-       新   重     重    重           重     重重重重(95%)
+       new  reuse reuse reuse        reuse  reuse reuse reuse(95%)
 ```
 
-LLM 推理引擎的 **KV cache** 本可以把这些重复前缀的计算结果留住，命中时 input token 只按 ~10% 计价（Anthropic）。但 cache 命中有一个苛刻前提 ——
+The LLM inference engine's **KV cache** could keep the computed results of these repeated prefixes, and on a hit the input tokens are billed at only ~10% (Anthropic). But a cache hit has one demanding precondition ——
 
-> **前缀必须逐字节稳定。** 而 agent 的请求默认做不到。
+> **The prefix must be byte-stable.** And by default an agent's requests can't deliver that.
 
-任意一个抖动（JSON key 乱序、工具数组重排、时间戳混进前缀、某个 `tool_result` 被改写），前缀 hash 就变，cache 整段失效，**这一轮按全价计费**。
+Any jitter (JSON keys reordered, tool array reshuffled, a timestamp mixed into the prefix, some `tool_result` rewritten) changes the prefix hash, the entire cache is invalidated, and **that turn is billed at full price**.
 
-### 1.2 TELOS 做的唯一一件事
+### 1.2 The one thing TELOS does
 
-> **把真正稳定的部分稳住，让它持续命中 KV cache。**
+> **Hold the truly stable parts stable, so they keep hitting the KV cache.**
 
-TELOS 不是一个"更聪明的 prompt 框架"。它只做一件事 —— 识别请求里哪些是石碑底座（一刻一辈子的稳定前缀），哪些是可擦改的题字（每轮新增），然后保证底座的字节绝不因为可避免的原因抖动。
+TELOS is not a "smarter prompt framework." It does exactly one thing —— identify which parts of a request are the stele base (a stable prefix that lasts a lifetime) and which are the erasable inscription (added each turn), then guarantee the base's bytes never jitter for avoidable reasons.
 
-### 1.3 名字的来源
+### 1.3 Where the name comes from
 
-**TELOS** = **S**table prefix · **T**iered bands · **E**phemeral tail · **L**ayered adapters · **A**nchored marks。
+**TELOS** = **S**table prefix · **T**iered bands · **E**phemeral tail · **L**ayered adapters · **A**nchored marks.
 
-取古希腊石碑（telos）之意：底座的铭文刻一次用一辈子；上方按时间累加的题字随时可擦改，但绝不动到底座。KV cache 的全部价值就是把底座留住。
+It takes the meaning of the ancient Greek stone stele (telos): the inscription carved into the base is carved once and used for a lifetime; the inscriptions added on top over time can be erased anytime, but the base is never touched. The entire value of the KV cache is in keeping the base intact.
 
 ---
 
-## 2. 心智模型 · 一座石碑
+## 2. Mental model · a stone stele
 
 ```
               ╔════════════════════════════╗
-              ║   Drop 带（每轮即焚）       ║   ← timestamp / cwd / git
+              ║   Drop band (burned each turn) ║   ← timestamp / cwd / git
               ║   "2026-05-18 14:32 …"      ║      / <system-reminder>
               ╠════════════════════════════╣
-              ║   Fold 带（可折叠题字）     ║   ← assistant 历史回答
-              ║   "你给的代码我看了 …"      ║      tool_result、大文档
+              ║   Fold band (collapsible inscription) ║   ← assistant history replies
+              ║   "I've looked at the code you gave …" ║      tool_result, large docs
               ║                            ║
               ╠════════════════════════════╣
               ║                            ║
-              ║   Pin 带（底座铭文）        ║   ← 工具定义 / system prompt
-              ║   "You are an engineer …"   ║      / 用户当下提问
+              ║   Pin band (base inscription) ║   ← tool defs / system prompt
+              ║   "You are an engineer …"   ║      / user's current question
               ║   ╭──────────────╮         ║
               ║   │ ◆ TOOLS ◆    │         ║
               ║   │ ◆ SYSTEM ◆   │         ║
               ║   │ ◆ REF-POOL ◆ │         ║
               ║   ╰──────────────╯         ║
               ╚════════════════════════════╝
-                       一座石碑 / 一段 prompt
+                   one stone stele / one prompt
 ```
 
-- **底座（PIN）** 刻得最深、字节最稳，KV cache 主要命中的就是它。
-- **中段（FOLD）** 是历史题字，可缓存；但 compact / refresh 时可以被擦改成更短的摘要。
-- **顶部（DROP）** 是每轮都变的字（时间戳之类），永远不进 cache hash —— 把它赶到末尾，前面的底座+题字才稳得住。
+- **The base (PIN)** is carved the deepest and is the most byte-stable; it is what the KV cache mainly hits.
+- **The middle (FOLD)** is the historical inscription, cacheable; but during compact / refresh it can be erased and rewritten into a shorter summary.
+- **The top (DROP)** is the text that changes every turn (timestamps and the like), and never enters the cache hash —— drive it to the tail so the base + inscription in front stay stable.
 
-**唯一硬规则**：每段内容里，三色带必须物理排成 `PIN → FOLD → DROP`。
+**The one hard rule**: within every piece of content, the three color bands must be physically arranged as `PIN → FOLD → DROP`.
 
 ---
 
-## 3. 三色带：PIN / FOLD / DROP
+## 3. Three color bands: PIN / FOLD / DROP
 
 ```mermaid
 flowchart LR
-  R[原始请求] --> H[harness 分带]
-  H --> P["🟦 PIN<br/>tools、system、当下提问"]
-  H --> F["🟨 FOLD<br/>历史 assistant、tool_result、大文档"]
-  H --> D["🟥 DROP<br/>timestamp、cwd、envelope"]
-  P --> O[pin* → fold* → drop*<br/>物理排列]
+  R[raw request] --> H[harness banding]
+  H --> P["🟦 PIN<br/>tools, system, current question"]
+  H --> F["🟨 FOLD<br/>history assistant, tool_result, large docs"]
+  H --> D["🟥 DROP<br/>timestamp, cwd, envelope"]
+  P --> O[pin* → fold* → drop*<br/>physical layout]
   F --> O
   D --> O
-  O --> E[Engine 出 wire 请求]
+  O --> E[Engine emits the wire request]
 ```
 
-| 带 | 进 cache hash？ | 典型内容 | 寿命 |
+| Band | Enters cache hash? | Typical content | Lifetime |
 |---|:---:|---|---|
-| 🟦 **PIN** | ✓（最重要） | 工具定义 / system prompt / 用户当下提问 | 一刻一辈子 |
-| 🟨 **FOLD** | ✓（可丢） | assistant 历史 / tool_result / >2KB 大文档（进 ref-pool） | 可被 compact 替换成摘要 |
-| 🟥 **DROP** | ✗ | 时间戳 / cwd / git status / `<system-reminder>` envelope | 每轮新生成 |
+| 🟦 **PIN** | ✓ (most important) | tool definitions / system prompt / user's current question | a lifetime once carved |
+| 🟨 **FOLD** | ✓ (droppable) | assistant history / tool_result / large docs >2KB (enter the ref-pool) | can be replaced by a compact summary |
+| 🟥 **DROP** | ✗ | timestamp / cwd / git status / `<system-reminder>` envelope | regenerated each turn |
 
-### 3.1 大文档进 "ref-pool"（指针表）
+### 3.1 Large documents enter the "ref-pool" (pointer table)
 
-System prompt 里塞一份 50KB 的项目文档？TELOS 会自动把它注册到 **ref-pool**，原地留一个 PIN stub 指针。多轮里这个 slug 冻结、payload 哪怕变了 slug 也不变 —— 前缀 hash 因此保持稳定。
+Stuffed a 50KB project document into the system prompt? TELOS automatically registers it into the **ref-pool**, leaving a PIN stub pointer in place. Across turns this slug is frozen, and even if the payload changes the slug does not —— so the prefix hash stays stable.
 
 ```
-原始 system prompt:
-    "你是一个工程师。
-     <file path='spec.md'>...50KB 内容...</file>"
+original system prompt:
+    "You are an engineer.
+     <file path='spec.md'>...50KB of content...</file>"
 
-  ↓  harness 自动拆分
+  ↓  harness splits it automatically
 
-PIN 段:  "你是一个工程师。[ref:spec-md]"
-        （只有这条进 cache 前缀 hash）
+PIN segment:  "You are an engineer.[ref:spec-md]"
+              (only this line enters the cache prefix hash)
 ref-pool:
-        spec-md → 50KB 内容（FOLD 带，可压缩）
+              spec-md → 50KB of content (FOLD band, compressible)
 ```
 
 ---
 
-## 4. 三层架构总览
+## 4. Three-layer architecture overview
 
 ```mermaid
 flowchart TB
-  Agent["🧑‍💻 上游 Agent<br/>Claude Code / OpenClaw / Hermes / 自研"]
-  Agent -- "原始请求<br/>Anthropic /v1/messages 或<br/>OpenAI ChatCompletions" --> H
+  Agent["🧑‍💻 upstream Agent<br/>Claude Code / OpenClaw / Hermes / in-house"]
+  Agent -- "raw request<br/>Anthropic /v1/messages or<br/>OpenAI ChatCompletions" --> H
 
-  subgraph L1["第 1 层 · HARNESS（无状态纯函数）"]
-    H["harness.parse(raw) → TelosIR<br/>envelope 切分 / 大文档进 ref-pool / 三带标记"]
+  subgraph L1["Layer 1 · HARNESS (stateless pure function)"]
+    H["harness.parse(raw) → TelosIR<br/>envelope splitting / large docs into ref-pool / three-band marking"]
   end
 
   H -- "TelosIR" --> B
 
-  subgraph L2["第 2 层 · BRIDGE（每 session 一个实例，有状态）"]
-    B["5 原语：place / pin / mark / fold / refresh<br/>canonicalize（key 排序 / 工具排序）<br/>§5 不变量校验<br/>持有 BridgeSessionState（ref-pool / R8 计数）"]
+  subgraph L2["Layer 2 · BRIDGE (one instance per session, stateful)"]
+    B["5 primitives: place / pin / mark / fold / refresh<br/>canonicalize (key sorting / tool sorting)<br/>§5 invariant checks<br/>holds BridgeSessionState (ref-pool / R8 counts)"]
   end
 
   B -- "TelosIR + EmitPlan" --> E
 
-  subgraph L3["第 3 层 · ENGINE（无状态，capability-aware）"]
-    E["plan_marks(ir) → EmitPlan<br/>emit(ir, plan) → wire 请求<br/>parse_usage(response) → UsageReport"]
+  subgraph L3["Layer 3 · ENGINE (stateless, capability-aware)"]
+    E["plan_marks(ir) → EmitPlan<br/>emit(ir, plan) → wire request<br/>parse_usage(response) → UsageReport"]
   end
 
-  E -- "引擎原生 wire" --> LLM["☁️ 真实 LLM<br/>Anthropic / OpenAI / DeepSeek / vLLM / SGLang"]
+  E -- "engine-native wire" --> LLM["☁️ real LLM<br/>Anthropic / OpenAI / DeepSeek / vLLM / SGLang"]
 ```
 
-**核心不变量**：跨请求状态只能存在于第 2 层。Harness 和 Engine 都是纯函数 / 无状态对象，相同输入永远输出相同结果。这让 wire 字节对哪条引擎、哪个序列化器都是确定的。
+**Core invariant**: cross-request state can only live in Layer 2. Both the Harness and the Engine are pure functions / stateless objects, and identical input always yields identical output. This makes the wire bytes deterministic regardless of which engine or which serializer is used.
 
 ---
 
-## 5. 两条正交优化线（TELOS + RTK）
+## 5. Two orthogonal optimization lines (TELOS + RTK)
 
-TELOS 稳的是**请求前缀**。但 agent 每轮还会往对话尾巴追加大段工具输出（bash / pytest / docker 日志，动辄几千 token）。这部分 TELOS 管不到。
+What TELOS stabilizes is the **request prefix**. But every turn the agent also appends large blocks of tool output (bash / pytest / docker logs, easily several thousand tokens) to the tail of the conversation. TELOS cannot control that part.
 
-所以有第二条线 —— **RTK 输出过滤**（吸收 [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 的思路）：在请求进 TELOS 之前，把 `tool_result` 里的大段重复输出压掉。
+So there is a second line —— **RTK output filtering** (absorbing the ideas of [rtk-ai/rtk](https://github.com/rtk-ai/rtk)): before the request enters TELOS, compress away the large repeated output inside `tool_result`.
 
 ```mermaid
 flowchart LR
-  Raw["原始请求<br/>+ 巨大 tool_result"] --> RTK{"RTK<br/>过滤层"}
-  RTK -- "压缩后 tool_result" --> TELOS{"TELOS<br/>前缀稳定"}
-  TELOS -- "cache 友好的 wire" --> LLM[LLM]
+  Raw["raw request<br/>+ huge tool_result"] --> RTK{"RTK<br/>filter layer"}
+  RTK -- "compressed tool_result" --> TELOS{"TELOS<br/>prefix stability"}
+  TELOS -- "cache-friendly wire" --> LLM[LLM]
 
   style RTK fill:#d8851f,stroke:#333,color:#fff
   style TELOS fill:#2C5F66,stroke:#333,color:#fff
 ```
 
-两条线互相独立，由一个四态开关控制：
+The two lines are independent of each other, controlled by a four-state switch:
 
-| 开关 | TELOS 前缀缓存 | RTK 工具过滤 | 何时用 |
+| Switch | TELOS prefix caching | RTK tool filtering | When to use |
 |---|:---:|:---:|---|
-| `none` | ✗ | ✗ | baseline 对照组 |
-| `telos` | ✓ | ✗ | **生产默认推荐**（不改工具结果字节） |
-| `rtk` | ✗ | ✓ | 工具输出特别巨大、对前缀不敏感 |
-| `both` | ✓ | ✓ | 验证过工具输出可压后开（最大节省） |
+| `none` | ✗ | ✗ | baseline control group |
+| `telos` | ✓ | ✗ | **recommended production default** (does not alter tool-result bytes) |
+| `rtk` | ✗ | ✓ | tool output is especially huge, prefix is not sensitive |
+| `both` | ✓ | ✓ | enable once tool output is verified compressible (maximum savings) |
 
-> 不开 RTK：前缀 cache 命中再高，每轮的工具输出仍线性撑大对话。
-> 不开 TELOS：工具输出缩了，但稳定前缀仍每轮重算。**两条线合起来收益最大。**
+> Without RTK: no matter how high the prefix cache hit rate, each turn's tool output still grows the conversation linearly.
+> Without TELOS: tool output shrinks, but the stable prefix is still recomputed every turn. **Combining the two lines yields the largest gain.**
 
 ---
 
-## 6. 安装
+## 6. Installation
 
 ```bash
 cd /path/to/telos-sdk
@@ -207,69 +207,69 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-验证：
+Verify:
 
 ```bash
 python -c "import telos; print(telos.__file__)"   # .../telos-sdk/__init__.py
 telos --help                                       # proxy / init / dashboard / replay
 ```
 
-依赖：Python ≥ 3.10 / `anthropic ≥ 0.49` / `openai ≥ 1.72` / `aiohttp ≥ 3.10`。
+Dependencies: Python ≥ 3.10 / `anthropic ≥ 0.49` / `openai ≥ 1.72` / `aiohttp ≥ 3.10`.
 
-> RTK 过滤想用真 rtk 引擎需另装 `rtk` 二进制；没装也能用，自动退回纯 Python fallback 过滤器，开关仍生效。
+> To use the real rtk engine for RTK filtering you need to separately install the `rtk` binary; without it RTK still works, automatically falling back to the pure-Python fallback filter, and the switch still takes effect.
 
 ---
 
-## 7. 选接入路径
+## 7. Choose an integration path
 
 ```mermaid
 flowchart TD
-  Q{"你能改 agent 的<br/>源码 / import 站点吗？"}
-  Q -- "不能<br/>（npm 全局装的 Claude Code、<br/>闭源二进制、共享主机多 agent）" --> B["✅ 路径 B · HTTP 反向代理<br/>零侵入，推荐"]
-  Q -- "能<br/>（自研 Python agent、<br/>vendored 的 mini_swe_runner）" --> A["路径 A · SDK Transport<br/>完整 typed 响应，与进程同生命周期"]
+  Q{"Can you modify the agent's<br/>source / import sites?"}
+  Q -- "No<br/>(npm-global-installed Claude Code,<br/>closed-source binary, multi-agent shared host)" --> B["✅ Path B · HTTP reverse proxy<br/>zero-intrusion, recommended"]
+  Q -- "Yes<br/>(in-house Python agent,<br/>vendored mini_swe_runner)" --> A["Path A · SDK Transport<br/>full typed response, same lifecycle as the process"]
 
   style B fill:#2C5F66,stroke:#333,color:#fff
   style A fill:#4FB3BF,stroke:#333,color:#000
 ```
 
-两条路径**功能等价**（同一 TELOS 管线、同一状态累积），区别只在进程边界 / 错误处理 / 流式。**没有特殊理由就选路径 B。**
+The two paths are **functionally equivalent** (same TELOS pipeline, same state accumulation); they differ only in process boundary / error handling / streaming. **With no special reason, choose Path B.**
 
-| | 路径 A · SDK Transport | 路径 B · HTTP 代理 |
+| | Path A · SDK Transport | Path B · HTTP proxy |
 |---|---|---|
-| 接入 | `import` 改一行 | `telos proxy` + `ANTHROPIC_BASE_URL` |
-| 流式 | ⚠️ 不 wrap，透传 | ✅ 完整 SSE |
-| 多 agent 共享 | ✗ 每个 agent 单独改 | ✅ 一份代理共享 |
-| `npm update` 影响 | 视语言而定 | 不丢配置 |
-| 自定义 header | 全部透传 | 只白名单 6 个 |
-| typed response | ✅ 完整 | ✅（wire 透传） |
+| Integration | change one `import` line | `telos proxy` + `ANTHROPIC_BASE_URL` |
+| Streaming | ⚠️ not wrapped, passed through | ✅ full SSE |
+| Shared by multiple agents | ✗ each agent modified separately | ✅ one proxy shared |
+| `npm update` impact | depends on the language | config not lost |
+| Custom headers | all passed through | only 6 whitelisted |
+| typed response | ✅ full | ✅ (wire passthrough) |
 
 ---
 
-## 8. 路径 B · HTTP 反向代理（推荐）
+## 8. Path B · HTTP reverse proxy (recommended)
 
-### 8.1 Claude Code（最常见，三步）
+### 8.1 Claude Code (most common, three steps)
 
 ```bash
-# ① 起代理（默认 mode=telos，默认录会话到 ~/.telos/corpus）
-telos proxy --usage-log ~/.telos/usage.jsonl
+# ① Start the proxy (default mode=telos, default records sessions to ~/.telos/corpus)
+telos gateway start --usage-log ~/.telos/usage.jsonl
 
-# ② 一行接入 Claude Code（patch ~/.claude/settings.json 的 env 字段）
+# ② One-line integration with Claude Code (patches the env field of ~/.claude/settings.json)
 telos init --agent claude-code
 
-# ③ 正常用 claude —— 流量自动经过代理
+# ③ Use claude normally —— traffic automatically goes through the proxy
 claude
 ```
 
-`telos init` **不改 npm 包**、**不改 PATH**，`npm update` 也不会丢配置。
+`telos init` **does not modify the npm package**, **does not modify PATH**, and `npm update` will not lose the config.
 
-撤销 / 查状态：
+Undo / check status:
 
 ```bash
-telos init --agent claude-code --uninstall   # 精确还原 install 前状态
+telos init --agent claude-code --uninstall   # precisely restore the pre-install state
 telos init --agent claude-code --status
 ```
 
-### 8.2 代理工作流（细节）
+### 8.2 Proxy workflow (details)
 
 ```mermaid
 sequenceDiagram
@@ -279,99 +279,99 @@ sequenceDiagram
   participant Anthropic as api.anthropic.com
 
   Claude->>Proxy: POST /v1/messages<br/>{system, tools, messages}
-  Note over Proxy: 派生 session_id<br/>（x-telos-session / metadata.user_id<br/>/ blake2b 派生）
-  Proxy->>Bridge: 取 / 创建 BridgeSessionState
+  Note over Proxy: derive session_id<br/>(x-telos-session / metadata.user_id<br/>/ blake2b derivation)
+  Proxy->>Bridge: get / create BridgeSessionState
   Bridge->>Bridge: harness.parse → TelosIR
-  Bridge->>Bridge: canonicalize + §5 校验
+  Bridge->>Bridge: canonicalize + §5 checks
   Bridge->>Bridge: engine.emit(ir, plan)
-  Bridge->>Anthropic: wire（带 cache_control 锚）
-  Anthropic-->>Bridge: response（usage 字段）
-  Bridge->>Bridge: absorb_usage<br/>累加 cumulative
-  Bridge-->>Proxy: 透传 response
-  Proxy-->>Claude: 透传给上游
-  Note over Proxy: 写一行到 usage_log
+  Bridge->>Anthropic: wire (with cache_control anchors)
+  Anthropic-->>Bridge: response (usage fields)
+  Bridge->>Bridge: absorb_usage<br/>accumulate cumulative
+  Bridge-->>Proxy: pass through response
+  Proxy-->>Claude: pass through to upstream
+  Note over Proxy: write one line to usage_log
 ```
 
-### 8.3 其它 Anthropic-SDK 客户端
+### 8.3 Other Anthropic-SDK clients
 
 ```bash
-telos init --agent generic    # 打印 export 指令，自己加到 shell rc / Dockerfile / k8s env
+telos init --agent generic    # prints export instructions, add them yourself to shell rc / Dockerfile / k8s env
 # export ANTHROPIC_BASE_URL=http://127.0.0.1:7171
 ```
 
-适用于 Cursor、Gemini CLI、自研 Node/Python agent —— 任何尊重 `ANTHROPIC_BASE_URL` 的客户端。
+Applies to Cursor, Gemini CLI, in-house Node/Python agents —— any client that respects `ANTHROPIC_BASE_URL`.
 
 ---
 
-## 9. 路径 A · SDK Transport
+## 9. Path A · SDK Transport
 
-把 `anthropic.Anthropic()` 换成 `TelosAnthropicTransport`，`.messages.create()` 调用一字不改：
+Replace `anthropic.Anthropic()` with `TelosAnthropicTransport`; the `.messages.create()` call needs no changes:
 
 ```python
-# 改前
+# before
 import anthropic
 client = anthropic.Anthropic()
 
-# 改后
+# after
 from telos.scripts.telos_anthropic_transport import TelosAnthropicTransport
 client = TelosAnthropicTransport(
-    session_id="my-agent-session",        # 同一对话用同一 id
+    session_id="my-agent-session",        # use the same id for the same conversation
     usage_log="logs/usage.jsonl",
-    prompt_trace_log="logs/trace.jsonl",  # 可选：诊断 IR layout
+    prompt_trace_log="logs/trace.jsonl",  # optional: diagnose IR layout
 )
 
-# 调用完全不变
+# the call is completely unchanged
 response = client.messages.create(
     model="claude-opus-4-7", max_tokens=8192,
     system=[...], tools=[...], messages=[...],
 )
 ```
 
-OpenAI 形状的 agent 用 `TelosOpenAITransport`（`.chat.completions.create`）：
+OpenAI-shaped agents use `TelosOpenAITransport` (`.chat.completions.create`):
 
 ```python
 from telos.scripts.telos_transport import TelosOpenAITransport
 client = TelosOpenAITransport(
     base_url="https://openrouter.ai/api/v1",
     session_id="telos-session",
-    engine_name="deepseek",   # 或 "openai"
+    engine_name="deepseek",   # or "openai"
     harness_name="telos",
 )
 ```
 
-详细构造参数表：[User-guide.md §3](User-guide.md#3-路径-asdk-transport代码内接入)。
+Detailed constructor parameter table: [User-guide.md §3](User-guide.md#3-path-a-sdk-transport-in-code-integration).
 
-> ⚠️ **流式注意**：SDK transport 当前 **不 wrap** `messages.create(stream=True)`，会直接透传到底层 SDK 跳过 TELOS。要流式就走路径 B（代理完整 SSE 支持）。
+> ⚠️ **Streaming note**: the SDK transport currently **does not wrap** `messages.create(stream=True)`; it passes straight through to the underlying SDK, skipping TELOS. For streaming, use Path B (the proxy has full SSE support).
 
 ---
 
-## 10. 多轮状态累积
+## 10. Multi-turn state accumulation
 
-cache 累积的关键 = **同一对话用同一 `session_id`**。每轮命中的不是单条请求的 cache，而是过去 N 轮共同建立的 cache。
+The key to cache accumulation = **use the same `session_id` for the same conversation**. What each turn hits is not the cache of a single request, but the cache jointly built by the past N turns.
 
 ```mermaid
 flowchart LR
-  T1["Turn 1<br/>session_id=conv-A"] -- "写 cache" --> S1[(KV cache)]
-  T2["Turn 2<br/>session_id=conv-A"] -- "读 cache + 增写" --> S1
-  T3["Turn 3<br/>session_id=conv-A"] -- "读 cache + 增写" --> S1
-  Tx["Turn X<br/>session_id=conv-B"] -.->|"不同 session<br/>不命中"| S2[(无关 cache)]
+  T1["Turn 1<br/>session_id=conv-A"] -- "write cache" --> S1[(KV cache)]
+  T2["Turn 2<br/>session_id=conv-A"] -- "read cache + incremental write" --> S1
+  T3["Turn 3<br/>session_id=conv-A"] -- "read cache + incremental write" --> S1
+  Tx["Turn X<br/>session_id=conv-B"] -.->|"different session<br/>no hit"| S2[(unrelated cache)]
 
   style S1 fill:#7FD8E0,stroke:#333,color:#000
 ```
 
-### 10.1 session_id 是谁定的？
+### 10.1 Who sets the session_id?
 
-- **路径 A**：`TelosAnthropicTransport(session_id=...)` 显式传，整段对话用同一个 transport 实例即可。
-- **路径 B**：代理按以下优先级**自动派生**：
-  1. `x-telos-session` HTTP header（显式覆盖）
-  2. `metadata.user_id`（Anthropic SDK 内建字段）
+- **Path A**: pass it explicitly via `TelosAnthropicTransport(session_id=...)`; just use the same transport instance for the entire conversation.
+- **Path B**: the proxy **derives it automatically** by the following priority:
+  1. `x-telos-session` HTTP header (explicit override)
+  2. `metadata.user_id` (a built-in Anthropic SDK field)
   3. `blake2b(api_key + system + tools + messages[0])` → `telos-<16 hex>`
 
-> 派生规则的语义保证：同一对话 N 轮 → 同一 id ✓ ；不同初始 prompt → 不同 id ✓ ；不同用户 → 不同 id ✓ 。代理 LRU 默认 10000 个 session，长跑超出按需调 `max_sessions=`。
+> The semantic guarantees of the derivation rule: same conversation across N turns → same id ✓ ; different initial prompt → different id ✓ ; different user → different id ✓ . The proxy LRU defaults to 10000 sessions; for long runs that exceed it, tune `max_sessions=` as needed.
 
-### 10.2 看累积有没有工作
+### 10.2 Check whether accumulation is working
 
-`usage_log` 每行带 `cumulative` 块：
+Each line of `usage_log` carries a `cumulative` block:
 
 ```json
 {
@@ -386,166 +386,166 @@ flowchart LR
 }
 ```
 
-**健康信号**（详见 [§14](#14-故障排查)）：
+**Health signals** (see [§14](#14-troubleshooting) for details):
 
 ```bash
 jq -c '{call: .call_index, cache_read: .normalized.cache_read, cum: .cumulative.cache_creation}' \
     < ~/.telos/usage.jsonl
 ```
 
-`cache_read` 随轮次上升、`cache_creation` 单调递增、`refpool_slugs` 不反复增长 = 一切正常。
+`cache_read` rising with the turn count, `cache_creation` increasing monotonically, and `refpool_slugs` not repeatedly growing = everything is fine.
 
 ---
 
-## 11. 三个看板：实时看健康，事后算账
+## 11. Three dashboards: watch health live, settle accounts after
 
 <div align="center">
 
 <img src="../branding/dashboard.png" alt="TELOS savings dashboard" width="780"/>
 
-<sub>省钱看板：按 harness / model / session 算<strong>绝对美元节省</strong> —— 不是可以靠缩小分母刷出来的比率。</sub>
+<sub>Savings dashboard: computes <strong>absolute dollar savings</strong> by harness / model / session —— not a ratio you can game by shrinking the denominator.</sub>
 
 </div>
 
-| 看板 | 入口 | 看什么 | 用法 |
+| Dashboard | Entry point | What it shows | Use |
 |---|---|---|---|
-| 💰 **省钱看板** | `/__telos/dashboard` 或 `telos dashboard` | 省了多少 token / 美刀、A/B 对比、mode breakdown | 给老板看 |
-| 🔬 **开发者页面** | `/__telos/developer` | 当前内存里每 session 的 IR 结构、PIN/FOLD/DROP 分布、工具统计 | 自查 cache 命中行为 |
-| 📜 **usage_log** | `~/.telos/usage.jsonl` | 逐调用的原始数据 | `jq` / 自己画图 |
+| 💰 **Savings dashboard** | `/__telos/dashboard` or `telos dashboard` | how many tokens / dollars saved, A/B comparison, mode breakdown | show to the boss |
+| 🔬 **Developer page** | `/__telos/developer` | the IR structure of each in-memory session right now, PIN/FOLD/DROP distribution, tool stats | self-check cache-hit behavior |
+| 📜 **usage_log** | `~/.telos/usage.jsonl` | per-call raw data | `jq` / plot it yourself |
 
-> 字段对照见 [dashboard-savings-metrics.md](dashboard-savings-metrics.md) 和 [dashboard-developer-metrics.md](dashboard-developer-metrics.md)。
+> For field mappings see [dashboard-savings-metrics.md](dashboard-savings-metrics.md) and [dashboard-developer-metrics.md](dashboard-developer-metrics.md).
 
 ---
 
-## 12. 对比实验：replay vs 双 session
+## 12. Comparison experiments: replay vs dual session
 
-> 想知道"开 TELOS / RTK 到底省多少钱"？最忌讳的就是凭感觉。TELOS 提供两种**受控对照**。
+> Want to know "how much money does enabling TELOS / RTK actually save"? The worst thing you can do is rely on a gut feeling. TELOS provides two kinds of **controlled comparison**.
 
 ```mermaid
 flowchart TB
-  subgraph Replay["✅ replay（推荐，受控、便宜）"]
-    R1[录一次真实会话] --> R2[同一串请求<br/>逐字节相同<br/>分别用 4 mode 重放]
-    R2 --> R3[A/B 面板对比<br/>唯一变量 = 开关]
+  subgraph Replay["✅ replay (recommended, controlled, cheap)"]
+    R1[record one real session] --> R2[the same request stream<br/>byte-for-byte identical<br/>replayed under each of 4 modes]
+    R2 --> R3[A/B panel comparison<br/>the only variable = the switch]
   end
 
-  subgraph Dual["⚠️ 双 session（端到端，有噪声）"]
-    D1[两个独立 agent 会话] --> D2[相同输入<br/>不同 X-Telos-Mode]
-    D2 --> D3[trajectory 会分叉<br/>delta 含采样噪声]
+  subgraph Dual["⚠️ dual session (end-to-end, noisy)"]
+    D1[two independent agent sessions] --> D2[same input<br/>different X-Telos-Mode]
+    D2 --> D3[trajectories will diverge<br/>delta contains sampling noise]
   end
 
   style Replay fill:#2C5F66,stroke:#333,color:#fff
   style Dual fill:#d8851f,stroke:#333,color:#fff
 ```
 
-### 12.1 replay：跑过的录像，钉死轨迹
+### 12.1 replay: a recorded session, with the trajectory nailed down
 
 ```bash
-telos replay --list                              # 看语料库里有哪些会话
-telos replay --session <id>                       # 默认 4 mode 全跑
-telos dashboard --usage-log ~/.telos/usage.jsonl  # A/B 对比面板看结果
+telos replay --list                              # see which sessions are in the corpus
+telos replay --session <id>                       # by default runs all 4 modes
+telos dashboard --usage-log ~/.telos/usage.jsonl  # view results in the A/B comparison panel
 ```
 
-每个 mode 看到的输入完全一致，**唯一变量是开关本身**。成本低：1 次真实会话 + 每 mode 一串廉价 `max_tokens=1` prefill 调用。
+The input each mode sees is exactly identical, and **the only variable is the switch itself**. Low cost: 1 real session + a stream of cheap `max_tokens=1` prefill calls per mode.
 
-### 12.2 双 session：端到端，但单次不可信
+### 12.2 dual session: end-to-end, but a single run is not trustworthy
 
-起两个独立 agent 会话、用户输入相同，各带不同 `X-Telos-Mode` + 相同 `X-Telos-Compare-Group`，dashboard 同一面板并排。
+Start two independent agent sessions with identical user input, each carrying a different `X-Telos-Mode` plus the same `X-Telos-Compare-Group`, and the dashboard places them side by side in the same panel.
 
-**单次跑的 delta 不可信**（trajectory 因为采样会分叉、工具结果不同导致后续决策不同）。**只在偶尔做端到端校验时用**，且要多跑取平均。
+**The delta of a single run is not trustworthy** (the trajectory diverges due to sampling, and different tool results lead to different downstream decisions). **Use it only for the occasional end-to-end validation**, and run it multiple times to average.
 
-| | replay | 双 session |
+| | replay | dual session |
 |---|---|---|
-| 控制变量 | ✅ 字节级钉死 | ✗ trajectory 会分叉 |
-| 成本 | 极低（prefill `max_tokens=1`） | 端到端全价 |
-| 测量 | prefill / cache 计费 | 端到端任务成本 |
-| 适用 | **日常对照、CI 基准** | 偶尔端到端校验 |
+| Control variable | ✅ nailed down at the byte level | ✗ trajectory will diverge |
+| Cost | extremely low (prefill `max_tokens=1`) | full-price end-to-end |
+| What it measures | prefill / cache billing | end-to-end task cost |
+| Suitable for | **daily comparison, CI benchmark** | occasional end-to-end validation |
 
-详细原理与边界：[replay-comparison.md](replay-comparison.md)。
+Detailed principles and boundaries: [replay-comparison.md](replay-comparison.md).
 
 ---
 
-## 13. 最佳实践（DO）与反模式（DON'T）
+## 13. Best practices (DO) and anti-patterns (DON'T)
 
 ### ✅ DO
 
-1. **同一对话用同一 `session_id`**。多轮 cache 累积全靠它。
-2. **先 `telos` 后 `both`**。先验证 TELOS 前缀缓存稳定无异常，再叠加会改写工具结果的 RTK。
-3. **接入后第一件事看 dashboard**。`/__telos/dashboard` 或 `telos dashboard`，确认 `cache_read` 在涨、`cache hit%` 合理。
-4. **用 replay 决定要不要全量开某个 mode**。别凭感觉，跑一次 replay 看 A/B 面板的实测数字。
-5. **让代理一直录会话**（默认开启）。语料库是 replay 的燃料，也是回归基准。介意原始 prompt 落盘才用 `--no-record`。
-6. **生产用非 strict（默认）**。TELOS 失败自动降级 passthrough，正确性永不受影响；`--strict` 只在 dev 调试时用。
-7. **长跑 / 高并发场景调 `max_sessions`**。代理 LRU 默认上限 10000。
+1. **Use the same `session_id` for the same conversation**. Multi-turn cache accumulation depends entirely on it.
+2. **`telos` first, then `both`**. First verify TELOS prefix caching is stable with no anomalies, then layer on RTK, which rewrites tool results.
+3. **The first thing after integration is to look at the dashboard**. `/__telos/dashboard` or `telos dashboard`; confirm `cache_read` is rising and `cache hit%` is reasonable.
+4. **Use replay to decide whether to fully enable a mode**. Don't go by feel —— run a replay once and look at the measured numbers in the A/B panel.
+5. **Let the proxy keep recording sessions** (on by default). The corpus is the fuel for replay and also a regression baseline. Use `--no-record` only if you object to raw prompts being written to disk.
+6. **Use non-strict in production** (default). On a TELOS failure it automatically degrades to passthrough, so correctness is never affected; `--strict` is only for dev debugging.
+7. **Tune `max_sessions` for long-running / high-concurrency scenarios**. The proxy LRU defaults to a cap of 10000.
 
 ### ❌ DON'T
 
-| 别这样 | 为什么 | 改成 |
+| Don't do this | Why | Do this instead |
 |---|---|---|
-| SDK transport 路径用 `stream=True` | 流式没接 TELOS 处理，直接透传 | 路径 A 用非流式；要流式走路径 B |
-| 每轮换 `session_id` | cache 累积归零，`cache_creation` 永远 0 | 整段对话固定一个 id |
-| 把每轮变化的内容（时间戳/cwd）塞进 system prompt 头部 | 污染 PIN 前缀，cache 整段失效 | 它们会被 harness 归到 DROP；别手动前置 |
-| 指望 RTK 改 agent 的本地上下文 | RTK 只过滤 proxy→上游这一段，agent 本地副本不变 | 这是设计如此；省的是计费 token |
-| 凭单次双 session 跑分下结论 | trajectory 分叉，delta 是噪声 | 用 replay，或双 session 多跑取平均 |
-| 把 replay 数字当端到端任务成本 | replay 把轨迹钉死、`max_tokens=1` 不计 output | replay 测的是 prefill/缓存计费；端到端用双 session |
-| 自定义 header 指望透传 | 代理只白名单转发 6 个 header | 改 `_FORWARD_HEADER_WHITELIST`，或走路径 A |
+| Use `stream=True` on the SDK transport path | streaming is not wired to TELOS processing and passes straight through | use non-streaming on Path A; for streaming use Path B |
+| Change the `session_id` every turn | cache accumulation resets to zero, `cache_creation` is always 0 | fix one id for the entire conversation |
+| Stuff per-turn-changing content (timestamp/cwd) into the head of the system prompt | it pollutes the PIN prefix and the entire cache is invalidated | the harness will assign them to DROP; don't manually prepend them |
+| Expect RTK to change the agent's local context | RTK only filters the proxy→upstream segment; the agent's local copy is unchanged | this is by design; what is saved is billed tokens |
+| Draw conclusions from a single dual-session run | the trajectory diverges and the delta is noise | use replay, or run dual session multiple times and average |
+| Treat replay numbers as end-to-end task cost | replay nails down the trajectory, and `max_tokens=1` does not count output | replay measures prefill/cache billing; use dual session for end-to-end |
+| Expect custom headers to pass through | the proxy only whitelists and forwards 6 headers | modify `_FORWARD_HEADER_WHITELIST`, or use Path A |
 
 ---
 
-## 14. 故障排查
+## 14. Troubleshooting
 
-### 14.1 速查表
+### 14.1 Quick-reference table
 
-| 现象 | 根因 | 修法 |
+| Symptom | Root cause | Fix |
 |---|---|---|
-| `cache_read` 永远 0 | session_id 每轮在变 / 模型不支持 prompt caching / `cache_control` 没生效 | 固定 session_id；确认模型支持；看 dashboard 的 hit% |
-| `cumulative.cache_creation` 永远 0 | 没传 `session_state`（路径 A）或代理重启过 | 路径 A 显式传 `session_state`；路径 B 别频繁重启 |
-| 看到 `passthrough` 记录 | TELOS 管线抛异常、自动降级 | 看代理日志首次 traceback；dev 阶段加 `--strict` 让它显式爆 |
-| `TelosInvariantError: Band order violated` | harness 输出违反 §5 | TELOS-side bug；扩展新 harness 时 message 末尾过一遍 `enforce_band_order` |
-| RTK 没省下 token | 工具输出短于 600 字符阈值 / 没有重复 | 正常；小输出本就不值得过滤 |
-| `rtk` mode 但 dashboard 显示 `fallback:*` rule | `rtk` 二进制没装 | 装 rtk 二进制，或接受 Python fallback |
-| 自定义 header 丢失 | 代理只白名单转发 6 个 header | 改 `_FORWARD_HEADER_WHITELIST` 或走路径 A |
-| replay 报缺 API key | 没设 `ANTHROPIC_API_KEY` | `export ANTHROPIC_API_KEY=...` 或 `--api-key` |
+| `cache_read` is always 0 | session_id changes every turn / model does not support prompt caching / `cache_control` did not take effect | fix the session_id; confirm the model supports it; check the dashboard's hit% |
+| `cumulative.cache_creation` is always 0 | `session_state` was not passed (Path A) or the proxy was restarted | on Path A pass `session_state` explicitly; on Path B don't restart frequently |
+| Seeing `passthrough` records | the TELOS pipeline threw an exception and degraded automatically | check the proxy log for the first traceback; in the dev stage add `--strict` to make it fail explicitly |
+| `TelosInvariantError: Band order violated` | the harness output violates §5 | a TELOS-side bug; when extending a new harness, run `enforce_band_order` over the message tail once |
+| RTK did not save tokens | tool output is shorter than the 600-character threshold / there is no repetition | normal; small output is not worth filtering anyway |
+| `rtk` mode but the dashboard shows a `fallback:*` rule | the `rtk` binary is not installed | install the rtk binary, or accept the Python fallback |
+| Custom headers are lost | the proxy only whitelists and forwards 6 headers | modify `_FORWARD_HEADER_WHITELIST` or use Path A |
+| replay reports a missing API key | `ANTHROPIC_API_KEY` is not set | `export ANTHROPIC_API_KEY=...` or `--api-key` |
 
-### 14.2 jq 三连查健康
+### 14.2 The jq health-check trio
 
 ```bash
-# 多轮 cache_read 是否在涨（命中在工作）
+# Whether multi-turn cache_read is rising (hits are working)
 jq -c '{call: .call_index, cache_read: .normalized.cache_read, cum: .cumulative.cache_creation}' \
     < ~/.telos/usage.jsonl
 
-# ref-pool 是否稳定（同一文档不应反复重新注册）
+# Whether the ref-pool is stable (the same document should not be repeatedly re-registered)
 jq -c '.cumulative.refpool_slugs' < ~/.telos/usage.jsonl | sort -u
 
-# 有没有降级到 passthrough（TELOS 出错的信号）
+# Whether there was a degradation to passthrough (a signal that TELOS errored)
 jq -c 'select(.harness == "passthrough")' < ~/.telos/usage.jsonl
 ```
 
-健康 = `cache_read` 随轮次上升、`cache_creation` 单调递增、`refpool_slugs` 不反复增长、没有 `passthrough` 记录。
+Healthy = `cache_read` rising with the turn count, `cache_creation` increasing monotonically, `refpool_slugs` not repeatedly growing, and no `passthrough` records.
 
 ---
 
-## 15. 推荐上手顺序
+## 15. Recommended onboarding order
 
 ```mermaid
 flowchart LR
-  S1["1. 读本文 §1-§5<br/>建立心智模型"] --> S2["2. pip install -e ."]
+  S1["1. Read §1-§5 of this doc<br/>build the mental model"] --> S2["2. pip install -e ."]
   S2 --> S3["3. telos proxy<br/>+ telos init --agent claude-code"]
-  S3 --> S4["4. 正常用几天<br/>让语料库自然积累"]
-  S4 --> S5["5. telos dashboard<br/>确认 cache 在命中"]
-  S5 --> S6["6. telos replay --session &lt;id&gt;<br/>跑 4-mode 对照"]
-  S6 --> S7{"全量切 both？"}
-  S7 -- "看实测数字" --> S8["决策"]
+  S3 --> S4["4. Use it normally for a few days<br/>let the corpus accumulate naturally"]
+  S4 --> S5["5. telos dashboard<br/>confirm the cache is hitting"]
+  S5 --> S6["6. telos replay --session &lt;id&gt;<br/>run the 4-mode comparison"]
+  S6 --> S7{"Fully switch to both?"}
+  S7 -- "look at the measured numbers" --> S8["decision"]
 ```
 
-走到第 7 步还想深入：
+After step 7, if you want to go deeper:
 
-- **代码架构** → [ARCHITECTURE.md](ARCHITECTURE.md)
-- **协议规范** → [TELOS Protocol](2026-05-06-telos-protocol.md)
-- **CLI 字典** → [User-guide.md](User-guide.md)
-- **对照实验原理** → [replay-comparison.md](replay-comparison.md)
-- **基准测试** → [TELOS Benchmark Guide](2026-05-06-telos-benchmark-guide.md)
+- **Code architecture** → [ARCHITECTURE.md](ARCHITECTURE.md)
+- **Protocol spec** → [TELOS Protocol](2026-05-06-telos-protocol.md)
+- **CLI reference** → [User-guide.md](User-guide.md)
+- **Comparison experiment principles** → [replay-comparison.md](replay-comparison.md)
+- **Benchmarking** → [TELOS Benchmark Guide](2026-05-06-telos-benchmark-guide.md)
 
 ---
 
 <div align="center">
-<sub>—— TELOS —— 让稳定的部分稳住，让不稳定的部分赶到末尾 ——</sub>
+<sub>—— TELOS —— hold the stable parts stable, drive the unstable parts to the tail ——</sub>
 </div>

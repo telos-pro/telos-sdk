@@ -1,14 +1,17 @@
-"""工具结果过滤器 —— 把 bash / 命令输出在进 prompt 前压缩。
+"""Tool-result filters — compress bash / command output before it enters the prompt.
 
-三个实现：
+Three implementations:
 
-- ``RtkFilter``：shell-out 到 rtk 二进制（rtk-ai/rtk，Rust，100+ 命令）。
-- ``FallbackFilter``：纯 Python 的轻量过滤器，只覆盖最常见的几类输出；
-  rtk 没装时保证开关仍有效、demo 仍能跑出数。
-- ``CompositeFilter``：rtk 优先、未命中或不可用时退回 fallback。
+- ``RtkFilter``: shells out to the rtk binary (rtk-ai/rtk, Rust, 100+ commands).
+- ``FallbackFilter``: a pure-Python lightweight filter covering only the most
+  common output types; it guarantees the switch still works and the demo
+  still produces numbers when rtk is not installed.
+- ``CompositeFilter``: rtk first, falling back to the fallback when rtk misses
+  or is unavailable.
 
-所有过滤器都遵守 RTK 同款「失败 → 原样」原则：任何异常都不会抛出，
-最坏情况返回未改动的原文（``rule="passthrough"``）。
+All filters follow RTK's "fail → unchanged" principle: no exception is ever
+raised, and in the worst case the unmodified original text is returned
+(``rule="passthrough"``).
 """
 
 from __future__ import annotations
@@ -24,17 +27,18 @@ from telos.output_filter.tokens import estimate_tokens
 
 @dataclass
 class FilterRecord:
-    """单个 tool_result 过滤的结果 + 计量。
+    """The result + metering of filtering a single tool_result.
 
-    ``original_tokens`` / ``filtered_tokens`` 是过滤前 / 后文本的 token
-    估算（``tokens.estimate_tokens``），过滤时按真实文本算，比 dashboard
-    端的 ``chars / 4`` 精确。
+    ``original_tokens`` / ``filtered_tokens`` are the token estimates of the
+    pre- / post-filter text (``tokens.estimate_tokens``); filtering computes
+    them from the real text, which is more accurate than the dashboard's
+    ``chars / 4``.
     """
 
     text: str
     original_chars: int
     filtered_chars: int
-    rule: str  # 命中的规则名，如 "rtk:git", "fallback:dedup", "passthrough"
+    rule: str  # the name of the matched rule, e.g. "rtk:git", "fallback:dedup", "passthrough"
     original_tokens: int = 0
     filtered_tokens: int = 0
 
@@ -48,7 +52,7 @@ class FilterRecord:
 
     @classmethod
     def of(cls, before: str, after: str, *, rule: str) -> "FilterRecord":
-        """从过滤前 / 后文本构造，自动算字符数与 token 估算。"""
+        """Construct from pre- / post-filter text, computing char counts and token estimates automatically."""
         return cls(
             text=after,
             original_chars=len(before),
@@ -67,7 +71,7 @@ class FilterRecord:
 
 
 class ToolResultFilter(ABC):
-    """把一段工具输出文本压缩成更短的等价文本。"""
+    """Compress a span of tool output text into a shorter equivalent text."""
 
     name: str = "abstract"
 
@@ -75,20 +79,20 @@ class ToolResultFilter(ABC):
     def filter_text(
         self, text: str, *, tool_name: str = "", command: str = "",
     ) -> FilterRecord:
-        """``tool_name`` / ``command`` 是可选 hint：
+        """``tool_name`` / ``command`` are optional hints:
 
-        - ``tool_name``：发起这次工具调用的工具名（``Bash`` / ``Read`` …）。
-        - ``command``：若是 Bash 调用，对应的 shell 命令串。
+        - ``tool_name``: the name of the tool that issued this call (``Bash`` / ``Read`` …).
+        - ``command``: for a Bash call, the corresponding shell command string.
         """
         ...
 
 
 # ---------------------------------------------------------------------------
-# 纯 Python fallback
+# Pure-Python fallback
 # ---------------------------------------------------------------------------
 
-_MIN_FILTER_CHARS = 600    # 短输出不值得过滤
-_TRUNCATE_BUDGET = 4000    # dedup 后仍超过此长度就头尾截断
+_MIN_FILTER_CHARS = 600    # short output is not worth filtering
+_TRUNCATE_BUDGET = 4000    # if still over this length after dedup, truncate head and tail
 _HEAD_KEEP = 2200
 _TAIL_KEEP = 1400
 
@@ -99,7 +103,7 @@ _PYTEST_SUMMARY_RE = re.compile(
 
 
 class FallbackFilter(ToolResultFilter):
-    """无依赖的轻量过滤器：连续重复行折叠 + 头尾截断 + pytest 摘要。"""
+    """A dependency-free lightweight filter: collapse consecutive duplicate lines + head/tail truncation + pytest summary."""
 
     name = "fallback"
 
@@ -108,7 +112,7 @@ class FallbackFilter(ToolResultFilter):
     ) -> FilterRecord:
         try:
             return self._filter(text, command)
-        except Exception:  # noqa: BLE001 — 过滤器永不抛错
+        except Exception:  # noqa: BLE001 — the filter never raises
             return FilterRecord.passthrough(text)
 
     def _filter(self, text: str, command: str) -> FilterRecord:
@@ -132,7 +136,7 @@ class FallbackFilter(ToolResultFilter):
 
     @staticmethod
     def _pytest(text: str) -> tuple[str, bool]:
-        """保留 FAILED/ERROR 行 + 最后的 ``=== N passed ===`` 摘要行。"""
+        """Keep FAILED/ERROR lines + the final ``=== N passed ===`` summary line."""
         lines = text.splitlines()
         kept: list[str] = []
         for ln in lines:
@@ -147,12 +151,12 @@ class FallbackFilter(ToolResultFilter):
         out = "\n".join(kept)
         elided = len(lines) - len(kept)
         if elided > 0:
-            out += f"\n… [pytest: {elided} 行非失败输出已省略] …"
+            out += f"\n… [pytest: {elided} non-failure output lines omitted] …"
         return out, len(out) < len(text)
 
 
 def _collapse_repeats(text: str) -> str:
-    """连续相同行折叠成 ``<line>  (×N)``。"""
+    """Collapse consecutive identical lines into ``<line>  (×N)``."""
     lines = text.splitlines()
     out: list[str] = []
     i = 0
@@ -173,22 +177,23 @@ def _head_tail(text: str) -> str:
     head = text[:_HEAD_KEEP]
     tail = text[-_TAIL_KEEP:]
     elided = len(text) - _HEAD_KEEP - _TAIL_KEEP
-    return f"{head}\n… [{elided:,} 字符中段已省略] …\n{tail}"
+    return f"{head}\n… [{elided:,} characters omitted from the middle] …\n{tail}"
 
 
 # ---------------------------------------------------------------------------
-# rtk 二进制 adapter
+# rtk binary adapter
 # ---------------------------------------------------------------------------
 
 class RtkFilter(ToolResultFilter):
-    """shell-out 到 ``rtk`` 二进制。
+    """Shells out to the ``rtk`` binary.
 
-    约定调用形式（rtk-ai/rtk 的离线过滤接口）::
+    The agreed-upon invocation form (rtk-ai/rtk's offline filtering interface)::
 
         echo "<raw output>" | rtk filter --command "<shell command>"
 
-    rtk 把过滤后的文本写 stdout。任何失败（找不到二进制、非零退出、
-    超时）都退化为 passthrough —— 这一层永远不破坏正确性。
+    rtk writes the filtered text to stdout. Any failure (binary not found,
+    non-zero exit, timeout) degrades to passthrough — this layer never breaks
+    correctness.
     """
 
     name = "rtk"
@@ -214,7 +219,7 @@ class RtkFilter(ToolResultFilter):
                 argv, input=text, capture_output=True, text=True,
                 timeout=self._timeout, check=False,
             )
-        except Exception:  # noqa: BLE001 — 二进制问题不应影响代理
+        except Exception:  # noqa: BLE001 — a binary problem should not affect the proxy
             return FilterRecord.passthrough(text)
         if proc.returncode != 0 or not proc.stdout:
             return FilterRecord.passthrough(text)
@@ -226,11 +231,11 @@ class RtkFilter(ToolResultFilter):
 
 
 # ---------------------------------------------------------------------------
-# 组合：rtk 优先，未命中退回 fallback
+# Composite: rtk first, fall back to fallback on a miss
 # ---------------------------------------------------------------------------
 
 class CompositeFilter(ToolResultFilter):
-    """先试 ``primary``，没省下字节再试 ``secondary``。"""
+    """Try ``primary`` first, then try ``secondary`` if it did not save any bytes."""
 
     name = "composite"
 
@@ -250,11 +255,12 @@ class CompositeFilter(ToolResultFilter):
 
 
 def build_filter(*, rtk_binary: str | None = None) -> ToolResultFilter:
-    """构造默认过滤器。
+    """Construct the default filter.
 
-    rtk 二进制可用 → ``CompositeFilter(rtk, fallback)``；
-    不可用 → 纯 ``FallbackFilter``（开关仍生效，dashboard 上 rule 标
-    ``fallback:*``，一眼能看出 rtk 没装）。
+    rtk binary available → ``CompositeFilter(rtk, fallback)``;
+    unavailable → plain ``FallbackFilter`` (the switch still takes effect, the
+    rule on the dashboard is tagged ``fallback:*``, so you can see at a glance
+    that rtk is not installed).
     """
     rtk = RtkFilter(binary=rtk_binary)
     fallback = FallbackFilter()

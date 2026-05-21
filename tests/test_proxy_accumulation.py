@@ -1,9 +1,9 @@
-"""端到端：多轮请求经过 proxy 后，``cumulative_cache_creation`` 真累积。
+"""End-to-end: after multi-turn requests pass through the proxy, ``cumulative_cache_creation`` truly accumulates.
 
-这是验证「中期目标完整实现」的关键测试。在修复前，proxy 每次新建
-``BridgeSessionState`` → 任何累计字段都重置为 0；修复后，相同 session_id
-的请求共享同一份 state，cumulative_cache_creation / real_requests 跨调
-用单调递增。
+This is the key test verifying the "full implementation of the mid-term goal". Before the fix,
+the proxy created a new ``BridgeSessionState`` every time → any cumulative field reset to 0;
+after the fix, requests with the same session_id share one state, and
+cumulative_cache_creation / real_requests increase monotonically across calls.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from telos.proxy.server import make_app
 
 
 class _CountingUpstream:
-    """每次响应都汇报 cache_creation_input_tokens 累计的 mock upstream。"""
+    """A mock upstream that reports an accumulating cache_creation_input_tokens on every response."""
 
     def __init__(self) -> None:
         self.requests: list[dict] = []
-        # 模拟：第一次 cache_write=5000，第二次 1500，之后 0（已被缓存）
+        # simulate: first cache_write=5000, second 1500, then 0 (already cached)
         self._sequence = [5000, 1500, 0, 0]
 
     async def handler(self, request: web.Request) -> web.Response:
@@ -45,7 +45,7 @@ class _CountingUpstream:
 
 
 def _multi_turn_req(turn: int) -> dict:
-    """逐轮加长 messages —— 同一对话的多轮，messages[0] 不变。"""
+    """Lengthen messages turn by turn -- multiple turns of the same conversation, with messages[0] unchanged."""
     base_messages = [
         {"role": "user", "content": [{"type": "text",
             "text": "Turn 0 question."}]},
@@ -63,7 +63,7 @@ def _multi_turn_req(turn: int) -> dict:
         "max_tokens": 64,
         "system": [
             {"type": "text", "text": "You are an engineer agent."},
-            {"type": "text", "text": "AUTH SPEC:\n" + ("规则细节…\n" * 400)},
+            {"type": "text", "text": "AUTH SPEC:\n" + ("Rule detail line.\n" * 400)},
         ],
         "tools": [
             {"name": "Bash", "input_schema": {"type": "object",
@@ -97,28 +97,28 @@ async def _test_cumulative_growth_through_proxy(tmp_log: Path) -> None:
                 ) as r:
                     assert r.status == 200, await r.text()
 
-        # 关键断言：日志里 cumulative.cache_creation 单调递增
+        # key assertion: cumulative.cache_creation in the log increases monotonically
         lines = [json.loads(l) for l in tmp_log.read_text().strip().splitlines()]
         assert len(lines) == 4
         cums = [rec["cumulative"]["cache_creation"] for rec in lines]
-        # 期望：5000 → 6500 → 6500 → 6500
+        # expected: 5000 → 6500 → 6500 → 6500
         assert cums == [5000, 6500, 6500, 6500], f"cumulative drift: {cums}"
 
-        # 全部 4 轮应当是同一个 session_id（来自内容派生）
+        # all 4 turns should be the same session_id (derived from content)
         sids = [rec["session_id"] for rec in lines]
-        assert len(set(sids)) == 1, f"session_id 漂移：{sids}"
+        assert len(set(sids)) == 1, f"session_id drifted: {sids}"
 
-        # real_requests_since_refresh 也单调递增
+        # real_requests_since_refresh also increases monotonically
         reqs = [rec["cumulative"]["real_requests_since_refresh"] for rec in lines]
-        assert reqs == [1, 2, 3, 4], f"R8 计数漂移：{reqs}"
+        assert reqs == [1, 2, 3, 4], f"R8 count drifted: {reqs}"
 
-        # refpool slugs 至少有一个（大 system 文档被搬进 ref-pool）
+        # refpool slugs has at least one (the large system document is moved into the ref-pool)
         for rec in lines:
             assert rec["cumulative"]["refpool_slugs"], \
-                f"ref-pool 应非空（call={rec['call_index']}）"
-            # 所有轮共享同一个 slug 集合
+                f"ref-pool should be non-empty (call={rec['call_index']})"
+            # all turns share the same slug set
         assert all(rec["cumulative"]["refpool_slugs"] == lines[0]["cumulative"]["refpool_slugs"]
-                   for rec in lines), "ref-pool slugs 漂移"
+                   for rec in lines), "ref-pool slugs drifted"
 
         print(f"✓ test_cumulative_growth_through_proxy")
         print(f"  cache_creation: {cums}")
@@ -130,7 +130,7 @@ async def _test_cumulative_growth_through_proxy(tmp_log: Path) -> None:
 
 
 async def _test_different_sessions_dont_share_state(tmp_log: Path) -> None:
-    """两个不同 api-key 的并发 client 必须有独立 state。"""
+    """Two concurrent clients with different api-keys must have independent state."""
     mock = _CountingUpstream()
     up_app = web.Application()
     up_app.router.add_post("/v1/messages", mock.handler)
@@ -155,9 +155,9 @@ async def _test_different_sessions_dont_share_state(tmp_log: Path) -> None:
                     assert r.status == 200
 
         lines = [json.loads(l) for l in tmp_log.read_text().strip().splitlines()]
-        # 两个 session_id 必须不同
+        # the two session_ids must differ
         assert lines[0]["session_id"] != lines[1]["session_id"]
-        # 每个都是这个 session 的第 1 次请求
+        # each is the 1st request of its session
         assert lines[0]["cumulative"]["real_requests_since_refresh"] == 1
         assert lines[1]["cumulative"]["real_requests_since_refresh"] == 1
         print("✓ test_different_sessions_dont_share_state")

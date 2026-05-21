@@ -1,7 +1,8 @@
-"""SDK transport（Anthropic + OpenAI）的多轮累积回归。
+"""Multi-turn accumulation regression for the SDK transports (Anthropic + OpenAI).
 
-策略：monkey-patch transport 的 ``_inner`` client 成 mock，避免任何网络。
-然后做 3 轮调用，验证 ``transport.session_state`` 内部计数器单调递增。
+Strategy: monkey-patch the transport's ``_inner`` client to a mock to avoid any network.
+Then make 3 rounds of calls and verify that the internal counters of
+``transport.session_state`` increase monotonically.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from telos.scripts.telos_transport import TelosOpenAITransport
 
 
 # ---------------------------------------------------------------------------
-# Mock Anthropic 响应（实现 ``response.usage.model_dump()``）
+# Mock Anthropic response (implements ``response.usage.model_dump()``)
 # ---------------------------------------------------------------------------
 
 class _MockAnthropicResponse:
@@ -24,7 +25,7 @@ class _MockAnthropicResponse:
             "cache_creation_input_tokens": cache_creation,
             "output_tokens": 1,
         }
-        # 模拟 anthropic.types.Message 的最小子集
+        # the minimal subset of anthropic.types.Message
         self.id = "msg_x"
         self.role = "assistant"
         self.content = []
@@ -60,8 +61,8 @@ def _make_req() -> dict:
         "max_tokens": 64,
         "system": [
             {"type": "text", "text": "You are an engineer agent."},
-            # 大文档 → ref-pool
-            {"type": "text", "text": "AUTH SPEC:\n" + ("规则细节…\n" * 400)},
+            # large document → ref-pool
+            {"type": "text", "text": "AUTH SPEC:\n" + ("Rule detail line.\n" * 400)},
         ],
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "do a thing"}]},
@@ -72,19 +73,19 @@ def _make_req() -> dict:
 def test_anthropic_transport_accumulates() -> None:
     t = TelosAnthropicTransport(api_key="test-not-real",
                                  session_id="multi-anth")
-    t._inner = _MockAnthropicClient()  # 拦截网络
+    t._inner = _MockAnthropicClient()  # intercept the network
 
     for _ in range(3):
         t.messages.create(**_make_req())
 
     state = t.session_state
     assert state.stats.cumulative_cache_creation == 5000 + 1500 + 0, \
-        f"期望 6500，实际 {state.stats.cumulative_cache_creation}"
+        f"expected 6500, got {state.stats.cumulative_cache_creation}"
     assert state.stats.real_requests_since_refresh == 3, \
-        f"期望 3，实际 {state.stats.real_requests_since_refresh}"
-    assert state.refpool.slugs, "ref-pool 应当注册了大文档的 slug"
+        f"expected 3, got {state.stats.real_requests_since_refresh}"
+    assert state.refpool.slugs, "ref-pool should have registered the large document's slug"
     assert len(state.refpool.slugs) == 1, \
-        f"3 轮请求 ref-pool 仅应注册 1 个 slug，实际 {state.refpool.slugs}"
+        f"across 3 requests the ref-pool should register only 1 slug, got {state.refpool.slugs}"
     print(f"✓ test_anthropic_transport_accumulates "
           f"(cache_creation={state.stats.cumulative_cache_creation}, "
           f"requests={state.stats.real_requests_since_refresh}, "
@@ -149,18 +150,18 @@ def test_openai_transport_accumulates() -> None:
         t.chat.completions.create(**_make_openai_req())
 
     state = t.session_state
-    # DeepSeek 的 usage 没有 cache_creation_input_tokens → cumulative = 0（正确）
+    # DeepSeek's usage has no cache_creation_input_tokens → cumulative = 0 (correct)
     assert state.stats.cumulative_cache_creation == 0
-    # 但 R8 请求计数器应当累积
+    # but the R8 request counter should still accumulate
     assert state.stats.real_requests_since_refresh == 3, \
-        f"期望 3，实际 {state.stats.real_requests_since_refresh}"
+        f"expected 3, got {state.stats.real_requests_since_refresh}"
     print(f"✓ test_openai_transport_accumulates "
           f"(requests={state.stats.real_requests_since_refresh}, "
           f"slugs={list(state.refpool.slugs)})")
 
 
 def test_anthropic_transport_independent_instances() -> None:
-    """两个 transport 实例彼此独立 —— state 不串台。"""
+    """Two transport instances are independent of each other -- state does not cross over."""
     t1 = TelosAnthropicTransport(api_key="k1", session_id="a")
     t2 = TelosAnthropicTransport(api_key="k2", session_id="b")
     t1._inner = _MockAnthropicClient()

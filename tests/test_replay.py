@@ -1,4 +1,4 @@
-"""``telos.replay`` 单测：用注入的假 sender 重放，不打网络。"""
+"""``telos.replay`` unit tests: replay with an injected fake sender, no network."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from telos.scripts.build_savings_dashboard import aggregate
 
 
 def _turns() -> list[dict]:
-    """两轮：第二轮带一大段重复 bash 输出（RTK 的理想目标）。"""
+    """Two turns: the second carries a large block of repeated bash output (an ideal RTK target)."""
     big = "start\n" + ("compiling module foo\n" * 300) + "done\n"
     return [
         {"call_index": 1, "request": {
@@ -35,7 +35,7 @@ def _turns() -> list[dict]:
 
 
 def _make_sender() -> tuple:
-    """返回 (sender, seen_wires)；usage 与 wire 体积粗略挂钩。"""
+    """Returns (sender, seen_wires); usage is roughly proportional to wire size."""
     seen: list[dict] = []
 
     def sender(wire):
@@ -68,20 +68,20 @@ def test_replay_forces_max_tokens_and_strips_streaming() -> None:
     replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="s", compare_group="g", sender=sender)
     for wire in seen:
-        assert wire["max_tokens"] == 1, "replay 应把 max_tokens 强制为 1"
+        assert wire["max_tokens"] == 1, "replay should force max_tokens to 1"
         assert "stream" not in wire
         assert "tool_choice" not in wire
     print("✓ test_replay_forces_max_tokens_and_strips_streaming")
 
 
 def test_replay_injects_cache_namespace() -> None:
-    """默认给每个 mode 注入唯一 system 前缀，缓存隔离。"""
+    """By default, inject a unique system prefix per mode for cache isolation."""
     sender, seen = _make_sender()
     replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="sess-Y", compare_group="g", sender=sender)
     blob = json.dumps(seen)
     assert "telos-replay ns=sess-Y/none" in blob
-    # 关掉隔离则不注入
+    # with isolation turned off, nothing is injected
     sender2, seen2 = _make_sender()
     replay_session(_turns(), TelosMode.from_label("none"),
                    session_id="sess-Y", compare_group="g", sender=sender2,
@@ -94,12 +94,12 @@ def test_replay_rtk_mode_shrinks_and_records_reduction() -> None:
     sender, seen = _make_sender()
     r = replay_session(_turns(), TelosMode.from_label("rtk"),
                        session_id="s", compare_group="g", sender=sender)
-    # 第二轮带大输出 → reduction 非空
+    # the second turn carries large output → reduction is non-empty
     turn2 = r.records[1]
     red = turn2["tool_output_reduction"]
     assert red["blocks_filtered"] == 1
     assert red["saved_chars"] > 0
-    # 发出去的 wire 里 tool_result 确实被缩短
+    # the tool_result in the emitted wire is indeed shortened
     big_orig = len("start\n" + ("compiling module foo\n" * 300) + "done\n")
     wire2 = seen[1]
     tr = None
@@ -112,7 +112,7 @@ def test_replay_rtk_mode_shrinks_and_records_reduction() -> None:
 
 
 def test_replay_output_feeds_dashboard_compare_panel() -> None:
-    """重放记录应被 dashboard aggregate 收进 compare_groups + replay_groups。"""
+    """Replay records should be picked up by dashboard aggregation into compare_groups + replay_groups."""
     sender, _ = _make_sender()
     all_recs = []
     for label in ("none", "telos", "rtk", "both"):
@@ -128,12 +128,63 @@ def test_replay_output_feeds_dashboard_compare_panel() -> None:
     print("✓ test_replay_output_feeds_dashboard_compare_panel")
 
 
+def test_replay_on_turn_callback_fires_per_turn() -> None:
+    """``on_turn`` is invoked once per turn with a monotonic (idx, total)."""
+    sender, _ = _make_sender()
+    seen: list[tuple[int, int, int]] = []
+
+    def on_turn(result, idx, total):
+        seen.append((idx, total, len(result.records)))
+
+    r = replay_session(_turns(), TelosMode.from_label("both"),
+                       session_id="s", compare_group="g", sender=sender,
+                       on_turn=on_turn)
+    assert [s[0] for s in seen] == [1, 2]      # idx counts up
+    assert all(s[1] == 2 for s in seen)        # total is the turn count
+    assert seen[-1][2] == len(r.records) == 2  # records accumulate
+    print("✓ test_replay_on_turn_callback_fires_per_turn")
+
+
+def test_replay_strips_context_management() -> None:
+    """`context_management` is dropped before sending (newer field; not needed for prefill)."""
+    turns = _turns()
+    turns[0]["request"]["context_management"] = {"edits": [{"type": "clear_tool_uses"}]}
+    sender, seen = _make_sender()
+    replay_session(turns, TelosMode.from_label("none"),
+                   session_id="s", compare_group="g", sender=sender)
+    assert all("context_management" not in wire for wire in seen)
+    print("✓ test_replay_strips_context_management")
+
+
+def test_replay_retryable_classification() -> None:
+    """Transient upstream failures (529 / 5xx / 429 / network) are retryable; 4xx is not."""
+    from telos.replay import _is_retryable
+
+    class _Status(Exception):
+        def __init__(self, code): self.status_code = code
+
+    class APITimeoutError(Exception):
+        pass
+
+    assert _is_retryable(_Status(529))   # overloaded
+    assert _is_retryable(_Status(500))   # internal error
+    assert _is_retryable(_Status(429))   # rate limited
+    assert _is_retryable(APITimeoutError())
+    assert not _is_retryable(_Status(400))   # bad request — do not retry
+    assert not _is_retryable(_Status(404))
+    assert not _is_retryable(ValueError("boom"))
+    print("✓ test_replay_retryable_classification")
+
+
 def main() -> None:
     test_replay_records_carry_mode_and_compare_group()
     test_replay_forces_max_tokens_and_strips_streaming()
     test_replay_injects_cache_namespace()
     test_replay_rtk_mode_shrinks_and_records_reduction()
     test_replay_output_feeds_dashboard_compare_panel()
+    test_replay_on_turn_callback_fires_per_turn()
+    test_replay_strips_context_management()
+    test_replay_retryable_classification()
     print("\nall replay tests passed.")
 
 

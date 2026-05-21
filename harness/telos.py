@@ -1,6 +1,6 @@
-"""Telos harness plugin。
+"""Telos harness plugin.
 
-输入约定：**OpenAI ChatCompletions** 形态的 ``raw_request``：
+Input contract: a ``raw_request`` in **OpenAI ChatCompletions** shape:
 
 ::
 
@@ -15,18 +15,20 @@
       "tools": [{"type": "function", "function": {...}}, ...],
     }
 
-这是 telos 的 vendored Hermes ``mini_swe_runner`` 与上层 chat 循环
-共同发出的格式（通过 ``openai.OpenAI().chat.completions.create``）。
+This is the format emitted jointly by telos's vendored Hermes
+``mini_swe_runner`` and the upper chat loop (via
+``openai.OpenAI().chat.completions.create``).
 
-与 ``hermes.py``（解析 Anthropic ``/v1/messages`` 形态）的区别：
+Differences from ``hermes.py`` (which parses the Anthropic ``/v1/messages`` shape):
 
-- ``messages[].content`` 通常是字符串，而非 content-block 数组；
-- 子调用通过 ``role="tool"`` 单独成 message，而不是嵌在 user 里的
-  ``tool_result`` 块；
-- ``tools[].function.parameters`` 而不是 ``tools[].input_schema``。
+- ``messages[].content`` is usually a string, not a content-block array;
+- a sub-call forms a separate message via ``role="tool"``, instead of being
+  a ``tool_result`` block embedded in a user message;
+- ``tools[].function.parameters`` instead of ``tools[].input_schema``.
 
-ref-pool 触发同样依靠 ``<file path="...">...</file>`` 块（>2KB）—— Telos
-agent 在 SWE-bench prompt 里不一定会塞这种 envelope，但保留兼容。
+ref-pool triggering likewise relies on ``<file path="...">...</file>`` blocks
+(>2KB) — a Telos agent will not necessarily stuff such an envelope into a
+SWE-bench prompt, but compatibility is kept.
 """
 
 from __future__ import annotations
@@ -51,11 +53,12 @@ _FILE_BLOCK_RE = re.compile(r'<file path="([^"]+)">(.*?)</file>', re.DOTALL)
 
 
 def _classify_openai_tool(t: Mapping[str, Any]) -> tuple[str, str | None]:
-    """OpenAI function-tool 的分类：仅靠上游 metadata。
+    """Classify an OpenAI function-tool: relies solely on upstream metadata.
 
-    OpenAI 的 ``tools`` 数组没有原生的 builtin/mcp 划分；harness 如果要
-    进一步区分，需在上举的 ``raw_request`` 里为每个 tool 塑 ``metadata.source``
-    （可选加 ``metadata.mcp_server``）。否则默认 ``user``。
+    OpenAI's ``tools`` array has no native builtin/mcp distinction; if a
+    harness wants to distinguish further, it must shape ``metadata.source``
+    (optionally plus ``metadata.mcp_server``) for each tool in the
+    ``raw_request`` it sends up. Otherwise it defaults to ``user``.
     """
     meta = t.get("metadata") if isinstance(t, Mapping) else None
     if isinstance(meta, Mapping):
@@ -71,7 +74,7 @@ def _slug_from_path(path: str) -> str:
 
 
 def _coerce_content_to_text(content: Any) -> str:
-    """OpenAI message ``content`` 可能是 str 或 list[{type,text}]；统一成字符串。"""
+    """An OpenAI message ``content`` may be a str or list[{type,text}]; normalize to a string."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -122,8 +125,8 @@ class TelosPlugin(HarnessPlugin):
             for i, t in enumerate(raw_request.get("tools") or [])
         )
 
-        # ---- system + messages 在 OpenAI shape 下混在 messages[] 里。
-        # 切：开头连续若干条 role=system 进 system 段；其余进 messages。
+        # ---- under the OpenAI shape, system + messages are mixed into messages[].
+        # Split: the leading run of role=system entries goes into the system segment; the rest into messages.
         raw_messages = list(raw_request.get("messages") or [])
         system_blocks: list[TelosBlock] = []
         cursor = 0
@@ -154,10 +157,10 @@ class TelosPlugin(HarnessPlugin):
                 source_tag="telos/system",
             ))
         else:
-            # 全是 system；cursor 落在末尾，需手动推进
+            # all system; the cursor lands at the end, advance it manually
             cursor = len(raw_messages)
 
-        # ---- 其余 message（user / assistant / tool）----
+        # ---- the remaining messages (user / assistant / tool) ----
         messages: list[TelosMessage] = []
         for mi, msg in enumerate(raw_messages[cursor:], start=cursor):
             role = msg.get("role")
@@ -177,6 +180,21 @@ class TelosPlugin(HarnessPlugin):
                         payload=text_content,
                         source_tag="telos/assistant-text",
                     ))
+                # Preserve ``reasoning_content`` (DeepSeek / OpenAI o-series
+                # thinking-mode field). Reasoning models REQUIRE the previous
+                # turn's reasoning_content to be echoed back on the next call,
+                # so this block must round-trip verbatim — drop it and the
+                # upstream returns "reasoning_content in the thinking mode
+                # must be passed back to the API" (HTTP 400).
+                reasoning = msg.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    blocks.append(TelosBlock(
+                        id=f"msg{mi}/ar",
+                        band=Band.FOLD,
+                        kind="reasoning",
+                        payload=reasoning,
+                        source_tag="telos/assistant-reasoning",
+                    ))
                 for ti, tc in enumerate(msg.get("tool_calls") or []):
                     blocks.append(TelosBlock(
                         id=f"msg{mi}/au{ti}",
@@ -186,13 +204,14 @@ class TelosPlugin(HarnessPlugin):
                         source_tag="telos/assistant-tool-use",
                     ))
                 if not blocks:
-                    # 空 assistant message：跳过，避免 IR 出现空 message
+                    # empty assistant message: skip, to avoid an empty message in the IR
                     continue
                 messages.append(TelosMessage(role="assistant", blocks=tuple(blocks)))
 
             elif role == "tool":
-                # OpenAI: 独立 role=tool message。TELOS 协议里 tool_result
-                # 必须挂在 user message 内（与 Anthropic 对齐），所以包成 user。
+                # OpenAI: a standalone role=tool message. In the TELOS protocol a
+                # tool_result must be attached inside a user message (aligned with
+                # Anthropic), so we wrap it into a user message.
                 payload = {
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id", ""),
@@ -208,7 +227,7 @@ class TelosPlugin(HarnessPlugin):
                 messages.append(TelosMessage(role="user", blocks=blocks))
 
             elif role == "system":
-                # 中途出现的 system（不常见）：当 PIN 文本插进 user 段。
+                # a system message appearing mid-stream (uncommon): insert it as a PIN text into the user segment.
                 blocks = (TelosBlock(
                     id=f"msg{mi}/sys",
                     band=Band.PIN,

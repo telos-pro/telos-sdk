@@ -1,19 +1,23 @@
-"""会话语料库 —— proxy 把每次 ``/v1/messages`` 的**原始请求**录到磁盘，
-供 ``telos replay`` 之后重放对照。
+"""Session corpus —— the proxy records the **raw request** of every
+``/v1/messages`` call to disk, so that ``telos replay`` can replay them for
+comparison later.
 
-为什么只录请求、不录响应：Anthropic ``/v1/messages`` 是无状态的，第 N 轮
-的请求体里 ``messages[]`` 已经包含了前 N-1 轮的全部 assistant 回复和
-tool_result。所以「请求序列」本身就是完整的可重放轨迹；assistant 响应
-不必单独存（也避免把模型输出落盘）。
+Why only requests are recorded, not responses: Anthropic ``/v1/messages`` is
+stateless; the request body of turn N already contains all assistant replies and
+tool_results from the prior N-1 turns. So the "request sequence" itself is a
+complete, replayable trace; assistant responses need not be stored separately
+(which also avoids writing model output to disk).
 
-录的是 client→proxy 的**原始**请求（RTK 过滤前、TELOS 改写前），即「规范
-输入」。replay 时每个 mode 各自从同一份规范输入重新推导 wire，对照才公平。
+What is recorded is the **raw** client→proxy request (before RTK filtering,
+before TELOS rewriting), i.e. the "canonical input". On replay each mode
+re-derives the wire from the same canonical input, so the comparison is fair.
 
-默认目录 ``~/.telos/corpus/``，一个 session 一个 ``<session>.jsonl``。
+The default directory is ``~/.telos/corpus/``, one ``<session>.jsonl`` per session.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -23,11 +27,27 @@ from typing import Any
 
 DEFAULT_CORPUS_DIR = Path.home() / ".telos" / "corpus"
 
+_MAX_NAME_LEN = 120  # filesystem-friendly cap for a corpus filename stem
+
 
 def _safe_name(session_id: str) -> str:
-    """把 session_id 变成安全的文件名（非字母数字 . _ - 一律替换成 _）。"""
-    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)[:120]
-    return cleaned or "anon"
+    """Turn a session_id into a safe, **collision-free** filename stem.
+
+    Anything outside ``[A-Za-z0-9._-]`` becomes ``_``. A plain truncation is not
+    enough: harness session ids can be long JSON blobs (``device_id`` +
+    ``account_uuid`` + the real ``session_id``), and the stable device/account
+    prefix alone already overruns the length cap — truncating there would map
+    *every* conversation of one account onto a single file. So when the cleaned
+    name is too long, keep a readable prefix and append a hash of the **full**
+    id, which keeps distinct sessions in distinct files.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    if not cleaned:
+        return "anon"
+    if len(cleaned) <= _MAX_NAME_LEN:
+        return cleaned
+    digest = hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:16]
+    return cleaned[: _MAX_NAME_LEN - len(digest) - 1] + "-" + digest
 
 
 def record_call(
@@ -38,10 +58,12 @@ def record_call(
     *,
     ts: float | None = None,
 ) -> None:
-    """把一次调用的原始请求 append 到 ``<corpus_dir>/<session>.jsonl``。
+    """Append the raw request of one call to ``<corpus_dir>/<session>.jsonl``.
 
-    调用方负责保证 ``request`` 是 client 发来的原始 body（未经 RTK / TELOS
-    改写）。本函数从不抛错由调用方决定——这里照常抛，proxy 侧包 try。
+    The caller is responsible for ensuring ``request`` is the raw body sent by the
+    client (not rewritten by RTK / TELOS). This function leaves it to the caller
+    to decide whether to raise —— it raises normally here, and the proxy side
+    wraps it in a try.
     """
     corpus_dir.mkdir(parents=True, exist_ok=True)
     path = corpus_dir / f"{_safe_name(session_id)}.jsonl"
@@ -61,6 +83,25 @@ class CorpusSessionInfo:
     n_calls: int
     first_ts: float
     last_ts: float
+    handle: str = ""        #: the filename stem — a short, copy-pasteable id for ``--session``
+
+
+def display_session(session_id: str) -> str:
+    """A short, human-readable label for a session id.
+
+    Harness session ids are often a JSON blob carrying ``device_id`` /
+    ``account_uuid`` / the real ``session_id``; show just the inner
+    ``session_id`` when present, otherwise the id as-is (clipped).
+    """
+    sid = (session_id or "").strip()
+    if sid.startswith("{"):
+        try:
+            inner = json.loads(sid).get("session_id")
+        except (json.JSONDecodeError, AttributeError):
+            inner = None
+        if inner:
+            return str(inner)
+    return sid if len(sid) <= 48 else sid[:45] + "..."
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:
@@ -77,8 +118,21 @@ def _read_lines(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _first_record(path: Path) -> dict[str, Any] | None:
+    """Read just the first JSON line of a corpus file (cheap id probe)."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    return json.loads(line)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
 def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
-    """扫描语料目录，返回每个 session 的摘要（按 last_ts 倒序）。"""
+    """Scan the corpus directory, return a summary of each session (descending by last_ts)."""
     if not corpus_dir.exists():
         return []
     infos: list[CorpusSessionInfo] = []
@@ -94,29 +148,42 @@ def list_sessions(corpus_dir: Path) -> list[CorpusSessionInfo]:
             n_calls=len(recs),
             first_ts=min(ts_vals) if ts_vals else 0.0,
             last_ts=max(ts_vals) if ts_vals else 0.0,
+            handle=path.stem,
         ))
     infos.sort(key=lambda i: i.last_ts, reverse=True)
     return infos
 
 
 def load_session(corpus_dir: Path, session_id: str) -> list[dict[str, Any]]:
-    """读出某个 session 的全部轮次，按 ``call_index`` 升序。
+    """Read all turns of a session, in ascending ``call_index`` order.
 
-    ``session_id`` 既可传真实 id，也可传文件名 stem —— 两种都能命中。
-    找不到时抛 ``FileNotFoundError``。
+    ``session_id`` resolves flexibly — any of these work:
+
+    - the full stored id (the harness JSON blob);
+    - the short ``handle`` / filename stem shown by ``telos replay --list``;
+    - the inner per-conversation id shown in the ``session`` column
+      (e.g. ``70939675-...``), see :func:`display_session`.
+
+    Raises ``FileNotFoundError`` if nothing matches.
     """
-    candidates = [corpus_dir / f"{_safe_name(session_id)}.jsonl"]
-    # 真实 id 与 safe 文件名不一致时，回退到全目录扫描匹配内部 session_id。
-    if not candidates[0].exists() and corpus_dir.exists():
-        for path in corpus_dir.glob("*.jsonl"):
-            recs = _read_lines(path)
-            if recs and recs[0].get("session_id") == session_id:
-                candidates = [path]
-                break
-    for path in candidates:
-        if path.exists():
-            recs = _read_lines(path)
-            recs.sort(key=lambda r: int(r.get("call_index") or 0))
-            return recs
+    # 1. fast path: the file named directly after the (sanitized) id.
+    direct = corpus_dir / f"{_safe_name(session_id)}.jsonl"
+    if direct.exists():
+        recs = _read_lines(direct)
+        recs.sort(key=lambda r: int(r.get("call_index") or 0))
+        return recs
+
+    # 2. scan: match by filename stem, full stored id, or inner display id.
+    if corpus_dir.exists():
+        for path in sorted(corpus_dir.glob("*.jsonl")):
+            first = _first_record(path)
+            stored = (first or {}).get("session_id") or ""
+            if (path.stem == session_id
+                    or stored == session_id
+                    or display_session(stored) == session_id):
+                recs = _read_lines(path)
+                recs.sort(key=lambda r: int(r.get("call_index") or 0))
+                return recs
+
     raise FileNotFoundError(
-        f"corpus 里找不到 session {session_id!r}（目录 {corpus_dir}）")
+        f"session {session_id!r} not found in corpus (directory {corpus_dir})")

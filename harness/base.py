@@ -1,4 +1,4 @@
-"""Harness plugin 抽象基类。"""
+"""Harness plugin abstract base class."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from telos.ir import TelosIR
 
 
 class HarnessPlugin(ABC):
-    """harness plugin = 把上游 agent 的原始请求翻译成 TelosIR 的纯函数。
+    """A harness plugin = a pure function that translates an upstream agent's raw request into a TelosIR.
 
-    *无状态*：相同输入永远输出相同 IR。
+    *Stateless*: the same input always produces the same IR.
     """
 
     @abstractmethod

@@ -1,6 +1,7 @@
-"""Engine adapter 抽象基类与能力矩阵。
+"""Engine adapter abstract base class and capability matrix.
 
-每个 adapter 都实现这个接口；bridge 永远只看接口，不分支判断 engine 名。
+Every adapter implements this interface; the bridge always works against
+the interface and never branches on the engine name.
 """
 
 from __future__ import annotations
@@ -13,58 +14,62 @@ from telos.ir import TelosIR, UsageReport
 
 
 # ---------------------------------------------------------------------------
-# 能力矩阵
+# Capability matrix
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class EngineCapabilities:
-    """声明 engine 支持哪些 cache 控制原语。
+    """Declares which cache control primitives an engine supports.
 
-    bridge 用这些 bool 决定是否调对应的 adapter 方法；adapter 自己
-    *绝不能* 在不支持时偷偷做 no-op，必须显式声明 ``False``。
+    The bridge uses these booleans to decide whether to call the
+    corresponding adapter method; an adapter must *never* silently turn
+    an unsupported operation into a no-op — it must explicitly declare
+    ``False``.
     """
 
-    explicit_breakpoints: bool       #: 仅 Anthropic
+    explicit_breakpoints: bool       #: Anthropic only
     ttl_control: Literal["none", "presets", "seconds"]
-    prewarmable: bool                #: ``max_tokens:0`` 风格的 keep-alive
+    prewarmable: bool                #: ``max_tokens:0``-style keep-alive
     routing_key: bool                #: OpenAI ``prompt_cache_key``
     retention_policy: Literal["fixed", "configurable"]
-    max_breakpoints: int             #: 0 = 无显式 BP
+    max_breakpoints: int             #: 0 = no explicit BP
     thinking_preserved_across_non_tool_result: bool = False
-    """修复 R6：Opus 4.5+/Sonnet 4.6+ 才为 True；早期模型与 Haiku 全为 False。"""
+    """Fix R6: True only for Opus 4.5+/Sonnet 4.6+; False for all earlier models and Haiku."""
 
-    # —— 双向能力（vLLM / SGLang 才有；闭源 API 全部 False）————————————
-    cache_probe: bool = False        #: 客户端可以读 server 端缓存命中状态
-    span_eviction: bool = False      #: 客户端可以显式释放某段 KV 块
-    fork_and_replace: bool = False   #: SGLang radix fork：在保留前缀的前提下替换尾段
-    tier_hint: bool = False          #: HiCache 三级（GPU/CPU/disk）显式提示
-    pin_unpin: bool = False          #: 显式 pin / unpin 防 LRU 淘汰
+    # —— Bidirectional capabilities (vLLM / SGLang only; all False for closed APIs) ——
+    cache_probe: bool = False        #: client can read server-side cache hit status
+    span_eviction: bool = False      #: client can explicitly release a span of KV blocks
+    fork_and_replace: bool = False   #: SGLang radix fork: replace the tail while keeping the prefix
+    tier_hint: bool = False          #: HiCache three-tier (GPU/CPU/disk) explicit hint
+    pin_unpin: bool = False          #: explicit pin / unpin to prevent LRU eviction
 
 
 # ---------------------------------------------------------------------------
-# Mark slot 抽象 —— bridge 只看到 slot 列表，不知道 cache_control 长啥样
+# Mark slot abstraction —— the bridge only sees a list of slots, it does not
+# know what cache_control looks like
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class MarkSlot:
-    """单个 cache 锚位的位置 + 期望 TTL。
+    """A single cache anchor's position + desired TTL.
 
-    "位置"是逻辑指针：``segment`` ∈ {``"tools"``, ``"system"``, ``"message"``}
-    + ``index`` 表示在该段内的第几个 block。adapter 在 ``emit`` 时把它翻译
-    成 engine 私有字段（Anthropic 的 ``cache_control``、OpenAI 的
-    ``prompt_cache_key`` 衍生 hash 等）。
+    "Position" is a logical pointer: ``segment`` ∈ {``"tools"``, ``"system"``,
+    ``"message"``} + ``index`` indicates which block within that segment. At
+    ``emit`` time the adapter translates it into engine-private fields
+    (Anthropic's ``cache_control``, an OpenAI ``prompt_cache_key``-derived
+    hash, etc.).
     """
 
-    name: str                        #: 诊断用：BP-T / BP-S / BP-R / BP-X / BP-mid
+    name: str                        #: diagnostic: BP-T / BP-S / BP-R / BP-X / BP-mid
     segment: Literal["tools", "system", "message"]
-    index: int                       #: segment 内 block index；message 段还需 message_index
+    index: int                       #: block index within the segment; the message segment also needs message_index
     message_index: int | None = None
     ttl_class: Literal["short", "long", "none"] = "long"
 
 
 @dataclass(frozen=True)
 class EmitPlan:
-    """``Mark()`` 的返回值；engine 私有的 emit 决策。"""
+    """Return value of ``Mark()``; the engine-private emit decision."""
 
     slots: tuple[MarkSlot, ...] = ()
     routing_key: str | None = None
@@ -72,11 +77,11 @@ class EmitPlan:
 
 
 # ---------------------------------------------------------------------------
-# Adapter 基类
+# Adapter base class
 # ---------------------------------------------------------------------------
 
 class EngineAdapter(ABC):
-    """三个方法 + 一个属性，engine adapter 的全部接口。"""
+    """Three methods + one property — the entire interface of an engine adapter."""
 
     @property
     @abstractmethod
@@ -84,28 +89,29 @@ class EngineAdapter(ABC):
 
     @abstractmethod
     def plan_marks(self, ir: TelosIR) -> EmitPlan:
-        """根据 IR 决定本次 emit 把锚位放在哪。"""
+        """Decide where to place the anchors for this emit, based on the IR."""
 
     @abstractmethod
     def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
-        """把 IR + plan 翻译成 wire request（dict 形态，调用方自己 POST）。"""
+        """Translate IR + plan into a wire request (dict form; the caller POSTs it itself)."""
 
     @abstractmethod
     def parse_usage(self, response: Mapping[str, Any]) -> UsageReport:
-        """从 engine response 提取 usage，归一为 ``UsageReport``。"""
+        """Extract usage from the engine response, normalized into a ``UsageReport``."""
 
     def refresh(self, ir: TelosIR, plan: EmitPlan) -> None:
-        """可选：发起 keep-alive 请求；默认 no-op。"""
+        """Optional: issue a keep-alive request; no-op by default."""
         return None
 
 
 # ---------------------------------------------------------------------------
-# 双向 mixin —— 仅 vLLM / SGLang 实现；bridge 用 isinstance 判断
+# Bidirectional mixin —— implemented only by vLLM / SGLang; the bridge uses
+# isinstance to detect it
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """server 端 prefix-cache 命中查询结果。"""
+    """Result of a server-side prefix-cache hit query."""
 
     hit: bool
     cached_token_count: int = 0
@@ -113,26 +119,30 @@ class ProbeResult:
 
 
 class BidirectionalEngineAdapter(EngineAdapter):
-    """开源推理引擎独有的"读 + 写"控制面。
+    """The "read + write" control plane unique to open-source inference engines.
 
-    实现这个抽象类的 adapter，必须在 ``capabilities`` 里把对应的能力位
-    设成 True；bridge 在调用前会 ``isinstance`` 判断，闭源 API 不实现这个类
-    所以 bridge 不会误调。
+    An adapter implementing this abstract class must set the corresponding
+    capability bits to True in ``capabilities``; the bridge runs an
+    ``isinstance`` check before calling, and closed APIs do not implement
+    this class, so the bridge will not call them by mistake.
     """
 
     def probe(self, ir: TelosIR, plan: EmitPlan) -> ProbeResult:
-        """问 server："你那边还缓存着这个前缀吗？"
+        """Ask the server: "Do you still have this prefix cached?"
 
-        默认返回 miss；具体 adapter 覆盖。返回 ``hit=True`` 时 bridge 可以
-        跳过即将发起的 ``refresh`` 请求，省一次 RTT。
+        Returns a miss by default; concrete adapters override it. When it
+        returns ``hit=True`` the bridge can skip the ``refresh`` request it
+        was about to issue, saving one RTT.
         """
         return ProbeResult(hit=False)
 
     def evict_span(self, ir: TelosIR, start_block: int, end_block: int) -> Mapping[str, Any]:
-        """显式淘汰一段 KV 块；返回随下次 emit 一起带的 ``cache_policy`` 片段。
+        """Explicitly evict a span of KV blocks; returns the ``cache_policy``
+        fragment to carry along with the next emit.
 
-        bridge 在做 ``Fold`` 时调用：服务端释放旧 span 的 KV，下次请求只
-        重算 summary 这段短得多的尾部。"""
+        The bridge calls this during a ``Fold``: the server releases the KV
+        of the old span, and the next request only recomputes the much
+        shorter summary tail."""
         return {}
 
     def fork_and_replace(
@@ -141,10 +151,12 @@ class BidirectionalEngineAdapter(EngineAdapter):
         path_hash: str,
         replace_suffix: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        """radix fork + suffix 替换；SGLang 专属，vLLM 仅部分支持。
+        """Radix fork + suffix replacement; SGLang-exclusive, only partially
+        supported by vLLM.
 
-        作用：保留 ``path_hash`` 对应的前缀 KV 不变，把它后面那段换成
-        ``replace_suffix``（通常是一段短摘要）。这是 ``Fold`` 真正的"零重算"
-        实现——闭源 API 完全做不到。
+        Effect: keep the prefix KV corresponding to ``path_hash`` unchanged,
+        and replace the span after it with ``replace_suffix`` (typically a
+        short summary). This is ``Fold``'s true "zero recomputation"
+        implementation — closed APIs simply cannot do this.
         """
         return {}

@@ -1,11 +1,12 @@
-"""harness §5 顺序回归：多 content-block user message 必须产生合法 IR。
+"""harness §5 ordering regression: a multi-content-block user message must produce a valid IR.
 
-针对的真实 bug：Claude Code / Hermes 的 user message 常常是多 part 结构
-（text + tool_result + image），每个 text 自带 envelope。旧代码每个 content
-item 各自 expand 成 ``(PIN, FOLD*, DROP*)``，然后 ``extend`` 拼接，结果是
-``PIN, DROP, PIN, DROP, ...`` —— 违反 ``pin* → fold* → drop*``。
+The real bug targeted: Claude Code / Hermes user messages are often multi-part structures
+(text + tool_result + image), and each text carries its own envelope. The old code expanded
+each content item separately into ``(PIN, FOLD*, DROP*)``, then concatenated with ``extend``,
+yielding ``PIN, DROP, PIN, DROP, ...`` -- which violates ``pin* → fold* → drop*``.
 
-修复后：harness 在 message 级别用 ``enforce_band_order`` 兜底，确保 §5 成立。
+After the fix: the harness applies ``enforce_band_order`` as a fallback at the message level,
+ensuring §5 holds.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from telos import Band, Bridge, load_engine, load_harness
 
 
 def _user_with_n_text_blocks(n: int) -> dict:
-    """构造一个 user message，里面有 n 个 text content blocks，
-    每个都自带 ``<environment_info>`` envelope（DROP 候选）。"""
+    """Constructs a user message containing n text content blocks,
+    each carrying its own ``<environment_info>`` envelope (a DROP candidate)."""
     return {
         "model": "claude-opus-4-7",
         "max_tokens": 64,
@@ -33,7 +34,7 @@ def _user_with_n_text_blocks(n: int) -> dict:
 
 
 def _assert_band_order(blocks) -> None:
-    """§5 顺序：tool_result* → pin* → fold* → drop*（tool_result 视作 rank -1）。"""
+    """§5 ordering: tool_result* → pin* → fold* → drop* (tool_result is treated as rank -1)."""
     rank = {Band.PIN: 0, Band.FOLD: 1, Band.DROP: 2}
     last = -2
     for b in blocks:
@@ -44,12 +45,12 @@ def _assert_band_order(blocks) -> None:
 
 def test_openclaw_multiple_text_blocks() -> None:
     h = load_harness("openclaw")
-    for n in (2, 4, 13):  # 13 模拟真实 Claude Code 长对话首条
+    for n in (2, 4, 13):  # 13 simulates the first message of a real long Claude Code conversation
         ir = h.parse(_user_with_n_text_blocks(n), session_id=f"oc-{n}",
                      engine="anthropic", model="claude-opus-4-7")
         msg = ir.messages[0]
         _assert_band_order(msg.blocks)
-        # Bridge 构造会再次校验全 IR 不变量
+        # the Bridge constructor re-validates all IR invariants
         Bridge(ir, load_engine("anthropic"))
     print("✓ test_openclaw_multiple_text_blocks")
 
@@ -65,8 +66,8 @@ def test_hermes_multiple_text_blocks() -> None:
 
 
 def test_pins_preserved_in_source_order() -> None:
-    """同一带内必须保留 content 源顺序（stable sort）。
-    Question 0 / 1 / 2 三个 PIN 在排序后仍按 0, 1, 2。"""
+    """Within the same band, the source order of content must be preserved (stable sort).
+    The three PINs Question 0 / 1 / 2 remain in order 0, 1, 2 after sorting."""
     h = load_harness("openclaw")
     ir = h.parse(_user_with_n_text_blocks(3), session_id="stable",
                  engine="anthropic")
@@ -76,7 +77,7 @@ def test_pins_preserved_in_source_order() -> None:
 
 
 def test_user_text_then_tool_result_then_text() -> None:
-    """混合 text + tool_result + text：tool_result 居首，其余 pin*→fold*→drop*。"""
+    """Mixed text + tool_result + text: tool_result comes first, the rest is pin*→fold*→drop*."""
     req = {
         "model": "claude-opus-4-7",
         "max_tokens": 64,
@@ -100,7 +101,7 @@ def test_user_text_then_tool_result_then_text() -> None:
     bands = [b.band for b in blocks]
     assert bands.count(Band.PIN) == 2
     assert bands.count(Band.FOLD) == 1  # tool_result
-    assert bands.count(Band.DROP) == 2  # 两个 envelope
+    assert bands.count(Band.DROP) == 2  # two envelopes
     Bridge(ir, load_engine("anthropic"))
     print("✓ test_user_text_then_tool_result_then_text")
 

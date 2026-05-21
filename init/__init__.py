@@ -1,22 +1,42 @@
-"""TELOS agent 接入器 —— ``python -m telos.init --agent <name>``。
+"""TELOS agent connectors —— ``python -m telos.init``.
 
-每个 agent 一个 installer 模块，参照 RTK 的 ``src/hooks/init.rs`` 的
-``run_*_mode`` 模式。Installer 只做一件事：让 agent 在启动时把
-``ANTHROPIC_BASE_URL`` 指向本地代理。
+One installer per harness:
 
-支持的 agent：
-
-- ``claude-code``: patch ``~/.claude/settings.json`` 的 ``env`` 字段
-- ``generic``:    打印一份 shell export 指令，由用户自行加入 rc 文件
+- ``claude-code``: patches the ``env`` field of ``~/.claude/settings.json``
+  (Claude Code reads ``ANTHROPIC_BASE_URL`` from there at launch).
+- ``openclaw``: patches the primary provider's ``baseUrl`` in
+  ``~/.openclaw/openclaw.json`` to route through the local telos gateway
+  (and mirrors the original URL into telos's upstream table so the gateway
+  can forward verbatim).
+- ``hermes``: patches the top-level ``model.base_url`` in
+  ``~/.hermes/config.yaml`` (analogous pattern).
+- ``codex``: launcher-only — codex does not honor a base-URL env var; the
+  ``telos codex`` launcher injects ``OPENAI_BASE_URL`` into the subprocess
+  at startup.
+- ``generic``: prints a set of shell ``export`` commands the user can add
+  to their rc file.
 """
 
+from __future__ import annotations
+
+from typing import Callable
+
+from telos.init.anthropic_env import make_env_installer
 from telos.init.base import AgentInstaller, InstallResult
 from telos.init.claude_code import ClaudeCodeInstaller
 from telos.init.generic import GenericInstaller
+from telos.init.hermes import HermesInstaller
+from telos.init.openclaw import OpenClawInstaller
 
-INSTALLERS: dict[str, type[AgentInstaller]] = {
+# name → factory; the factory signature is uniformly ``(*, proxy_url=...) -> AgentInstaller``.
+InstallerFactory = Callable[..., AgentInstaller]
+
+INSTALLERS: dict[str, InstallerFactory] = {
     "claude-code": ClaudeCodeInstaller,
+    "codex": make_env_installer("codex", "OPENAI_BASE_URL"),
+    "openclaw": OpenClawInstaller,
+    "hermes": HermesInstaller,
     "generic": GenericInstaller,
 }
 
-__all__ = ["AgentInstaller", "InstallResult", "INSTALLERS"]
+__all__ = ["AgentInstaller", "InstallResult", "INSTALLERS", "InstallerFactory"]

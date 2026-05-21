@@ -22,3 +22,11 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log
+
+# showcase — generated at run time; corpus.jsonl + replay_responses.json are tracked
+showcase/dashboard.html
+showcase/usage.jsonl
+showcase/demo.cast
+"\345\256\243\344\274\240\347\250\277.md"
+promo-assets/
+宣传稿.md

@@ -1,4 +1,4 @@
-"""Installer 基类与统一返回结构。"""
+"""Installer base class and unified return structure."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 @dataclass
 class InstallResult:
-    """Installer 操作结果，给 CLI / 测试统一格式。"""
+    """Installer operation result, providing a unified format for the CLI / tests."""
 
     agent: str
     action: str                              # "install" / "uninstall"
@@ -20,13 +20,14 @@ class InstallResult:
 
 
 class AgentInstaller(ABC):
-    """每个 agent 一个 installer。
+    """One installer per agent.
 
-    Installer 只对配置文件做幂等 patch：``install`` 多次 = 一次；
-    ``uninstall`` 严格还原到 install 之前的状态（用 ``.bak`` 备份）。
+    Installers only apply idempotent patches to config files: running ``install``
+    multiple times is equivalent to running it once; ``uninstall`` strictly restores
+    the state from before ``install`` (using ``.bak`` backups).
     """
 
-    name: str = "base"  # 子类覆盖
+    name: str = "base"  # overridden by subclasses
 
     def __init__(self, *, proxy_url: str = "http://127.0.0.1:7171") -> None:
         self.proxy_url = proxy_url

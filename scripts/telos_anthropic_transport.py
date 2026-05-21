@@ -1,25 +1,29 @@
-"""TelosAnthropicTransport：把 Anthropic ``messages.create`` 串到 telos。
+"""TelosAnthropicTransport: wires Anthropic ``messages.create`` through telos.
 
-OpenClaw / Hermes agent 调用：
+OpenClaw / Hermes agents call:
 
     self.client.messages.create(model=..., system=..., messages=[...], tools=[...])
 
-本 transport 实现同样接口，但内部走对应 harness → TELOS Bridge →
-canonicalize / band-reorder → 用 ``AnthropicAdapter.emit()`` 重新生成带
-``cache_control`` 标记的 wire → 真正发到 Anthropic ``/v1/messages``。
+This transport implements the same interface, but internally routes through the
+corresponding harness → TELOS Bridge → canonicalize / band-reorder → uses
+``AnthropicAdapter.emit()`` to regenerate the wire with ``cache_control`` markers
+→ actually sends it to Anthropic's ``/v1/messages``.
 
-自动检测 harness：
-- 若 ``system`` 字段包含 ``<system-reminder>`` / ``<command-message>`` 标签，
-  或消息中含 ``thinking`` 块 → ``hermes``（Claude Code）
-- 否则 → ``openclaw``
+Automatic harness detection:
+- If the ``system`` field contains ``<system-reminder>`` / ``<command-message>``
+  tags, or a message contains a ``thinking`` block → ``hermes`` (Claude Code)
+- Otherwise → ``openclaw``
 
-也可在构造时显式传 ``harness_name`` 覆盖自动检测。
+A ``harness_name`` can also be passed explicitly at construction time to
+override automatic detection.
 
-设计要点（与 telos_transport.py 对齐）：
-- 使用 ``engine.emit(ir2, plan)`` 而非自定义 wire builder，确保 Anthropic
-  ``cache_control`` breakpoint 正确插入（§4.2 BP-T / BP-S / BP-R / BP-X）。
-- ``max_tokens``：Anthropic 必填字段，从调用方传入；若未传则默认 8192。
-- usage 同时记 raw 与 normalized，对齐 ``compute-metrics.py`` schema。
+Design notes (aligned with telos_transport.py):
+- Uses ``engine.emit(ir2, plan)`` rather than a custom wire builder, ensuring the
+  Anthropic ``cache_control`` breakpoints are inserted correctly
+  (§4.2 BP-T / BP-S / BP-R / BP-X).
+- ``max_tokens``: a required Anthropic field, passed in by the caller; defaults
+  to 8192 when not passed.
+- usage records both raw and normalized, aligned with the ``compute-metrics.py`` schema.
 """
 
 from __future__ import annotations
@@ -37,29 +41,43 @@ from telos.bridge import BridgeSessionState
 
 
 # ---------------------------------------------------------------------------
-# Harness 自动检测
+# Harness auto-detection
 # ---------------------------------------------------------------------------
 #
-# Claude Code (Hermes) 把 envelope 标签注入的位置不止一处：
-#   - `system` 段：少数客户端配置下出现
-#   - `user message` 的 text 块：**绝大多数 turn 在这里**——每轮新一份
-#                                  `<system-reminder>` / `<command-message>`
-# 旧实现只扫 `system`，导致绝大多数 Claude Code 流量被误判成 openclaw
-# （dashboard 上看到 ``openclaw/*`` source_tag 的真正原因）。
+# Claude Code (Hermes) injects envelope tags in more than one place:
+#   - the `system` segment: appears under a few client configurations
+#   - the text block of a `user message`: **the vast majority of turns are here**
+#                                  — a fresh `<system-reminder>` /
+#                                    `<command-message>` per round
+# The old implementation only scanned `system`, causing the vast majority of
+# Claude Code traffic to be misclassified as openclaw (the real reason
+# ``openclaw/*`` source_tags showed up on the dashboard).
 #
-# 修复思路：
-#   1) 用 (open + close) 配对的正则，避免用户在 prompt 里讨论标签时误中
-#   2) 扫 system 段 **以及** 所有 user message 的 text 内容
-#   3) 增加 `<command-name>`（slash 命令面板会单独注入此标签）
-#   4) 兜底：assistant 已有 `thinking` 块
-#   5) 兜底：tools 列表命中 Claude Code 固有工具集合 ≥ 3 个
+# Fix approach:
+#   1) Use (open + close) paired regexes, to avoid false positives when a user
+#      discusses the tags inside a prompt
+#   2) Scan the system segment **as well as** the text content of all user messages
+#   3) Add `<command-name>` (the slash-command palette injects this tag separately)
+#   4) Fallback: an assistant already has a `thinking` block
+#   5) Fallback: the tools list hits ≥ 3 of Claude Code's intrinsic tool set
+#
+# But content detection has a theoretical blind spot: Claude Code's auxiliary
+# requests sent with Haiku (conversation-title generation / topic detection etc.)
+# have neither tools nor envelope tags, so all 5 rules above miss → misclassified
+# as openclaw. Such requests carry no harness signature at all; content detection
+# cannot solve it.
+#   6) Highest priority — HTTP header fingerprint: the same agent process uses the
+#      same HTTP client, so `User-Agent` / `x-app` are identical on the main
+#      conversation and auxiliary requests — a per-client signal that content
+#      detection cannot obtain yet is stable and reliable for every request. The
+#      proxy path passes the request headers in.
 
 _HERMES_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(rf"<{tag}>.*?</{tag}>", re.DOTALL)
     for tag in ("system-reminder", "command-message", "command-name")
 )
 
-# Claude Code 总是带这一组工具中的若干个；命中 ≥ 3 即认为是 Claude Code。
+# Claude Code always carries several of this tool set; ≥ 3 hits is treated as Claude Code.
 _HERMES_TOOL_FINGERPRINT: frozenset[str] = frozenset({
     "Bash", "Edit", "Read", "Write", "Grep", "Glob",
     "TodoWrite", "Task", "WebFetch", "WebSearch", "NotebookEdit",
@@ -85,7 +103,7 @@ def _flatten_system_text(raw_request: Mapping[str, Any]) -> str:
 
 
 def _iter_user_text(raw_request: Mapping[str, Any]) -> Iterable[str]:
-    """逐条 yield user message 里 text 块的纯字符串。"""
+    """Yield, one by one, the plain strings of text blocks inside user messages."""
     for msg in raw_request.get("messages", []) or []:
         if not isinstance(msg, Mapping) or msg.get("role") != "user":
             continue
@@ -128,27 +146,85 @@ def _tool_fingerprint_matches_hermes(raw_request: Mapping[str, Any]) -> bool:
     return len(names & _HERMES_TOOL_FINGERPRINT) >= _HERMES_TOOL_HITS_REQUIRED
 
 
-def _detect_harness(raw_request: Mapping[str, Any]) -> str:
-    # 1) envelope 标签（system 段 + 所有 user message text）
+# HTTP header fingerprint of the official Claude Code CLI. The same agent process
+# uses the same HTTP client, so these headers are identical on the main
+# conversation and auxiliary requests (Haiku title generation / topic detection
+# etc.) — exactly the per-client signal that content detection cannot obtain yet
+# is stable and reliable for every request.
+_HERMES_USER_AGENT_SUBSTR = "claude-cli"   # User-Agent looks like claude-cli/1.x.x ...
+_HERMES_X_APP_VALUE = "cli"                # Claude Code sets x-app: cli
+
+
+def _detect_harness_from_headers(headers: Mapping[str, str]) -> str | None:
+    """Identify the harness from the HTTP request headers. Hit on Claude Code → ``"hermes"``, otherwise ``None``.
+
+    Header keys are case-insensitive (HTTP spec); here they are lowercased
+    uniformly before lookup, compatible with aiohttp's ``CIMultiDict`` and the
+    plain dicts passed in by unit tests.
+    """
+    if not headers:
+        return None
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    ua = lowered.get("user-agent", "").lower()
+    if _HERMES_USER_AGENT_SUBSTR in ua:
+        return "hermes"
+    if lowered.get("x-app", "").lower() == _HERMES_X_APP_VALUE:
+        return "hermes"
+    return None
+
+
+def _detect_harness_signal(
+    raw_request: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return the **confidently identified** harness, or ``None`` if not identifiable.
+
+    The difference from ``_detect_harness``: here, "no signal hit at all" is
+    faithfully returned as ``None`` rather than being mixed into the ``openclaw``
+    fallback. The proxy uses this for per-client memory — only a confident signal
+    may pin a client, otherwise a Claude Code client whose first request happens
+    to be a tool-less auxiliary request would be permanently mis-pinned as openclaw.
+    """
+    # 0) HTTP header fingerprint — highest priority, reliable for every request (including tool-less auxiliary requests)
+    if headers is not None:
+        from_headers = _detect_harness_from_headers(headers)
+        if from_headers is not None:
+            return from_headers
+
+    # 1) envelope tags (system segment + all user message text)
     if _has_hermes_marker(_flatten_system_text(raw_request)):
         return "hermes"
     for ut in _iter_user_text(raw_request):
         if _has_hermes_marker(ut):
             return "hermes"
 
-    # 2) assistant thinking 块
+    # 2) assistant thinking block
     if _has_thinking_block(raw_request):
         return "hermes"
 
-    # 3) tool 集合指纹（首轮 turn 没注入 reminder 时也能识别）
+    # 3) tool-set fingerprint (works even when the first turn has no reminder injected)
     if _tool_fingerprint_matches_hermes(raw_request):
         return "hermes"
 
-    return "openclaw"
+    return None
+
+
+def _detect_harness(
+    raw_request: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+) -> str:
+    """Identify the harness; fall back to ``openclaw`` when it cannot be identified.
+
+    ``headers`` is optional — the proxy path passes the HTTP request headers,
+    while the SDK transport / replay / direct test calls have no headers and run
+    content detection only. The signature is backward-compatible.
+    """
+    return _detect_harness_signal(raw_request, headers) or "openclaw"
+
 
 
 # ---------------------------------------------------------------------------
-# Usage 归一化：对齐 Anthropic usage schema
+# Usage normalization: aligned with the Anthropic usage schema
 # ---------------------------------------------------------------------------
 
 def _normalize_usage(response_usage: Mapping[str, Any]) -> dict[str, int]:
@@ -163,7 +239,7 @@ def _normalize_usage(response_usage: Mapping[str, Any]) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# IR summary helpers（从 telos_transport.py 复用）
+# IR summary helpers (reused from telos_transport.py)
 # ---------------------------------------------------------------------------
 
 def _summarize_ir(ir) -> dict[str, Any]:
@@ -290,16 +366,16 @@ def _wire_text(wire: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 class TelosAnthropicTransport:
-    """Anthropic-鸭子接口的 client，内部走 TELOS（openclaw 或 hermes harness）。
+    """A client with an Anthropic-shaped duck interface, internally routing through TELOS (openclaw or hermes harness).
 
     Args:
-        api_key:      envvar 读不到时显式传入。
-        base_url:     覆盖默认的 Anthropic API URL（调试用）。
-        session_id:   同一个 session 内复用 Bridge stats。
-        harness_name: ``"openclaw"`` / ``"hermes"`` / ``None``（自动检测）。
-        engine_name:  默认 ``"anthropic"``。
-        usage_log:    每次调用追加一行 jsonl 的路径；``None`` 表示不写。
-        prompt_trace_log: 结构化 prompt trace 日志路径。
+        api_key:      passed explicitly when not readable from an envvar.
+        base_url:     override the default Anthropic API URL (for debugging).
+        session_id:   reuse Bridge stats within the same session.
+        harness_name: ``"openclaw"`` / ``"hermes"`` / ``None`` (auto-detect).
+        engine_name:  defaults to ``"anthropic"``.
+        usage_log:    path that appends one jsonl line per call; ``None`` means don't write.
+        prompt_trace_log: path for the structured prompt trace log.
     """
 
     def __init__(
@@ -314,7 +390,7 @@ class TelosAnthropicTransport:
         prompt_trace_log: str | None = None,
         session_state: BridgeSessionState | None = None,
     ):
-        import anthropic  # 延迟导入
+        import anthropic  # deferred import
 
         kwargs: dict[str, Any] = {
             "api_key": api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -332,17 +408,18 @@ class TelosAnthropicTransport:
         self._prev_wire_text: str = ""
         self._prev_regions: dict[str, Any] | None = None
 
-        # Bridge 跨 turn 状态：transport 一个实例 = 一个 session，state 自然
-        # 跟着这个实例的生命周期累积。caller 想自带 state 也行（多 transport
-        # 共享同一段 conversation 的场景）。
+        # Bridge cross-turn state: one transport instance = one session, so the
+        # state naturally accumulates over this instance's lifetime. The caller
+        # may also bring its own state (the scenario of multiple transports
+        # sharing one conversation).
         self._session_state = (
             session_state if session_state is not None else BridgeSessionState()
         )
 
-        # harness 缓存（auto-detect 时每次可能不同；explicit 时只建一次）
+        # harness cache (may differ per call when auto-detecting; built only once when explicit)
         self._harness_cache: dict[str, Any] = {}
 
-        # 鸭子接口
+        # duck interface
         self.messages = _MessagesNS(self)
 
     @property
@@ -355,7 +432,7 @@ class TelosAnthropicTransport:
         return self._harness_cache[name]
 
     # ------------------------------------------------------------------
-    # 内部：执行一次 create
+    # Internal: execute one create
     # ------------------------------------------------------------------
 
     def _do_create(self, kwargs: dict[str, Any]):
@@ -365,10 +442,10 @@ class TelosAnthropicTransport:
         model = kwargs.get("model", "")
         max_tokens = kwargs.get("max_tokens", 8192)
 
-        # ---- 0. caller 原始输入快照 ----
+        # ---- 0. snapshot of the caller's raw input ----
         input_summary = _summarize_messages(kwargs)
 
-        # ---- 1. 选 harness（explicit > sticky > auto-detect）----
+        # ---- 1. pick the harness (explicit > sticky > auto-detect) ----
         if self._explicit_harness:
             harness_name = self._explicit_harness
         elif self._session_state.sticky_harness:
@@ -387,15 +464,16 @@ class TelosAnthropicTransport:
         )
         ir_in_summary = _summarize_ir(ir)
 
-        # ---- 3. Bridge：canonicalize + plan + emit ----
-        # 关键：传 session_state 让 ref-pool / R8 计数器跨 turn 累积；
-        # 使用 emit_with_plan() 才能跑 _canonicalize_ir（tools 排序、payload
-        # key 排序）—— 直接 engine.emit(ir2, plan) 会漏掉这一步。
+        # ---- 3. Bridge: canonicalize + plan + emit ----
+        # Key point: pass session_state so the ref-pool / R8 counters accumulate
+        # across turns; using emit_with_plan() is required to run _canonicalize_ir
+        # (tools ordering, payload key ordering) — calling engine.emit(ir2, plan)
+        # directly would skip this step.
         bridge = Bridge(ir, self._engine, session_state=self._session_state)
         wire_dict, plan = bridge.emit_with_plan()
         plan_summary = _summarize_plan(plan)
 
-        # ---- 4. 整 wire / 日志快照 ----
+        # ---- 4. assemble wire / log snapshot ----
         ir2 = bridge.snapshot_ir()
         ir_out_summary = _summarize_ir(ir2)
         regions = _flatten_regions(ir_out_summary)
@@ -421,7 +499,7 @@ class TelosAnthropicTransport:
         wire: dict[str, Any] = dict(wire_dict)
         wire["max_tokens"] = max_tokens
 
-        # 透传调用方传入的非 telos 字段
+        # pass through non-telos fields supplied by the caller
         for k in ("temperature", "top_p", "stream", "stop_sequences",
                   "tool_choice", "thinking", "metadata", "timeout"):
             if k in kwargs and kwargs[k] is not None:
@@ -433,24 +511,24 @@ class TelosAnthropicTransport:
             if self._prev_wire_text else 0
         )
 
-        # ---- 5. 真发请求 ----
+        # ---- 5. actually send the request ----
         t0 = time.time()
         response = self._inner.messages.create(**wire)
         dt = time.time() - t0
 
-        # ---- 6. usage 归一化 + 跨 turn 累积 ----
+        # ---- 6. usage normalization + cross-turn accumulation ----
         usage_obj = getattr(response, "usage", None)
         usage_dict = usage_obj.model_dump() if usage_obj is not None else {}
         normalized = _normalize_usage(usage_dict)
         inp_total = normalized["raw_input"] + normalized["cache_read"]
         cache_share = (normalized["cache_read"] / inp_total) if inp_total else 0.0
 
-        # bridge.absorb_usage：调 engine.parse_usage + state.cumulative_cache_creation += ...
-        # 包成 dict 喂给它（anthropic engine 期望 ``{"usage": {...}}``）。
+        # bridge.absorb_usage: calls engine.parse_usage + state.cumulative_cache_creation += ...
+        # Wrap it in a dict to feed it (the anthropic engine expects ``{"usage": {...}}``).
         try:
             bridge.absorb_usage({"usage": usage_dict})
         except Exception:  # noqa: BLE001
-            pass  # 累积失败不影响主路径
+            pass  # an accumulation failure does not affect the main path
 
         if self._usage_log is not None:
             self._usage_log.parent.mkdir(parents=True, exist_ok=True)

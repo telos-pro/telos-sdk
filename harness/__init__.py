@@ -1,1 +1,1 @@
-"""Harness plugin 包入口。"""
+"""Harness plugin package entry point."""

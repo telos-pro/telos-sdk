@@ -1,18 +1,18 @@
 """TELOS — Prompt Reuse via Indexed Span Marking.
 
-三层 cache-友好 prompt 协议的 Python 参考实现。
+Python reference implementation of the three-tier cache-friendly prompt protocol.
 
-公开入口：
+Public entry points:
     from telos import (
         # IR
         Band, TelosBlock, TelosMessage, TelosIR,
         # Bridge
         Bridge,
-        # 工厂
+        # Factories
         load_harness, load_engine,
     )
 
-详见 telos/README.zh.md。
+See telos/README.zh.md for details.
 """
 
 from telos.ir import (

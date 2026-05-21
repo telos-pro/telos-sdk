@@ -1,14 +1,16 @@
-"""DeepSeek adapter（V3+）。
+"""DeepSeek adapter (V3+).
 
-依据：
-- DeepSeek context-caching 文档：硬盘缓存默认开启，无 API 控制面；
-  prefix unit 在三类边界持久化——request boundary（user 输入末 / 模型
-  输出末）、common-prefix detection、固定 token interval。
-- 命中要求 prefix unit 完全匹配。
-- 唯一可行的"政策"是 layout：让稳定大段集中在 system 末尾，让每条
-  user message 内 PIN/FOLD 在前、DROP 在后，让 prefix unit 切在稳定
-  边界上。
-- ``parse_usage`` 直接读 ``prompt_cache_hit_tokens / prompt_cache_miss_tokens``。
+Basis:
+- DeepSeek context-caching docs: disk caching is enabled by default with no
+  API control plane; a prefix unit is persisted at three kinds of
+  boundaries — request boundary (end of user input / end of model output),
+  common-prefix detection, and a fixed token interval.
+- A hit requires the prefix unit to match exactly.
+- The only viable "policy" is layout: keep the stable large spans clustered
+  at the end of the system message, and within each user message put
+  PIN/FOLD first and DROP last, so the prefix unit is cut at stable
+  boundaries.
+- ``parse_usage`` reads ``prompt_cache_hit_tokens / prompt_cache_miss_tokens`` directly.
 """
 
 from __future__ import annotations
@@ -32,12 +34,12 @@ class DeepSeekAdapter(EngineAdapter):
         )
 
     def plan_marks(self, ir: TelosIR) -> EmitPlan:
-        return EmitPlan()  # 完全无控制面
+        return EmitPlan()  # no control plane at all
 
     def emit(self, ir: TelosIR, plan: EmitPlan) -> Mapping[str, Any]:
-        # OpenAI-compatible chat/completions 形态
-        # 关键：把所有 PIN/FOLD 集中到 system 头部、DROP 全部沉到 system 尾部
-        # （DeepSeek 的 prefix unit 是 exact-match，DROP 必须放最后否则前缀漂移）
+        # OpenAI-compatible chat/completions shape
+        # Key point: cluster all PIN/FOLD at the head of the system message and sink all DROP to its tail
+        # (DeepSeek's prefix unit is exact-match; DROP must go last or the prefix drifts)
         ordered_system = sorted(
             ir.system, key=lambda b: 0 if b.band is not Band.DROP else 1,
         )
@@ -51,8 +53,9 @@ class DeepSeekAdapter(EngineAdapter):
                 if blk.kind == "text":
                     text_parts.append(str(blk.payload))
                 elif blk.kind == "tool_result":
-                    # DeepSeek 把 tool_result 作为 role=tool 的 message 处理；这里
-                    # 简化为内联到 user 文本，与其文档示例 "<file content>\n问题" 一致
+                    # DeepSeek treats tool_result as a role=tool message; here we
+                    # simplify by inlining it into the user text, consistent with
+                    # the doc example "<file content>\nquestion"
                     text_parts.append(str(blk.payload.get("content", "")))
                 else:
                     text_parts.append(str(blk.payload))
@@ -71,7 +74,7 @@ class DeepSeekAdapter(EngineAdapter):
         return UsageReport(
             raw_input=miss,
             cache_read=hit,
-            cache_write=0,           # DeepSeek 不单独计 write，含在 miss 价格里
+            cache_write=0,           # DeepSeek does not bill write separately; it is included in the miss price
             output=int(usage.get("completion_tokens", 0)),
             raw=usage,
         )

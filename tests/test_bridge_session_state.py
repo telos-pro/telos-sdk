@@ -1,11 +1,11 @@
-"""``BridgeSessionState`` 跨 turn 累积语义的回归测试。
+"""Regression tests for the cross-turn accumulation semantics of ``BridgeSessionState``.
 
-验证三件事：
-1. ref-pool slug 第二轮 register 是幂等的（不抛错）
-2. fold 状态跨 turn 保持（不被新一轮的完整内容覆盖）
-3. R8 计数器跨 turn 累加
-4. ``cumulative_cache_creation`` 跨 turn 累加
-5. 缺省 (不传 ``session_state``) 时退化到每轮独立 —— 保后向兼容
+Verifies the following:
+1. registering a ref-pool slug on the second turn is idempotent (does not raise)
+2. fold state is preserved across turns (not overwritten by the new turn's full content)
+3. the R8 counter accumulates across turns
+4. ``cumulative_cache_creation`` accumulates across turns
+5. by default (not passing ``session_state``) it degrades to per-turn independence -- preserving backward compatibility
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from telos.bridge import BridgeSessionState
 
 
 def _make_req_with_large_doc(turn: int) -> dict:
-    """每轮请求都带同一个大 system 文档（会进 ref-pool）。"""
+    """Every request carries the same large system document (which goes into the ref-pool)."""
     return {
         "model": "claude-opus-4-7",
         "max_tokens": 64,
         "system": [
             {"type": "text", "text": "You are an engineer agent."},
-            # >2KB 文本，harness 会自动搬到 ref-pool
-            {"type": "text", "text": "AUTH SPEC:\n" + ("规则细节…\n" * 400)},
+            # >2KB of text, the harness will automatically move it to the ref-pool
+            {"type": "text", "text": "AUTH SPEC:\n" + ("Rule detail line.\n" * 400)},
         ],
         "messages": [
             {"role": "user", "content": [{"type": "text",
@@ -32,7 +32,7 @@ def _make_req_with_large_doc(turn: int) -> dict:
 
 
 def test_refpool_persists_across_turns() -> None:
-    """同一 session_state 喂多轮：slug 注册一次，第二轮不抛。"""
+    """Feed multiple turns into the same session_state: the slug is registered once, the second turn does not raise."""
     state = BridgeSessionState()
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
@@ -45,41 +45,41 @@ def test_refpool_persists_across_turns() -> None:
         bridge = Bridge(ir, engine, session_state=state)
         bridge.mark()
 
-    # 三轮共享同一个 RefPool；slug 集只有一份
+    # the three turns share the same RefPool; the slug set has only one entry
     assert len(state.refpool.slugs) == 1, \
-        f"ref-pool 应只注册一次，实际：{state.refpool.slugs}"
+        f"ref-pool should be registered only once, got: {state.refpool.slugs}"
     print(f"✓ test_refpool_persists_across_turns (slug={list(state.refpool.slugs)})")
 
 
 def test_fold_survives_across_turns() -> None:
-    """第一轮 fold 后，第二轮 harness 重新提供完整 payload 也不会还原。"""
+    """After the first turn folds, the harness re-providing the full payload on the second turn does not restore it."""
     state = BridgeSessionState()
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
 
-    # 第一轮：拿到 slug 后 fold 掉
+    # turn 1: fold it after getting the slug
     ir1 = harness.parse(_make_req_with_large_doc(0), session_id="s", engine="anthropic")
     bridge1 = Bridge(ir1, engine, session_state=state)
     slug = next(iter(state.refpool.slugs))
     bridge1.fold(slugs=(slug,))
 
-    # 检查：ref-pool entry 已变成 placeholder
+    # check: the ref-pool entry has become a placeholder
     folded_block = state.refpool._entries[slug]
     assert "folded" in str(folded_block.payload).lower()
 
-    # 第二轮：harness 重新喂同样的 IR（含完整 payload）
+    # turn 2: the harness feeds the same IR again (with the full payload)
     ir2 = harness.parse(_make_req_with_large_doc(1), session_id="s", engine="anthropic")
     bridge2 = Bridge(ir2, engine, session_state=state)
 
-    # 关键：第二轮的 Bridge __init__ 应该用 register_or_skip，不覆盖
+    # key: the second turn's Bridge __init__ should use register_or_skip, not overwrite
     still_folded = state.refpool._entries[slug]
     assert "folded" in str(still_folded.payload).lower(), \
-        f"fold 状态被新一轮 IR 覆盖回完整内容了：{still_folded.payload[:80]}"
+        f"fold state was overwritten back to full content by the new turn's IR: {still_folded.payload[:80]}"
     print("✓ test_fold_survives_across_turns")
 
 
 def test_r8_counter_accumulates() -> None:
-    """emit_with_plan 每次 +1 ``real_requests_since_refresh``。"""
+    """emit_with_plan adds +1 to ``real_requests_since_refresh`` each time."""
     state = BridgeSessionState()
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
@@ -91,12 +91,12 @@ def test_r8_counter_accumulates() -> None:
         bridge.emit_with_plan()
 
     assert state.stats.real_requests_since_refresh == 5, \
-        f"期望 5，实际 {state.stats.real_requests_since_refresh}"
+        f"expected 5, got {state.stats.real_requests_since_refresh}"
     print(f"✓ test_r8_counter_accumulates ({state.stats.real_requests_since_refresh})")
 
 
 def test_cumulative_cache_creation_via_absorb_usage() -> None:
-    """``bridge.absorb_usage`` 把 cache_write tokens 累加进 state。"""
+    """``bridge.absorb_usage`` accumulates cache_write tokens into the state."""
     state = BridgeSessionState()
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
@@ -118,13 +118,13 @@ def test_cumulative_cache_creation_via_absorb_usage() -> None:
         bridge.absorb_usage(resp)
 
     assert state.stats.cumulative_cache_creation == 5000 + 1500 + 0, \
-        f"期望 6500，实际 {state.stats.cumulative_cache_creation}"
+        f"expected 6500, got {state.stats.cumulative_cache_creation}"
     print(f"✓ test_cumulative_cache_creation_via_absorb_usage "
           f"({state.stats.cumulative_cache_creation})")
 
 
 def test_default_state_is_fresh_per_bridge() -> None:
-    """不传 session_state 时，每个 Bridge 独立持有状态 —— 后向兼容。"""
+    """When session_state is not passed, each Bridge holds its own state -- backward compatibility."""
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
 
@@ -134,17 +134,17 @@ def test_default_state_is_fresh_per_bridge() -> None:
     for _ in range(3):
         ir = harness.parse(_make_req_with_large_doc(0),
                             session_id="iso", engine="anthropic")
-        bridge = Bridge(ir, engine)  # ← 不传 session_state
+        bridge = Bridge(ir, engine)  # ← session_state not passed
         bridge.emit_with_plan()
         bridge.absorb_usage(fake)
-        # 每个新 Bridge 都是从 0 开始
+        # each new Bridge starts from 0
         assert bridge.session_state.stats.real_requests_since_refresh == 1
         assert bridge.session_state.stats.cumulative_cache_creation == 9999
     print("✓ test_default_state_is_fresh_per_bridge")
 
 
 def test_explicit_state_shared_across_bridges() -> None:
-    """同一 state 给两个 Bridge：能看到对方的写入。"""
+    """The same state given to two Bridges: each can see the other's writes."""
     state = BridgeSessionState()
     harness = load_harness("openclaw")
     engine = load_engine("anthropic")
@@ -159,7 +159,7 @@ def test_explicit_state_shared_across_bridges() -> None:
     ir2 = harness.parse(_make_req_with_large_doc(1),
                          session_id="x", engine="anthropic")
     b2 = Bridge(ir2, engine, session_state=state)
-    # b2 还没 emit 就应能看到 b1 写入的累计值
+    # before b2 even emits, it should be able to see the cumulative value written by b1
     assert b2.session_state.stats.cumulative_cache_creation == 100
     assert b2.session_state.stats.real_requests_since_refresh == 1
     print("✓ test_explicit_state_shared_across_bridges")

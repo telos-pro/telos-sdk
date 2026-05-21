@@ -1,99 +1,133 @@
 # CHANGELOG
 
-本文件记录用户可见的代码改动；协议层面的设计变动看
-[`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md)。
+This file records user-visible code changes; for protocol-level design changes see
+[`docs/2026-05-06-telos-protocol.md`](docs/2026-05-06-telos-protocol.md).
 
-格式参照 Keep a Changelog；时间用绝对日期。
+The format follows Keep a Changelog; dates are absolute.
+
+---
+
+## [Unreleased] — 2026-05-18
+
+This batch reworks the CLI experience: it upgrades `proxy` into a "gateway + multi-harness manager",
+so that telos installs with one command, integrates with one command, and typing `telos` drops you
+straight into your usual harness.
+
+### Added
+
+- **`telos init` (no arguments)** — auto-detects the harness CLIs installed locally (claude-code / codex /
+  openclaw / hermes), injects gateway-pointing config into each, starts the gateway in the background, and prints
+  the gateway and dashboard addresses.
+- **`telos gateway start|stop|status|restart`** — gateway daemon management.
+  Background start (`subprocess` + `start_new_session`), PID / state written to `~/.telos/`,
+  idempotent, with `--foreground` for foreground operation.
+- **bare `telos` / `telos <harness>`** — an interactive menu to pick a harness (or enter one directly); telos
+  injects the gateway environment variables and then `exec`s into the corresponding harness's CLI.
+- **`telos alias <harness>`** — sets the harness that bare `telos` enters by default.
+- **`telos mode [none|telos|rtk|both]`** — switch the optimization gear; via a localhost control endpoint it
+  **hot-reloads the running gateway** (no restart needed), and persists to config.
+- **`telos dashboard`** — opens the dashboard in the browser (live if the gateway is running, otherwise builds a static HTML).
+- **`~/.telos/config.json`** — new global user config (`telos.config`): default mode,
+  gateway host/port, favorite harness, harness executable-name overrides.
+- **gateway control endpoint** `GET/POST /__telos/control/mode` — loopback only, hot-switches the default mode.
+- **Homebrew formula template** `packaging/telos-sdk.rb`; `pip install telos-sdk` works out of the box.
+
+### Changed
+
+- `proxy` is renamed **gateway** for users: startup banner, CLI, and docs are unified. `telos proxy`
+  is kept as a hidden alias (foreground blocking, fully compatible with the old flags).
+- `telos init`'s `--agent` is renamed `--harness` (`--agent` kept as a hidden alias),
+  and `--proxy-url` is renamed `--gateway-url`; new codex / openclaw / hermes installers added.
 
 ---
 
 ## [Unreleased] — 2026-05-14
 
-本批次围绕两件事：**零侵入接入路径（HTTP 反向代理）**，以及**多轮状态真累积**。
-中期目标全部完成；SDK transport 与代理两条路径功能等价（除 SDK 流式尚未补全）。
+This batch centers on two things: **a zero-intrusion integration path (HTTP reverse proxy)**, and **real cross-turn state accumulation**.
+All mid-term goals are complete; the SDK transport and proxy paths are functionally equivalent (except SDK streaming, which is not yet complete).
 
 ### Added
 
-- **`telos.output_filter`** —— RTK 风格的工具结果过滤层（吸收 rtk-ai/rtk 思路）。
-  - `TelosMode` 四态开关：`none` / `telos` / `rtk` / `both`，两个独立布尔（telos 前缀缓存 + rtk 工具过滤）。
-  - `RtkFilter`：shell-out 到 `rtk` 二进制；`FallbackFilter`：无依赖的纯 Python 过滤器（连续重复行折叠、头尾截断、pytest 摘要），rtk 没装时保证开关仍生效。
-  - `apply_filter(raw, flt) -> (new_raw, FilterStats)`：把 `messages[].tool_result` 里的大段 bash 输出在进 TELOS 管线前缩短。失败永远退化为原样透传。
-  - proxy 新增 `--mode {none,telos,rtk,both}` CLI 开关；单条请求可用 `X-Telos-Mode` header 覆盖（首个请求的取值 sticky 到该 session）。
-  - proxy 新增 `X-Telos-Compare-Group` header：对比实验分组标签。
-- **savings dashboard 对比能力**：usage_log 新增 `mode` / `compare_group` / `tool_output_reduction` / `replay` 字段。
-  - 新「Breakdown by mode」表：每种开关组合的 TELOS 省钱 + RTK token 削减并列。
-  - 新「A/B 对比」面板：同一 `compare_group` 下、不同 mode 的 session 并排展示，自动高亮 combined-saved 最高的 mode。卡片标 `replay`（受控重放）或 `live A/B`（真实双 session）徽章。
-  - 新 KPI「RTK tool output removed」。
-- **`telos.corpus`** —— 会话语料库。proxy 默认把每次调用的**原始请求**录到 `~/.telos/corpus/<session>.jsonl`（只录请求、不录响应），供 replay 重放。
-  - proxy 新增 `--corpus-dir` / `--no-record` 开关。
-- **`telos.replay` + `telos replay` 子命令** —— 录制 → 重放对照引擎。
-  - 把语料库里某个真实会话按多种 mode 各重放一遍：逐字节相同的轮次序列、`max_tokens=1` 只测 prefill/缓存计费、给每个 mode 注入唯一 system 前缀做缓存隔离。
-  - 结果 append 到 usage_log，dashboard 的「A/B 对比」面板自动并排（标 `replay` 徽章）。
-  - 受控实验，避免双 session 的 trajectory 分叉混杂；原理与边界见 [docs/replay-comparison.md](docs/replay-comparison.md)。
-  - CLI：`telos replay --list` / `telos replay --session <id> --modes none,telos,rtk,both`。
-- **`telos.proxy`** —— aiohttp SSE-aware Anthropic 反向代理（路径 B）。
-  - 监听 `POST /v1/messages`，自动检测 harness（openclaw / hermes），跑 TELOS 管线后转发到 Anthropic
-  - 非 `/v1/messages` 路径透明 passthrough
-  - SSE 流式响应支持；旁路解析 `message_start` / `message_delta` 取 usage
-  - LRU session 注册表（默认 10000 上限），按 session_id keyed
+- **`telos.output_filter`** — an RTK-style tool-result filtering layer (absorbing ideas from rtk-ai/rtk).
+  - `TelosMode` four-state switch: `none` / `telos` / `rtk` / `both`, two independent booleans (telos prefix caching + rtk tool filtering).
+  - `RtkFilter`: shells out to the `rtk` binary; `FallbackFilter`: a dependency-free pure-Python filter (consecutive duplicate-line folding, head/tail truncation, pytest summary), ensuring the switch still works when rtk is not installed.
+  - `apply_filter(raw, flt) -> (new_raw, FilterStats)`: shortens large bash output in `messages[].tool_result` before it enters the TELOS pipeline. On failure it always degrades to pass-through.
+  - proxy adds a `--mode {none,telos,rtk,both}` CLI switch; a single request can override it with the `X-Telos-Mode` header (the first request's value is sticky to that session).
+  - proxy adds an `X-Telos-Compare-Group` header: a grouping label for comparison experiments.
+- **savings dashboard comparison capability**: usage_log adds `mode` / `compare_group` / `tool_output_reduction` / `replay` fields.
+  - new "Breakdown by mode" table: TELOS cost savings + RTK token reduction side by side for each switch combination.
+  - new "A/B comparison" panel: sessions with the same `compare_group` but different modes are shown side by side, automatically highlighting the mode with the highest combined-saved. Cards carry a `replay` (controlled replay) or `live A/B` (real dual-session) badge.
+  - new KPI "RTK tool output removed".
+- **`telos.corpus`** — a session corpus. The proxy by default records each call's **original request** to `~/.telos/corpus/<session>.jsonl` (records requests only, not responses), for replay.
+  - proxy adds `--corpus-dir` / `--no-record` switches.
+- **`telos.replay` + the `telos replay` subcommand** — a record → replay comparison engine.
+  - replays a given real session from the corpus once per mode: byte-identical turn sequences, `max_tokens=1` to measure only prefill/cache billing, and injects a unique system prefix per mode for cache isolation.
+  - results are appended to usage_log, and the dashboard's "A/B comparison" panel places them side by side automatically (tagged with a `replay` badge).
+  - a controlled experiment that avoids the trajectory divergence noise of dual sessions; see [docs/replay-comparison.md](docs/replay-comparison.md) for the principle and limits.
+  - CLI: `telos replay --list` / `telos replay --session <id> --modes none,telos,rtk,both`.
+- **`telos.proxy`** — an aiohttp SSE-aware Anthropic reverse proxy (path B).
+  - listens on `POST /v1/messages`, auto-detects the harness (openclaw / hermes), runs the TELOS pipeline, then forwards to Anthropic
+  - transparently passes through non-`/v1/messages` paths
+  - SSE streaming response support; side-channel parsing of `message_start` / `message_delta` to extract usage
+  - LRU session registry (default 10000 cap), keyed by session_id
   - CLI: `python -m telos.proxy` / `telos proxy`
-- **`telos.init`** —— agent 配置注入器，RTK 同款模式。
-  - `claude-code` installer: patch `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`，保留用户原值，幂等，可 `--uninstall` 还原
-  - `generic` installer: 打印 shell export 指令
+- **`telos.init`** — an agent config injector, same pattern as RTK.
+  - `claude-code` installer: patches `env.ANTHROPIC_BASE_URL` in `~/.claude/settings.json`, preserves the user's original value, idempotent, can `--uninstall` to restore
+  - `generic` installer: prints shell export instructions
   - CLI: `python -m telos.init --agent <name>` / `telos init --agent <name>`
-- **`telos` 统一 CLI**：dispatch 子命令 `proxy` / `init`，由 `pyproject.toml` `[project.scripts]` 注册。
-- **`TelosAnthropicTransport`** ([scripts/telos_anthropic_transport.py](scripts/telos_anthropic_transport.py)) —— SDK transport（路径 A）的 Anthropic 端，对称于已有的 `TelosOpenAITransport`。
-  - `messages.create(**kwargs)` 鸭子接口
-  - 自动检测 harness（hermes 标记 → hermes，否则 openclaw）；可显式 `harness_name=` 覆盖
-- **`BridgeSessionState`**（公开 dataclass，[bridge.py](bridge.py)）—— 跨 turn 持久化的 Bridge 状态容器。封装 `RefPool` + `_SessionStats`。
-  - `Bridge.__init__` 新增可选参数 `session_state`；缺省时内部 new 一个（行为退化为旧版每轮独立）
-  - `Bridge.session_state` property 暴露状态给上游
-- **`Bridge.emit_with_plan() -> (wire, plan)`** —— `emit()` 的二元返回版本，包内含完整 `_canonicalize_ir → assert_invariants → plan_marks → engine.emit` 流程。
-- **`RefPool.register_or_skip(slug, block) -> bool`** —— 幂等注册，已存在的 slug 跳过。跨 turn 共享 RefPool 必备。
-- **`ir.enforce_band_order(blocks)`** —— 稳定按 `pin* → fold* → drop*` 排序，公开辅助函数。
-- **稳定 session-id 派生** ([proxy/server.py](proxy/server.py))：内容派生策略 `blake2b(api_key + system + tools + messages[0])`，多轮对话保持同一 session_id。优先级链：`x-telos-session` header → `metadata.user_id` → 派生 hash。
-- **`pyproject.toml`** —— 标准 PEP 517 包，`pip install -e .` 即可让 `telos` 全局可导入。
-- **可观测的累积字段**：proxy usage log 和 transport trace log 都新增 `cumulative.{cache_creation, real_requests_since_refresh, refpool_slugs}` 块。
-- **新 8 套测试**（45 个测试函数）：
-  - [tests/test_proxy_pipeline.py](tests/test_proxy_pipeline.py)（5）—— 管线纯函数
-  - [tests/test_proxy_server.py](tests/test_proxy_server.py)（6）—— mock upstream 端到端
-  - [tests/test_proxy_session_id.py](tests/test_proxy_session_id.py)（9）—— session-id 派生稳定性
-  - [tests/test_proxy_accumulation.py](tests/test_proxy_accumulation.py)（2）—— HTTP 路径多轮累积
-  - [tests/test_bridge_session_state.py](tests/test_bridge_session_state.py)（6）—— Bridge state 共享语义
-  - [tests/test_sdk_transport_accumulation.py](tests/test_sdk_transport_accumulation.py)（3）—— SDK transport 多轮累积
-  - [tests/test_harness_multiblock.py](tests/test_harness_multiblock.py)（4）—— §5 顺序回归
-  - [tests/test_init_claude_code.py](tests/test_init_claude_code.py)（8）—— installer 幂等 / 还原
+- **the unified `telos` CLI**: dispatches the `proxy` / `init` subcommands, registered by `pyproject.toml` `[project.scripts]`.
+- **`TelosAnthropicTransport`** ([scripts/telos_anthropic_transport.py](scripts/telos_anthropic_transport.py)) — the Anthropic end of the SDK transport (path A), symmetric with the existing `TelosOpenAITransport`.
+  - `messages.create(**kwargs)` duck-typed interface
+  - auto-detects the harness (hermes markers → hermes, otherwise openclaw); can be explicitly overridden with `harness_name=`
+- **`BridgeSessionState`** (public dataclass, [bridge.py](bridge.py)) — a container for Bridge state persisted across turns. Wraps `RefPool` + `_SessionStats`.
+  - `Bridge.__init__` adds an optional `session_state` parameter; when omitted it news one internally (behavior degrades to the old per-turn-independent mode)
+  - `Bridge.session_state` property exposes the state to the caller
+- **`Bridge.emit_with_plan() -> (wire, plan)`** — a two-tuple-returning version of `emit()`, internally bundling the full `_canonicalize_ir → assert_invariants → plan_marks → engine.emit` flow.
+- **`RefPool.register_or_skip(slug, block) -> bool`** — idempotent registration, skipping a slug that already exists. Essential for sharing a RefPool across turns.
+- **`ir.enforce_band_order(blocks)`** — stably sorts as `pin* → fold* → drop*`, a public helper function.
+- **stable session-id derivation** ([proxy/server.py](proxy/server.py)): a content-derivation strategy `blake2b(api_key + system + tools + messages[0])`, keeping the same session_id across turns of a multi-turn conversation. Priority chain: `x-telos-session` header → `metadata.user_id` → derived hash.
+- **`pyproject.toml`** — a standard PEP 517 package; `pip install -e .` makes `telos` globally importable.
+- **observable accumulation fields**: both the proxy usage log and the transport trace log add a `cumulative.{cache_creation, real_requests_since_refresh, refpool_slugs}` block.
+- **8 new test suites** (45 test functions):
+  - [tests/test_proxy_pipeline.py](tests/test_proxy_pipeline.py) (5) — pure pipeline functions
+  - [tests/test_proxy_server.py](tests/test_proxy_server.py) (6) — mock-upstream end to end
+  - [tests/test_proxy_session_id.py](tests/test_proxy_session_id.py) (9) — session-id derivation stability
+  - [tests/test_proxy_accumulation.py](tests/test_proxy_accumulation.py) (2) — HTTP-path multi-turn accumulation
+  - [tests/test_bridge_session_state.py](tests/test_bridge_session_state.py) (6) — Bridge state sharing semantics
+  - [tests/test_sdk_transport_accumulation.py](tests/test_sdk_transport_accumulation.py) (3) — SDK transport multi-turn accumulation
+  - [tests/test_harness_multiblock.py](tests/test_harness_multiblock.py) (4) — §5 ordering regression
+  - [tests/test_init_claude_code.py](tests/test_init_claude_code.py) (8) — installer idempotency / restore
 
 ### Fixed
 
-- **harness §5 顺序违反**（[harness/openclaw.py](harness/openclaw.py)、[harness/hermes.py](harness/hermes.py)）：user message 含多个 content block 时，每个 block 各自 expand 成 `(PIN, FOLD*, DROP*)`，旧代码直接拼接导致 `PIN, DROP, PIN, DROP, ...` 违反 `pin* → fold* → drop*`。这是真实 Claude Code 流量必触发的 bug（多 part 内容是常态）。修复：message 级别用 `enforce_band_order` 兜底排序。
-- **canonicalize 漏洞（SDK transport 和 proxy 都有）**：旧代码 `bridge.mark()` 后用 `engine.emit(snapshot_ir, plan)` 直接出 wire，**跳过了 `_canonicalize_ir`**（tools 顺序、payload key 顺序）。导致 tool 数组的多 server / builtin / user 混排顺序不稳，prefix cache 隐性失效。
-  - [proxy/pipeline.py](proxy/pipeline.py) 改用 `bridge.emit_with_plan()`
-  - [scripts/telos_anthropic_transport.py](scripts/telos_anthropic_transport.py) 改用 `bridge.emit_with_plan()`
-  - [scripts/telos_transport.py](scripts/telos_transport.py) 保留自定义 chat-completions wire builder，但补一次 `_canonicalize_ir(snapshot)` 再喂
-- **多轮 Bridge 状态永远归零**：proxy 与 SDK transport 都每次新建 `Bridge`，所以 R8 cache_creation 累计、real_requests 计数永远是 0，refresh 自适应门控永远不触发。`BridgeSessionState` 把这两个字段外置到 session 范围；proxy 用 LRU 注册表 keyed by session_id 持有；transport 用实例字段持有。
-- **proxy 500 风暴**：TELOS 管线抛异常时旧代码返回 500，Anthropic SDK 重试 10 次后崩溃。新增 **passthrough fallback**：默认行为是降级到原 raw 透传，确保优化层 fail 不破坏正确性。`--strict` 标志可恢复 500 行为（用于测试/调试）。
-- **proxy 日志噪音**：连续 TELOS 失败时旧代码每次打完整 traceback。新行为：首次失败完整 traceback，后续每条 WARNING 单行。
+- **harness §5 ordering violation** ([harness/openclaw.py](harness/openclaw.py), [harness/hermes.py](harness/hermes.py)): when a user message contains multiple content blocks, each block expands on its own into `(PIN, FOLD*, DROP*)`, and the old code concatenated them directly, producing `PIN, DROP, PIN, DROP, ...` which violates `pin* → fold* → drop*`. This is a bug guaranteed to trigger on real Claude Code traffic (multi-part content is the norm). Fix: a message-level `enforce_band_order` fallback sort.
+- **canonicalize bug (present in both SDK transport and proxy)**: the old code, after `bridge.mark()`, produced wire directly with `engine.emit(snapshot_ir, plan)`, **skipping `_canonicalize_ir`** (tools order, payload key order). This left the multi-server / builtin / user interleaved order of the tool array unstable, silently breaking the prefix cache.
+  - [proxy/pipeline.py](proxy/pipeline.py) switched to `bridge.emit_with_plan()`
+  - [scripts/telos_anthropic_transport.py](scripts/telos_anthropic_transport.py) switched to `bridge.emit_with_plan()`
+  - [scripts/telos_transport.py](scripts/telos_transport.py) keeps its custom chat-completions wire builder, but adds a `_canonicalize_ir(snapshot)` pass before feeding it
+- **multi-turn Bridge state always zeroed**: both the proxy and the SDK transport newed a `Bridge` every time, so R8 cache_creation accumulation and the real_requests count were always 0, and the refresh adaptive gate never triggered. `BridgeSessionState` externalizes these two fields to session scope; the proxy holds them in an LRU registry keyed by session_id; the transport holds them in an instance field.
+- **proxy 500 storm**: when the TELOS pipeline threw an exception the old code returned 500, and the Anthropic SDK crashed after 10 retries. Added a **passthrough fallback**: the default behavior degrades to raw pass-through, ensuring an optimization-layer failure does not break correctness. The `--strict` flag restores the 500 behavior (for testing/debugging).
+- **proxy log noise**: on consecutive TELOS failures the old code printed a full traceback each time. New behavior: full traceback on the first failure, then a single-line WARNING for each subsequent one.
 
 ### Changed
 
-- **`Bridge.__init__` 签名扩展**：新增可选 keyword-only 参数 `session_state`。默认为 `None`，内部 new 一个 → 完全向后兼容，现有调用方无需改动。
-- **`PipelineResult` 新增字段**：`cumulative_cache_creation`、`real_requests_since_refresh`。旧字段未变。
-- **`TelosOpenAITransport.__init__` 新增可选参数** `session_state`。
+- **`Bridge.__init__` signature extended**: adds an optional keyword-only parameter `session_state`. Defaults to `None`, newing one internally → fully backward-compatible, existing callers need no changes.
+- **`PipelineResult` adds fields**: `cumulative_cache_creation`, `real_requests_since_refresh`. The old fields are unchanged.
+- **`TelosOpenAITransport.__init__` adds an optional parameter** `session_state`.
 
 ### Removed
 
-- `proxy/server.py` 旧的 `uuid4()` 兜底已被内容派生 session-id 替换。
-- `Bridge._refpool` 和 `Bridge._stats` 实例属性内部改成转发到 `_state.refpool` / `_state.stats` 的 property。外部访问点未变（旧代码继续工作）。
+- The old `uuid4()` fallback in `proxy/server.py` has been replaced by content-derived session-id.
+- `Bridge._refpool` and `Bridge._stats` instance attributes are internally changed to properties forwarding to `_state.refpool` / `_state.stats`. External access points are unchanged (old code keeps working).
 
 ---
 
-## [0.1.0] — 2026-05-06（初始公开版本）
+## [0.1.0] — 2026-05-06 (initial public release)
 
-- TELOS 协议 Python 参考实现
-- 3 个 harness plugin: `openclaw` / `hermes` / `telos`
-- 5 个 engine adapter: `anthropic` / `openai` / `deepseek` / `vllm` / `sglang`
-- `Bridge` 5 原语：`place` / `pin` / `mark` / `fold` / `refresh`
-- `BidirectionalEngineAdapter` mixin 用于 vLLM / SGLang
-- `TelosOpenAITransport`（仅 OpenAI shape，给 telos / mini_swe_runner 用）
-- `test_smoke.py` 9 个测试覆盖 R1–R8 修复点
+- Python reference implementation of the TELOS protocol
+- 3 harness plugins: `openclaw` / `hermes` / `telos`
+- 5 engine adapters: `anthropic` / `openai` / `deepseek` / `vllm` / `sglang`
+- `Bridge` 5 primitives: `place` / `pin` / `mark` / `fold` / `refresh`
+- `BidirectionalEngineAdapter` mixin for vLLM / SGLang
+- `TelosOpenAITransport` (OpenAI shape only, for telos / mini_swe_runner)
+- `test_smoke.py` with 9 tests covering the R1–R8 fix points

@@ -7,6 +7,16 @@ The format follows Keep a Changelog; dates are absolute.
 
 ---
 
+## [0.1.3] — 2026-05-22
+
+Patch release published to PyPI.
+
+### Changed
+
+- Bumped package version to `0.1.3` in `pyproject.toml` for a new publishable artifact set.
+- Updated project metadata description to a concise repository summary.
+- Added LEAP Lab attribution and homepage link in README headers (English and Chinese).
+
 ## [Unreleased] — 2026-05-18
 
 This batch reworks the CLI experience: it upgrades `proxy` into a "gateway + multi-harness manager",

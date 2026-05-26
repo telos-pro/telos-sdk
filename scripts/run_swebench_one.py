@@ -44,7 +44,7 @@ from typing import Any
 # Path constants (change as needed)
 # ---------------------------------------------------------------------------
 
-TELOS_ROOT = Path("/Users/george/Code/tokenpilot-ai/telos")
+TELOS_ROOT = Path("/Users/george/Code/telos-pro")
 HERMES_ROOT = TELOS_ROOT / "vendor" / "hermes"
 TEF_ROOT = Path("/Users/george/Code/token-efficient-framework")
 DEFAULT_DATASET = TEF_ROOT / "benchmark" / "datasets" / "swe-bench-verified.jsonl"
@@ -151,6 +151,8 @@ def main() -> None:
                     help="run evaluate-patches.py after producing the patch")
     ap.add_argument("--keep-worktree", action="store_true",
                     help="don't tear down the worktree on exit (debug)")
+    ap.add_argument("--no-telos", action="store_true",
+                    help="bypass TELOS — use a plain OpenAI client (A/B baseline)")
     args = ap.parse_args()
 
     if not os.environ.get("OPENROUTER_API_KEY"):
@@ -170,7 +172,8 @@ def main() -> None:
 
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"telos-{args.instance}"
+    tag_prefix = "vanilla" if args.no_telos else "telos"
+    tag = f"{tag_prefix}-{args.instance}"
     session_id = str(uuid.uuid4())
 
     # ---- worktree ----
@@ -182,7 +185,10 @@ def main() -> None:
     # ---- import telos's vendored runner & patch its client ----
     from mini_swe_runner import MiniSWERunner  # type: ignore[import-not-found]
 
-    from telos.scripts.telos_transport import TelosOpenAITransport
+    from telos.scripts.telos_transport import (
+        TelosOpenAITransport,
+        VanillaOpenAITransport,
+    )
 
     usage_log = results_dir / f"{tag}.usage.jsonl"
     trace_log = results_dir / f"{tag}.prompt_trace.jsonl"
@@ -194,15 +200,25 @@ def main() -> None:
         command_timeout=args.command_timeout,
         verbose=False,
     )
-    runner.client = TelosOpenAITransport(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
-        session_id=session_id,
-        usage_log=str(usage_log),
-        prompt_trace_log=str(trace_log),
-        engine_name="deepseek",
-        harness_name="telos",
-    )
+    if args.no_telos:
+        runner.client = VanillaOpenAITransport(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            session_id=session_id,
+            usage_log=str(usage_log),
+            engine_name="deepseek",
+            harness_name="vanilla",
+        )
+    else:
+        runner.client = TelosOpenAITransport(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            session_id=session_id,
+            usage_log=str(usage_log),
+            prompt_trace_log=str(trace_log),
+            engine_name="deepseek",
+            harness_name="telos",
+        )
 
     prompt = (
         f"You are working in {work}.\n"
@@ -240,7 +256,7 @@ def main() -> None:
         "base_commit": base,
         "model": args.model,
         "session_id": session_id,
-        "harness": "telos",
+        "harness": "vanilla" if args.no_telos else "telos",
         "engine": "deepseek",
         "duration_s": duration,
         "patch_bytes": len(patch),
@@ -272,7 +288,7 @@ def main() -> None:
                 [sys.executable, str(evaluator),
                  "--results-dir", str(results_dir),
                  "--dataset", str(dataset_path),
-                 "--filter-agent", "telos",
+                 "--filter-agent", "vanilla" if args.no_telos else "telos",
                  "--max-parallel", "1"],
                 check=False, capture_output=True, text=True, timeout=1800,
             )

@@ -106,18 +106,16 @@ def run_one(instance_id: str, args: argparse.Namespace,
     ]
     if args.keep_worktree:
         cmd.append("--keep-worktree")
+    if args.no_telos:
+        cmd.append("--no-telos")
 
-    log_path = log_dir / f"telos-{instance_id}.runner.log"
+    tag_prefix = "vanilla" if args.no_telos else "telos"
+    log_path = log_dir / f"{tag_prefix}-{instance_id}.runner.log"
     t0 = time.time()
     with log_path.open("w") as logf:
         logf.write(f"$ {' '.join(cmd)}\n\n")
         logf.flush()
         env = os.environ.copy()
-        # let the subprocess import telos too
-        repo_root = str(Path(__file__).resolve().parents[2])
-        env["PYTHONPATH"] = (
-            repo_root + os.pathsep + env.get("PYTHONPATH", "")
-        ).rstrip(os.pathsep)
         try:
             rc = subprocess.run(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
@@ -133,7 +131,7 @@ def run_one(instance_id: str, args: argparse.Namespace,
     duration = int(time.time() - t0)
 
     # Read back the result.json that run_swebench_one wrote itself (if any)
-    result_path = Path(args.results_dir) / f"telos-{instance_id}.result.json"
+    result_path = Path(args.results_dir) / f"{tag_prefix}-{instance_id}.result.json"
     summary: dict[str, Any] = {}
     if result_path.exists():
         try:
@@ -164,7 +162,7 @@ def run_evaluator(args: argparse.Namespace) -> int:
         sys.executable, str(evaluator),
         "--results-dir", args.results_dir,
         "--dataset", args.dataset,
-        "--filter-agent", "telos",
+        "--filter-agent", "vanilla" if args.no_telos else "telos",
         "--max-parallel", str(args.eval_workers),
         "--python-bin", sys.executable,
     ]
@@ -174,12 +172,13 @@ def run_evaluator(args: argparse.Namespace) -> int:
     return subprocess.run(cmd, check=False).returncode
 
 
-def aggregate(instance_ids: list[str], results_dir: Path) -> dict[str, Any]:
+def aggregate(instance_ids: list[str], results_dir: Path, *,
+              tag_prefix: str = "telos") -> dict[str, Any]:
     agg = {"raw_input": 0, "cache_read": 0, "output": 0, "calls": 0}
     per_inst: list[dict[str, Any]] = []
     resolved = evaluated = 0
     for inst in instance_ids:
-        tag = f"telos-{inst}"
+        tag = f"{tag_prefix}-{inst}"
         usage = results_dir / f"{tag}.usage.jsonl"
         ev = results_dir / f"{tag}.eval.json"
         rec: dict[str, Any] = {"instance_id": inst}
@@ -283,6 +282,8 @@ def main() -> None:
                      help="concurrent runner workers (default: 4); "
                           "lower if OpenRouter 429s")
     run.add_argument("--keep-worktree", action="store_true")
+    run.add_argument("--no-telos", action="store_true",
+                     help="bypass TELOS — plain OpenAI client (A/B baseline)")
 
     ev = ap.add_argument_group("evaluate")
     ev.add_argument("--evaluate", action="store_true",
@@ -342,7 +343,8 @@ def main() -> None:
     if args.evaluate:
         run_evaluator(args)
 
-    report = aggregate(instances, results_dir)
+    report = aggregate(instances, results_dir,
+                       tag_prefix="vanilla" if args.no_telos else "telos")
     report.update({
         "model": args.model,
         "seed": args.seed,

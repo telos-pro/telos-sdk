@@ -471,3 +471,72 @@ class _CompletionsNS:
 
     def create(self, **kwargs):
         return self._t._do_create(kwargs)
+
+
+class VanillaOpenAITransport:
+    """Plain OpenAI client with the same duck interface and usage-log schema as
+    ``TelosOpenAITransport`` — but without TELOS in the path. Used for A/B
+    comparisons (``--no-telos`` runs).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://openrouter.ai/api/v1",
+        api_key: str | None = None,
+        session_id: str = "vanilla-session",
+        usage_log: str | None = None,
+        engine_name: str = "deepseek",
+        harness_name: str = "vanilla",
+    ):
+        from openai import OpenAI
+
+        self._inner = OpenAI(
+            base_url=base_url,
+            api_key=api_key or os.environ.get("OPENROUTER_API_KEY", ""),
+        )
+        self._session_id = session_id
+        self._usage_log = Path(usage_log) if usage_log else None
+        self._engine_name = engine_name
+        self._harness_name = harness_name
+        self._call_count = 0
+        self.chat = _VanillaChatNS(self)
+
+    def _do_create(self, kwargs: dict[str, Any]):
+        self._call_count += 1
+        model = kwargs.get("model", "")
+        t0 = time.time()
+        response = self._inner.chat.completions.create(**kwargs)
+        dt = time.time() - t0
+
+        usage_obj = getattr(response, "usage", None)
+        usage_dict = usage_obj.model_dump() if usage_obj is not None else {}
+        normalized = _normalize_usage(usage_dict)
+
+        if self._usage_log is not None:
+            self._usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with self._usage_log.open("a") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "session_id": self._session_id,
+                    "call_index": self._call_count,
+                    "model": model,
+                    "harness": self._harness_name,
+                    "latency_s": round(dt, 3),
+                    "raw_usage": usage_dict,
+                    "normalized": normalized,
+                }, ensure_ascii=False) + "\n")
+        return response
+
+
+class _VanillaChatNS:
+    def __init__(self, t: VanillaOpenAITransport):
+        self.completions = _VanillaCompletionsNS(t)
+
+
+class _VanillaCompletionsNS:
+    def __init__(self, t: VanillaOpenAITransport):
+        self._t = t
+
+    def create(self, **kwargs):
+        return self._t._do_create(kwargs)
